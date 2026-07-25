@@ -233,3 +233,26 @@ controls:
       cross-reference error it reports; commit the regenerated files.
     detector: delegated_catalog_build
     refs: [ADR-0081]
+
+  - id: DOC-011
+    title: Doc roots resolve, and document folders use plural names
+    owner: platform-architecture
+    scope: repository
+    status: active
+    severity: critical
+    applies_when: always
+    policy: >-
+      Document folders are plural - adrs/, rfcs/, prds/ - never adr/, rfc/, prd/ or product/.
+      A doc root the repository explicitly declares in extra_doc_roots must exist on disk.
+      Default roots may be absent, since no repository carries all of them.
+    rationale: >-
+      This control exists because the failure already happened. DEFAULT_DOC_ROOTS listed `adr`
+      and `rfc` while the directories were `adrs` and `rfcs`; missing roots were skipped
+      silently, so 82 architecture decision records in core-docs were never validated by any
+      check, and 943 links written against the documented singular name were dead. A root that
+      governs nothing must fail loudly, not resolve to an empty set.
+    remediation: >-
+      Rename the folder to its plural form and update inbound links, or fix the typo in
+      extra_doc_roots. See core-docs governance/DOCUMENTATION_GOVERNANCE.md#directory-naming.
+    detector: doc_root_naming
+    refs: [ADR-0081]

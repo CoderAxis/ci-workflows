@@ -69,10 +69,19 @@ DOCS_END = "<!-- END docs-governance-controls -->"
 # --- platform-wide documentation vocabulary (central defaults; a repo may EXTEND, never
 #     shrink, via its optional docs-governance config: extra_doc_types / extra_doc_roots) --
 DEFAULT_DOC_ROOTS = (
-    "adr", "architecture", "compliance", "contracts", "governance", "journeys", "messaging",
-    "onboarding", "operations", "playbooks", "policy", "product", "reference", "rfc", "rfcs",
-    "scalability", "security", "standards", "testing", "workflows",
+    "adrs", "architecture", "capabilities", "compliance", "contracts", "domains", "governance",
+    "journeys", "messaging", "onboarding", "operations", "playbooks", "policy", "prds",
+    "reference", "rfcs", "scalability", "security", "standards", "testing", "workflows",
 )
+# Document folders are plural. These singular names were in DEFAULT_DOC_ROOTS while the
+# directories on disk were already `adrs`/`rfcs`, so the roots resolved to nothing and were
+# skipped in silence: 82 ADRs in core-docs had never been validated. DOC-011 now rejects the
+# singular name outright rather than quietly governing nothing.
+SINGULAR_FOLDER_FIXES = {"adr": "adrs", "rfc": "rfcs", "prd": "prds", "product": "prds"}
+# Folders holding decision records, for DOC-006 supersession indexing. This was previously
+# spelled inline as ("adr", "rfc", "rfcs"), so every ADR under adrs/ fell outside the index
+# and supersession was structurally unverifiable for ADRs across the whole fleet.
+DECISION_FOLDERS = ("adrs", "rfcs")
 REQUIRED_KEYS = ("owner", "status", "last_reviewed", "review_cycle",
                  "related_services", "related_rfcs", "related_adrs")
 VALID_STATUSES = {"draft", "proposed", "accepted", "active", "deprecated", "superseded"}
@@ -271,6 +280,10 @@ class DocsRepo:
         self.grace = grace
         extra_roots = tuple(config.get("extra_doc_roots") or ())
         self.doc_roots = tuple(dict.fromkeys(DEFAULT_DOC_ROOTS + extra_roots))
+        # A default root is allowed to be absent - no repo has all of them. A root the repo
+        # explicitly declared must exist, because a typo there governs nothing and says so
+        # nowhere.
+        self.missing_declared_roots = tuple(r for r in extra_roots if not (root / r).is_dir())
         self.doc_types = DEFAULT_DOC_TYPES | set(config.get("extra_doc_types") or ())
         self.governed: list[DocFile] = self._load_governed()
         self.all_md: list[Path] = [p for p in sorted(root.rglob("*.md")) if ".git" not in p.parts]
@@ -320,6 +333,15 @@ class DocsRepo:
             if isinstance(escalation, str) and escalation.strip() and not ESCALATION_ALIAS_RE.match(escalation.strip()):
                 errors.append(f"{OWNER_DIRECTORY_PATH}: owner_registry '{slug.strip()}' has invalid "
                               f"escalation '{escalation.strip()}', expected '*-oncall' or '*-primary'")
+            # Contact metadata is optional, but a declared-and-empty contact is worse than an
+            # absent one: it projects into Backstage as a real route that pages nobody.
+            for contact_key in ("slack", "pagerduty"):
+                if contact_key in entry:
+                    value = entry.get(contact_key)
+                    if not isinstance(value, str) or not value.strip():
+                        errors.append(
+                            f"{OWNER_DIRECTORY_PATH}: owner_registry '{slug.strip()}' has an empty "
+                            f"'{contact_key}'; omit it or set a non-empty value")
             slugs.add(slug.strip())
         return slugs, errors
 
@@ -468,7 +490,7 @@ def supersession_integrity(repo: DocsRepo) -> Finding:
     records: dict[str, dict] = {}
     violations: list[str] = []
     for d in repo.governed:
-        if d.rel.parts[0] not in ("adr", "rfc", "rfcs"):
+        if d.rel.parts[0] not in DECISION_FOLDERS:
             continue
         decision_id = _decision_id(d.path)
         if decision_id is None or d.data is None:
@@ -566,7 +588,24 @@ def owner_registry_usage(repo: DocsRepo) -> Finding:
     return Finding(True, f"all {len(repo.owner_slugs)} registered owner slugs are in use")
 
 
+def doc_root_naming(repo: "DocsRepo") -> "Finding":
+    details = []
+    for rel in sorted(repo.missing_declared_roots):
+        details.append(f"declared doc root does not exist: {rel}/ "
+                       "(a typo here governs nothing and reports nothing)")
+    for name, plural in SINGULAR_FOLDER_FIXES.items():
+        for found in sorted(repo.root.rglob(name)):
+            if not found.is_dir() or ".git" in found.parts:
+                continue
+            details.append(f"{found.relative_to(repo.root)}/: document folders are plural - "
+                           f"rename to '{plural}'")
+    if details:
+        return Finding(False, f"{len(details)} doc-root naming/resolution problem(s)", details)
+    return Finding(True, f"all {len(repo.doc_roots)} doc roots resolve and use plural names")
+
+
 DETECTORS = {
+    "doc_root_naming": doc_root_naming,
     "frontmatter_structure": frontmatter_structure,
     "owner_registered": owner_registered,
     "controlled_vocabulary": controlled_vocabulary,

@@ -367,6 +367,7 @@ _Generated from `controls/docs-governance.yaml` by `scripts/check-docs-governanc
 | DOC-008 | In a repository that declares client scope (governance/CLIENT_SCOPE.md), no document may contain a forbidden sibling-client term (whole-word, case-insensitive) listed in that policy's `client_scope.forbidden_terms`. | critical | repository | client-scope | platform-security | active |
 | DOC-009 | Every slug registered in governance/OWNER_DIRECTORY.md should own at least one governed document. Advisory: unused slugs are reported, not blocked. | minor | repository | always | platform-architecture | active |
 | DOC-010 | A repository with a catalog/ directory must keep every catalog file valid against its JSON Schema, its cross-references resolvable, and its generated artifacts regenerated from source (no drift). Because the catalog domain model and its renderers are repo-specific, detection is DELEGATED to the repo's own scripts/build_catalog.py --check, invoked by the docs-governance reusable workflow - this checker never re-implements it. | critical | catalog | catalog | platform-infrastructure | active |
+| DOC-011 | Document folders are plural - adrs/, rfcs/, prds/ - never adr/, rfc/, prd/ or product/. A doc root the repository explicitly declares in extra_doc_roots must exist on disk. Default roots may be absent, since no repository carries all of them. | critical | repository | always | platform-architecture | active |
 
 <!-- END docs-governance-controls -->
 
