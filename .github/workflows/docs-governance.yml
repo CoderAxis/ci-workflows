@@ -1,0 +1,101 @@
+name: Documentation Governance
+
+# Reusable workflow — the executable form of ADR-0081 (Centralized, reusable
+# documentation-governance CI). Consumed by every governed docs repo via a thin caller:
+#
+#   jobs:
+#     docs-governance:
+#       uses: coderaxis/github-actions/.github/workflows/docs-governance.yml@v1
+#       with:
+#         docs_root: .          # or e.g. docs/core-docs for a docs-in-monorepo layout
+#
+# Generic markdown governance (frontmatter / owner directory / controlled vocabulary /
+# related-docs links / ADR-RFC supersession / freshness SLA / client-scope isolation) is
+# enforced by the pinned SSOT checker scripts/check-docs-governance.py against the caller.
+# Domain-specific catalog schema + generated-artifact drift is DELEGATED to the repo's own
+# scripts/build_catalog.py --check (DOC-010), never duplicated centrally.
+#
+# The checker + control catalog live ONCE here (SSOT) — docs repos vendor nothing. A
+# machine-readable JSON report is uploaded as an artifact for dashboards / compliance,
+# exactly like delivery-model-guard and dockerfile-standard.
+#
+# Versioning: consumers pin @v1 (moving major tag). Breaking changes bump @v2.
+
+on:
+  workflow_call:
+    inputs:
+      docs_root:
+        description: "Path to the governed docs repo root (use a subdir for a docs-in-monorepo layout)."
+        required: false
+        type: string
+        default: "."
+      fail_on:
+        description: "Minimum severity that fails CI (critical|major|minor)."
+        required: false
+        type: string
+        default: major
+      grace:
+        description: "Days of grace past a freshness due date before a doc counts as stale."
+        required: false
+        type: number
+        default: 0
+      actions_ref:
+        description: "Ref of coderaxis/github-actions providing the checker (defaults to the moving major tag)."
+        required: false
+        type: string
+        default: v1
+
+permissions:
+  contents: read
+
+jobs:
+  docs-governance:
+    name: Documentation governance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout docs repo (caller)
+        uses: actions/checkout@v4
+
+      - name: Checkout central checker (SSOT)
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/github-actions
+          ref: ${{ inputs.actions_ref }}
+          path: .docs-governance-tools
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependencies
+        run: python3 -m pip install --upgrade PyYAML jsonschema
+
+      - name: Enforce documentation governance (ADR-0081)
+        run: |
+          python3 .docs-governance-tools/scripts/check-docs-governance.py \
+            "${{ inputs.docs_root }}" \
+            --controls .docs-governance-tools/controls/docs-governance.yaml \
+            --fail-on "${{ inputs.fail_on }}" \
+            --grace "${{ inputs.grace }}" \
+            --report docs-governance-report.json
+
+      - name: Validate & drift-check the machine-readable catalog (DOC-010, delegated to the repo domain builder)
+        shell: bash
+        run: |
+          builder="${{ inputs.docs_root }}/scripts/build_catalog.py"
+          if [ -f "$builder" ]; then
+            echo "Running repo catalog builder in --check mode: $builder"
+            python3 "$builder" --check --root "${{ inputs.docs_root }}"
+          else
+            echo "No scripts/build_catalog.py under '${{ inputs.docs_root }}' — DOC-010 not applicable (skipped)."
+          fi
+
+      - name: Upload docs-governance report (machine-readable)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-governance-report
+          path: docs-governance-report.json
+          if-no-files-found: warn

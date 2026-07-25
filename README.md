@@ -36,6 +36,7 @@ live under `.github/workflows/` and are consumed via `uses:` at the **job** leve
 | [`schema-compatibility.yml`](.github/workflows/schema-compatibility.yml) | Schema-**path/layout** + schema-migration + canonical-outbox-conformance gate for every `*-core-postgres` repo. First, `check_schema_layout` fails fast (before touching any DB) if the repo carries a `.sql` file anywhere other than `schema/migrations/` (the migration chain), `sql/queries/` (sqlc query source), `schema/seed*.sql` (dev/role seed data), `seed/` (the platform seeding-standard tree), or `testdata/` (Go test fixtures) — or if `schema/migrations/` is missing the required `000001_init.up.sql` + `000001_init.down.sql` baseline pair (additional forward migrations, e.g. `000002_...`, are always welcome and never capped). It then spins an ephemeral `postgres:18`, applies the repo's migrations to HEAD via an auto-detecting ladder (goose round-trip test → `schema.GooseUpDSN` → embedded `schema.Migrate` → static lint; fixes the old "goose gap" where pure-goose repos never actually migrated), then runs the centrally-pinned canonical **outbox verifier** (RFC-0032 / ADR-0069) and fails closed on ANY semantic drift (columns/types/defaults/domain/PK/unique/checks/partitioning). Runs the SSOT [`scripts/schema-compat.sh`](scripts/schema-compat.sh) against the caller. The same layout rule is enforced locally/offline, fleet-wide at once, by `inboxxhq-infra`'s `scripts/check-migration-filename-consistency.py --only-core-postgres-init`. |
 | [`dockerfile-standard.yml`](.github/workflows/dockerfile-standard.yml) | Enterprise Dockerfile Standard gate (ADR-0072) — static analysis only, never runs `docker build`/pushes an image (keeps ADR-0051 DM-001 intact). Every caller declares its `capabilities` (comma list from `dockerfile-capability-matrix.yaml`: `http-api`, `db-owner`, `seed`, `backfill`, `canary`, `kafka-producer-dk`, `worker`, `gateway`, `stateless`). Checks the canonical two-stage layout, centrally pinned base-image versions, a numeric non-root `USER`, required OCI labels, exec-form `CMD`, `STOPSIGNAL`, a `db-owner` repo shipping a `dbtool` binary, capability-declaration-matches-repo-reality, no build-time codegen, no `ADD`, no freeform version ARGs, the BuildKit secret-mount pattern for private-module credentials, and an `apk add` package allow-list. Deliberately does not duplicate `seed-contract-check.yml`'s hard enforcement (its seed check here is advisory-only). Runs the SSOT [`scripts/check-dockerfile-standard.py`](scripts/check-dockerfile-standard.py) against the caller's own Dockerfile + repo structure. |
 | [`event-handling-compliance.yml`](.github/workflows/event-handling-compliance.yml) | Event-handling compliance gate — the executable form of `services/ENTERPRISE_NOTIFICATION_PATTERN.md` §7/§8. Every caller declares its family `role` (`P`\|`H`\|`DK`\|`Hybrid`\|`E`\|`Bridge`, per the §7 matrix): `P`/`H` (owns Postgres) may **never** construct a raw Kafka producer — domain events must flow exclusively through the transactional outbox (`platform-shared-go/outbox`) + Debezium CDC; `DK`/`Hybrid` may produce directly but only via the canonical `platform-shared-go/messaging/kafka` envelope, and every topic string found must be in the declared `allowed_topics`; `E`/`Bridge` are unrestricted (true exception / the sanctioned CDC-polling canonicalizer). Also reports (advisory, non-blocking) any raw `sarama.NewConsumerGroup` not wrapped by the shared `events.EnterpriseConsumer` (retry/DLQ/tracing/health). Pure static analysis via the SSOT [`scripts/event-compliance.sh`](scripts/event-compliance.sh) — no DB/broker needed. |
+| [`docs-governance.yml`](.github/workflows/docs-governance.yml) | Documentation-governance gate (ADR-0081) — the generic contract every governed docs repo shares: well-formed/complete frontmatter, `OWNER_DIRECTORY.md`-registered ownership, controlled vocabulary, `related_*` block-list style + Related-Docs links, ADR/RFC supersession reciprocity, a freshness SLA, and single-client scope isolation (only where `governance/CLIENT_SCOPE.md` is present). Machine-readable catalog schema + generated-artifact drift (DOC-010) is **delegated** to the repo's own `scripts/build_catalog.py --check` (domain logic stays local), never duplicated centrally. Shared logic, per-repo data; auto-detects catalog/client-scope capabilities. Runs the SSOT [`scripts/check-docs-governance.py`](scripts/check-docs-governance.py) against the caller (`--root`). |
 
 Each service repo carries only a thin caller:
 
@@ -302,6 +303,72 @@ _Generated from `controls/dockerfile-standard.yaml` by `scripts/check-dockerfile
 | DS-018 | `apk add` in the builder stage installs only from {ca-certificates, git, tzdata}; in the runtime stage, only from {ca-certificates, tzdata, wget}. Any other package requires an ADR amendment (recorded in the version matrix). | minor | all | platform-security | active |
 
 <!-- END dockerfile-standard-controls -->
+
+## Documentation governance (one contract for every governed docs repo)
+
+Policy SSOT (in `coderaxis/core-docs`): `ADR-0081` (Centralized, reusable
+documentation-governance CI).
+Implementation: [`scripts/check-docs-governance.py`](scripts/check-docs-governance.py) run by
+[`docs-governance.yml`](.github/workflows/docs-governance.yml) against every governed docs repo,
+and self-checked by [`docs-governance-guard.yml`](.github/workflows/docs-governance-guard.yml) on
+every change to the catalog / checker / fixture. Static analysis only — no repo code is executed.
+
+Every governed documentation repository (the shared-engine `core-docs`, and each client
+`*-platform-docs`) carries only a thin caller:
+
+```yaml
+# .github/workflows/docs-governance.yml
+on:
+  pull_request:
+    paths: ["**/*.md", "catalog/**", "generated/**", "governance/**", ".github/workflows/docs-governance.yml"]
+  push: { branches: ["**"] }
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  docs-governance:
+    uses: coderaxis/github-actions/.github/workflows/docs-governance.yml@v1
+    with:
+      docs_root: .        # a docs-in-monorepo repo passes its subdir, e.g. docs/core-docs
+      # fail_on: major    # default; tighten to `minor` once a repo is clean
+```
+
+**Shared logic, per-repo data.** The checker logic is central and identical; a repo owns only its
+data: `governance/OWNER_DIRECTORY.md`, an optional `governance/CLIENT_SCOPE.md`, and its
+`catalog/` + `catalog/schema/`. The checker **auto-detects** capabilities — no `CLIENT_SCOPE.md`
+skips client-scope isolation (so the shared engine, which legitimately names every client, is
+never subject to it); no `catalog/` skips catalog governance. A repo may **extend** (never shrink)
+the doc-type / doc-root vocabulary via an optional `governance/docs-governance.yaml`.
+
+### Control catalog (policy-as-code)
+
+The controls are declared in [`controls/docs-governance.yaml`](controls/docs-governance.yaml) —
+same policy-only-catalog / evolvable-detector split as `controls/delivery-model.yaml`. Each
+control carries `applies_when` (`always` | `client-scope` | `catalog`); a control is skipped when
+its capability is absent. **critical/major** controls fail CI; **minor** controls are advisory
+(`--fail-on`). Catalog schema + generated-artifact drift (**DOC-010**) is domain-specific and is
+**delegated** to the repo's own `scripts/build_catalog.py --check` invoked by the workflow, never
+re-implemented centrally. Control IDs (`DOC-NNN`) are **stable and permanent**. The table below is
+**generated** from the catalog (drift-gated via `--verify-docs`):
+
+<!-- BEGIN docs-governance-controls (generated: scripts/check-docs-governance.py --write-docs) -->
+
+_Generated from `controls/docs-governance.yaml` by `scripts/check-docs-governance.py --write-docs` — do not edit by hand._
+
+| Control | Policy | Severity | Scope | Applies when | Owner | Status |
+| ------- | ------ | -------- | ----- | ------------ | ----- | ------ |
+| DOC-001 | Every Markdown document under a governed doc root that carries YAML frontmatter must open and close its `---` fence, parse as a YAML mapping, contain no tab characters, and declare every required key (owner, status, last_reviewed, review_cycle, related_services, related_rfcs, related_adrs) with the correct type. | critical | document | always | platform-architecture | active |
+| DOC-002 | Each governed document's `owner` must be a slug defined in governance/OWNER_DIRECTORY.md. Template documents (under a templates/ path) are exempt. | critical | document | always | platform-architecture | active |
+| DOC-003 | `status`, `review_cycle`, and (when present) `doc_type`, `tier`, `service_tier`, `criticality` must be drawn from the platform's controlled vocabularies, and `last_reviewed` must be an ISO (YYYY-MM-DD) date. A repo may EXTEND doc_type/doc_roots via its optional docs-governance config, never shrink the shared vocabulary. | major | document | always | platform-architecture | active |
+| DOC-004 | related_services / related_rfcs / related_adrs must each be declared exactly once, in block-list style (`key:` followed by ` - item` lines) or empty `[]`. Legacy singular keys (related_rfc, related_adr) are forbidden. | major | document | always | platform-architecture | active |
+| DOC-005 | When any related_* frontmatter list is non-empty, the document body must contain a "Related Docs" section that links each referenced item. | major | document | always | platform-architecture | active |
+| DOC-006 | A decision record with status `superseded` must declare `superseded_by`; declaring `superseded_by` implies status `superseded`; and `supersedes`/`superseded_by` must be reciprocal and reference decision records that exist. | major | decision-record | always | platform-architecture | active |
+| DOC-007 | A document whose `review_cycle` is quarterly/semiannual/annual must have been reviewed within that window (today <= last_reviewed + cycle window + grace). `event-driven` docs have no calendar SLA and are exempt. | minor | document | always | platform-infrastructure | active |
+| DOC-008 | In a repository that declares client scope (governance/CLIENT_SCOPE.md), no document may contain a forbidden sibling-client term (whole-word, case-insensitive) listed in that policy's `client_scope.forbidden_terms`. | critical | repository | client-scope | platform-security | active |
+| DOC-009 | Every slug registered in governance/OWNER_DIRECTORY.md should own at least one governed document. Advisory: unused slugs are reported, not blocked. | minor | repository | always | platform-architecture | active |
+| DOC-010 | A repository with a catalog/ directory must keep every catalog file valid against its JSON Schema, its cross-references resolvable, and its generated artifacts regenerated from source (no drift). Because the catalog domain model and its renderers are repo-specific, detection is DELEGATED to the repo's own scripts/build_catalog.py --check, invoked by the docs-governance reusable workflow - this checker never re-implements it. | critical | catalog | catalog | platform-infrastructure | active |
+
+<!-- END docs-governance-controls -->
 
 ## Versioning
 

@@ -1,0 +1,235 @@
+# Documentation-governance control catalog (declarative policy-as-code).
+#
+# This is the single source of WHICH invariants the generic documentation-governance
+# contract enforces and their metadata: policy, rationale, remediation, severity, scope,
+# applicability, ownership, and lifecycle. The catalog defines POLICY ONLY - it never
+# describes how detection is implemented. Each control's `detector` key binds it to an
+# implementation in scripts/check-docs-governance.py, which may evolve WITHOUT any change to
+# this catalog. This mirrors controls/delivery-model.yaml and controls/dockerfile-standard.yaml.
+#
+# `applies_when` gates a control on a per-repo capability (mirrors dockerfile-standard's
+# `applies_to_capabilities`):
+#   always        - evaluated for every governed docs repo.
+#   client-scope  - evaluated only when the repo carries governance/CLIENT_SCOPE.md, so the
+#                   shared-engine repo (which legitimately names every client) is never
+#                   subject to single-client isolation.
+#   catalog       - evaluated only when the repo carries a catalog/ directory.
+#
+# Control IDs (DOC-NNN) are STABLE and permanent - never rename or recycle; retire a control
+# via `status: deprecated|superseded`. critical/major fail CI; minor is advisory (--fail-on).
+#
+# Policy SSOT (architecture is owned by the ADR; this catalog only enforces it):
+#   ADR-0081 - Centralized, reusable documentation-governance CI (coderaxis/core-docs)
+#
+# Deliberate non-duplication: catalog schema + generated-artifact DRIFT is domain-specific
+# (each repo's catalog models its own domain). DOC-010 declares the policy but DELEGATES
+# detection to the repo's own scripts/build_catalog.py --check, invoked by the reusable
+# workflow - never re-implemented here. "No duplicate logic" is a design requirement.
+
+version: 1
+domain: docs-governance
+policy_ssot:
+  - ADR-0081
+
+controls:
+  - id: DOC-001
+    title: Every governed document has well-formed, complete frontmatter
+    owner: platform-architecture
+    scope: document
+    status: active
+    severity: critical
+    applies_when: always
+    policy: >-
+      Every Markdown document under a governed doc root that carries YAML frontmatter must
+      open and close its `---` fence, parse as a YAML mapping, contain no tab characters, and
+      declare every required key (owner, status, last_reviewed, review_cycle, related_services,
+      related_rfcs, related_adrs) with the correct type.
+    rationale: >-
+      Frontmatter is the machine-readable contract every other doc control, index, and
+      generator reads. If it is malformed or incomplete, all downstream governance and
+      automation silently degrades.
+    remediation: >-
+      Add the missing/again fenced frontmatter block with all required keys; replace tabs with
+      spaces; ensure related_* keys are lists.
+    detector: frontmatter_structure
+    refs: [ADR-0081]
+
+  - id: DOC-002
+    title: Document owner is a slug registered in the owner directory
+    owner: platform-architecture
+    scope: document
+    status: active
+    severity: critical
+    applies_when: always
+    policy: >-
+      Each governed document's `owner` must be a slug defined in
+      governance/OWNER_DIRECTORY.md. Template documents (under a templates/ path) are exempt.
+    rationale: >-
+      Ownership is the escalation and accountability contract. An unregistered owner points to
+      a team that does not exist in the directory, so the doc has no real owner.
+    remediation: >-
+      Set `owner` to a registered slug, or add the team to governance/OWNER_DIRECTORY.md
+      (with scope + escalation) first.
+    detector: owner_registered
+    refs: [ADR-0081]
+
+  - id: DOC-003
+    title: Frontmatter uses only controlled vocabulary
+    owner: platform-architecture
+    scope: document
+    status: active
+    severity: major
+    applies_when: always
+    policy: >-
+      `status`, `review_cycle`, and (when present) `doc_type`, `tier`, `service_tier`,
+      `criticality` must be drawn from the platform's controlled vocabularies, and
+      `last_reviewed` must be an ISO (YYYY-MM-DD) date. A repo may EXTEND doc_type/doc_roots
+      via its optional docs-governance config, never shrink the shared vocabulary.
+    rationale: >-
+      Free-text status/type values break filtering, indexing, freshness SLAs, and cross-repo
+      reporting. Controlled vocabularies keep every repo's metadata comparable.
+    remediation: >-
+      Replace the value with an allowed one (see the checker's vocabulary constants), or extend
+      the vocabulary in your repo's docs-governance config if the new value is legitimate.
+    detector: controlled_vocabulary
+    refs: [ADR-0081]
+
+  - id: DOC-004
+    title: related_* keys use canonical block-list style
+    owner: platform-architecture
+    scope: document
+    status: active
+    severity: major
+    applies_when: always
+    policy: >-
+      related_services / related_rfcs / related_adrs must each be declared exactly once, in
+      block-list style (`key:` followed by `  - item` lines) or empty `[]`. Legacy singular
+      keys (related_rfc, related_adr) are forbidden.
+    rationale: >-
+      A single canonical list style keeps frontmatter diffable and machine-parseable and
+      prevents duplicate/flow-style declarations that parsers merge unpredictably.
+    remediation: >-
+      Rewrite the key as a two-space-indented block list, remove duplicate declarations, and
+      rename any legacy singular key to its plural form.
+    detector: related_key_hygiene
+    refs: [ADR-0081]
+
+  - id: DOC-005
+    title: Declared related documents are linked in a Related Docs section
+    owner: platform-architecture
+    scope: document
+    status: active
+    severity: major
+    applies_when: always
+    policy: >-
+      When any related_* frontmatter list is non-empty, the document body must contain a
+      "Related Docs" section that links each referenced item.
+    rationale: >-
+      Frontmatter references without body links are dead metadata - a reader cannot navigate
+      to the related decision/service, and link-graph tooling cannot verify the reference.
+    remediation: >-
+      Add a `## Related Docs` section with a Markdown link for each related_* entry.
+    detector: related_docs_links
+    refs: [ADR-0081]
+
+  - id: DOC-006
+    title: ADR/RFC supersession chains are consistent and reciprocal
+    owner: platform-architecture
+    scope: decision-record
+    status: active
+    severity: major
+    applies_when: always
+    policy: >-
+      A decision record with status `superseded` must declare `superseded_by`; declaring
+      `superseded_by` implies status `superseded`; and `supersedes`/`superseded_by` must be
+      reciprocal and reference decision records that exist.
+    rationale: >-
+      One-directional or dangling supersession links produce a decision history that lies -
+      readers follow a chain that does not exist or is not acknowledged on both sides.
+    remediation: >-
+      Add the reciprocal `supersedes`/`superseded_by` entry on the other record, set the
+      superseded record's status to `superseded`, and fix any reference to a missing ID.
+    detector: supersession_integrity
+    refs: [ADR-0081]
+
+  - id: DOC-007
+    title: Documents on a calendar review cycle are within their freshness SLA
+    owner: platform-infrastructure
+    scope: document
+    status: active
+    severity: minor
+    applies_when: always
+    policy: >-
+      A document whose `review_cycle` is quarterly/semiannual/annual must have been reviewed
+      within that window (today <= last_reviewed + cycle window + grace). `event-driven` docs
+      have no calendar SLA and are exempt.
+    rationale: >-
+      Documentation rots. A calendar SLA turns "we should review the docs sometime" into an
+      auditable signal. Advisory by default so a stale doc surfaces without blocking unrelated
+      work; tighten with --fail-on minor once a repo is clean.
+    remediation: >-
+      Re-review the document and bump `last_reviewed`, or move it to `event-driven` if it is
+      genuinely reviewed only when its subject changes.
+    detector: freshness_sla
+    refs: [ADR-0081]
+
+  - id: DOC-008
+    title: Single-client repositories do not name sibling clients
+    owner: platform-security
+    scope: repository
+    status: active
+    severity: critical
+    applies_when: client-scope
+    policy: >-
+      In a repository that declares client scope (governance/CLIENT_SCOPE.md), no document may
+      contain a forbidden sibling-client term (whole-word, case-insensitive) listed in that
+      policy's `client_scope.forbidden_terms`.
+    rationale: >-
+      Per-client documentation is delivered to that client. A sibling-client name is an
+      information-isolation breach and an unprofessional leak of one client's existence to
+      another.
+    remediation: >-
+      Remove the sibling-client reference, or move the genuinely shared concern to the
+      shared-engine repo (core-docs) and link it from there.
+    detector: client_scope_isolation
+    refs: [ADR-0081]
+
+  - id: DOC-009
+    title: Every registered owner slug is actually used
+    owner: platform-architecture
+    scope: repository
+    status: active
+    severity: minor
+    applies_when: always
+    policy: >-
+      Every slug registered in governance/OWNER_DIRECTORY.md should own at least one governed
+      document. Advisory: unused slugs are reported, not blocked.
+    rationale: >-
+      An owner directory that accumulates slugs owning nothing drifts from reality; the
+      advisory keeps it honest without blocking a legitimately pre-registered team.
+    remediation: >-
+      Assign the slug to the document(s) it owns, or remove it from the owner directory.
+    detector: owner_registry_usage
+    refs: [ADR-0081]
+
+  - id: DOC-010
+    title: Machine-readable catalog validates and its generated artifacts are current
+    owner: platform-infrastructure
+    scope: catalog
+    status: active
+    severity: critical
+    applies_when: catalog
+    policy: >-
+      A repository with a catalog/ directory must keep every catalog file valid against its
+      JSON Schema, its cross-references resolvable, and its generated artifacts regenerated
+      from source (no drift). Because the catalog domain model and its renderers are
+      repo-specific, detection is DELEGATED to the repo's own scripts/build_catalog.py --check,
+      invoked by the docs-governance reusable workflow - this checker never re-implements it.
+    rationale: >-
+      The catalog is the machine-readable source of truth; hand-edited generated tables or a
+      schema violation silently desynchronizes docs from the data every consumer reads.
+    remediation: >-
+      Run `python3 scripts/build_catalog.py` to regenerate artifacts and fix any schema or
+      cross-reference error it reports; commit the regenerated files.
+    detector: delegated_catalog_build
+    refs: [ADR-0081]
