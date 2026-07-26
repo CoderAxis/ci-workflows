@@ -7,13 +7,13 @@ Reference an action by its subfolder and a major-version tag:
 
 ```yaml
 - uses: coderaxis/github-actions/module-auth@v1
-  with:
-    app-id: ${{ secrets.CODERAXIS_APP_ID }}
-    private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+ with:
+ app-id: ${{ secrets.CODERAXIS_APP_ID }}
+ private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
 ```
 
 This repo is **public** so workflows in every owner (`coderaxis`, `InboxxHQ-CoderAxis`,
-`skentra`) can consume the actions. The actions contain **no secrets** — callers pass
+`a-second-client`) can consume the actions. The actions contain **no secrets** — callers pass
 credentials as inputs at call time.
 
 ## Actions
@@ -43,17 +43,17 @@ Each service repo carries only a thin caller:
 ```yaml
 # .github/workflows/deploy.yml
 on:
-  push: { branches: [main] }
-  workflow_dispatch: {}
+ push: { branches: [main] }
+ workflow_dispatch: {}
 permissions:
-  contents: read
-  id-token: write
+ contents: read
+ id-token: write
 jobs:
-  deploy:
-    uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yml@v1
-    with:
-      service_name: auth-service
-    secrets: inherit
+ deploy:
+ uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yml@v1
+ with:
+ service_name: auth-service
+ secrets: inherit
 ```
 
 Stateful service repos also carry a thin seed-contract caller:
@@ -61,14 +61,14 @@ Stateful service repos also carry a thin seed-contract caller:
 ```yaml
 # .github/workflows/seed-contract-check.yml
 on:
-  push: { branches: ["**"] }
-  pull_request:
-    paths: ["Dockerfile", "cmd/seed/**", "internal/**/seed/**", ".github/workflows/seed-contract-check.yml"]
+ push: { branches: ["**"] }
+ pull_request:
+ paths: ["Dockerfile", "cmd/seed/**", "internal/**/seed/**", ".github/workflows/seed-contract-check.yml"]
 permissions:
-  contents: read
+ contents: read
 jobs:
-  seed-contract:
-    uses: coderaxis/github-actions/.github/workflows/seed-contract-check.yml@v1
+ seed-contract:
+ uses: coderaxis/github-actions/.github/workflows/seed-contract-check.yml@v1
 ```
 
 Every `*-core-postgres` repo carries a thin schema-compatibility caller (the only
@@ -77,18 +77,18 @@ per-repo input is the outbox table name; omit it for a repo without an outbox):
 ```yaml
 # .github/workflows/schema-compatibility.yml
 on:
-  pull_request:
-    paths: ["schema/**", "sql/**", "sqlc.yaml", "go.mod", "go.sum", ".github/workflows/schema-compatibility.yml"]
-  push: { branches: ["**"] }
-  workflow_dispatch: {}
+ pull_request:
+ paths: ["schema/**", "sql/**", "sqlc.yaml", "go.mod", "go.sum", ".github/workflows/schema-compatibility.yml"]
+ push: { branches: ["**"] }
+ workflow_dispatch: {}
 permissions:
-  contents: read
+ contents: read
 jobs:
-  schema-compatibility:
-    uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yml@v1
-    with:
-      table: auth_service_outbox   # the repo's outbox table; omit to skip outbox conformance
-    secrets: inherit               # REQUIRED: inherits the module-read App creds for private go deps
+ schema-compatibility:
+ uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yml@v1
+ with:
+ table: auth_service_outbox # the repo's outbox table; omit to skip outbox conformance
+ secrets: inherit # REQUIRED: inherits the module-read App creds for private go deps
 ```
 
 Delivery logic changes are made **once** here and rolled out by moving the `@v1` tag —
@@ -103,18 +103,18 @@ matrix; `allowed_topics` is required only for `DK`/`Hybrid`):
 ```yaml
 # .github/workflows/event-handling-compliance.yml
 on:
-  pull_request:
-    paths: ["**/*.go", "go.mod", "go.sum", ".github/workflows/event-handling-compliance.yml"]
-  push: { branches: ["**"] }
-  workflow_dispatch: {}
+ pull_request:
+ paths: ["**/*.go", "go.mod", "go.sum", ".github/workflows/event-handling-compliance.yml"]
+ push: { branches: ["**"] }
+ workflow_dispatch: {}
 permissions:
-  contents: read
+ contents: read
 jobs:
-  event-handling-compliance:
-    uses: coderaxis/github-actions/.github/workflows/event-handling-compliance.yml@v1
-    with:
-      role: P                               # P | H | DK | Hybrid | E | Bridge
-      # allowed_topics: "inboxxhq.chat.messages"   # required for DK/Hybrid only
+ event-handling-compliance:
+ uses: coderaxis/github-actions/.github/workflows/event-handling-compliance.yml@v1
+ with:
+ role: P # P | H | DK | Hybrid | E | Bridge
+ # allowed_topics: "inboxxhq.chat.messages" # required for DK/Hybrid only
 ```
 
 Every Go backend deployable repo (`services/**`, `gateways/**`) also carries a thin
@@ -125,20 +125,20 @@ in `coderaxis/microservices`):
 ```yaml
 # .github/workflows/dockerfile-standard.yml
 on:
-  pull_request:
-    paths: ["Dockerfile", ".github/workflows/dockerfile-standard.yml"]
-  push: { branches: ["**"] }
-  workflow_dispatch: {}
+ pull_request:
+ paths: ["Dockerfile", ".github/workflows/dockerfile-standard.yml"]
+ push: { branches: ["**"] }
+ workflow_dispatch: {}
 permissions:
-  contents: read
+ contents: read
 jobs:
-  dockerfile-standard:
-    uses: coderaxis/github-actions/.github/workflows/dockerfile-standard.yml@v1
-    with:
-      capabilities: "http-api,db-owner,seed"   # from dockerfile-capability-matrix.yaml
-      # fail_on: minor                          # default is major; tighten once a repo's
-                                                 # remediation batch is green (see the
-                                                 # fleet audit report)
+ dockerfile-standard:
+ uses: coderaxis/github-actions/.github/workflows/dockerfile-standard.yml@v1
+ with:
+ capabilities: "http-api,db-owner,seed" # from dockerfile-capability-matrix.yaml
+ # fail_on: minor # default is major; tighten once a repo's
+ # remediation batch is green (see the
+ # fleet audit report)
 ```
 
 The canonical Dockerfile every repo derives from lives at
@@ -158,12 +158,12 @@ owned by the ADR/RFC (single source of truth) — the workflow implements it and
 guard **enforces** it:
 
 - Architecture SSOT (in the `core-docs` repo): `ADR-0051` (Artifact Promotion,
-  Digest-Pinned Deployment, and Registry Segregation) and `RFC-0020` (Supply-Chain
-  Integrity and Artifact Promotion).
+ Digest-Pinned Deployment, and Registry Segregation) and `RFC-0020` (Supply-Chain
+ Integrity and Artifact Promotion).
 - Implementation: [`deploy-reusable.yml`](.github/workflows/deploy-reusable.yml).
 - Enforcement: [`scripts/check-delivery-model.py`](scripts/check-delivery-model.py) run
-  by the [`delivery-model-guard`](.github/workflows/delivery-model-guard.yml) self-CI
-  workflow on every change to the reusable workflow or the checker.
+ by the [`delivery-model-guard`](.github/workflows/delivery-model-guard.yml) self-CI
+ workflow on every change to the reusable workflow or the checker.
 
 This closes the gap where the model existed only as header comments that could drift
 from the implementation. The checker is the **executable form of ADR-0051**.
@@ -211,7 +211,7 @@ dashboards / compliance, and regenerates its own docs:
 ```bash
 # evaluate + JSON report (uploaded as a CI artifact by the guard workflow)
 python3 scripts/check-delivery-model.py .github/workflows/deploy-reusable.yml \
-  --format json --report delivery-model-report.json
+ --format json --report delivery-model-report.json
 
 # regenerate the control table in this README from the catalog
 python3 scripts/check-delivery-model.py --write-docs README.md
@@ -221,15 +221,15 @@ Consumers can assert the behavioral contract via the workflow outputs:
 
 ```yaml
 jobs:
-  deploy:
-    uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yml@v1
-    with: { service_name: auth-service }
-    secrets: inherit
-  verify:
-    needs: deploy
-    runs-on: ubuntu-latest
-    steps:
-      - run: test "${{ needs.deploy.outputs.contract_version }}" = "v1"
+ deploy:
+ uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yml@v1
+ with: { service_name: auth-service }
+ secrets: inherit
+ verify:
+ needs: deploy
+ runs-on: ubuntu-latest
+ steps:
+ - run: test "${{ needs.deploy.outputs.contract_version }}" = "v1"
 ```
 
 ### API docs (Swagger) and the single artifact
@@ -244,12 +244,12 @@ Developers still get docs — just not from the deployed service:
 
 - **Locally**: `go run -tags swagger …` links the real docs implementation.
 - **Centrally**: `docs/openapi.json` is published to the API contract registry
-  (`inboxxhq-api-contracts`) and served from a central OpenAPI/Swagger portal.
+ (`inboxxhq-api-contracts`) and served from a central OpenAPI/Swagger portal.
 - **Defense-in-depth**: even if a swagger-tagged build were ever deployed, the runtime
-  `swaggerpolicy.DocsEnabled(environment)` policy (dev/staging on, preprod/prod off)
-  gates the endpoints. The compile-time exclusion is the primary control; this is the
-  backstop. (See `platform/openapiroutes` and `platform/swaggerpolicy` in
-  `platform-shared-go`.)
+ `swaggerpolicy.DocsEnabled(environment)` policy (dev/staging on, preprod/prod off)
+ gates the endpoints. The compile-time exclusion is the primary control; this is the
+ backstop. (See `platform/openapiroutes` and `platform/swaggerpolicy` in
+ `platform-shared-go`.)
 
 The delivery-model checker is the twin of
 [`scripts/check-seed-contract.py`](scripts/check-seed-contract.py): both encode an
@@ -319,18 +319,18 @@ Every governed documentation repository (the shared-engine `core-docs`, and each
 ```yaml
 # .github/workflows/docs-governance.yml
 on:
-  pull_request:
-    paths: ["**/*.md", "catalog/**", "generated/**", "governance/**", ".github/workflows/docs-governance.yml"]
-  push: { branches: ["**"] }
-  workflow_dispatch: {}
+ pull_request:
+ paths: ["**/*.md", "catalog/**", "generated/**", "governance/**", ".github/workflows/docs-governance.yml"]
+ push: { branches: ["**"] }
+ workflow_dispatch: {}
 permissions:
-  contents: read
+ contents: read
 jobs:
-  docs-governance:
-    uses: coderaxis/github-actions/.github/workflows/docs-governance.yml@v1
-    with:
-      docs_root: .        # a docs-in-monorepo repo passes its subdir, e.g. docs/core-docs
-      # fail_on: major    # default; tighten to `minor` once a repo is clean
+ docs-governance:
+ uses: coderaxis/github-actions/.github/workflows/docs-governance.yml@v1
+ with:
+ docs_root: . # a docs-in-monorepo repo passes its subdir, e.g. docs/core-docs
+ # fail_on: major # default; tighten to `minor` once a repo is clean
 ```
 
 **Shared logic, per-repo data.** The checker logic is central and identical; a repo owns only its
