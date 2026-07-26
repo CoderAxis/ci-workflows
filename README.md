@@ -411,6 +411,55 @@ _Generated from `controls/docs-governance.yaml` by `scripts/check-docs-governanc
 
 <!-- END docs-governance-controls -->
 
+## Workflow centralization (are the central workflows actually being used?)
+
+Every catalog above governs what a central workflow **does** once it is called. None of them asks
+whether a repository **calls** it at all — so a repo could keep an entire bespoke implementation of a
+workflow published here and violate nothing, because all the controls are scoped to the reusable
+workflow rather than to its adoption. Centralization was a convention, and conventions decay
+quietly: the local copy keeps passing while the central version gains a check or a fix, so the repo
+runs an older policy than the fleet believes it runs, and CI being green is exactly what hides it.
+
+[`controls/workflow-centralization.yaml`](controls/workflow-centralization.yaml) closes that gap for
+the part of the boundary that is unambiguous. The central set is **derived**, not listed: any
+workflow here that declares `on.workflow_call` is automatically in scope, so publishing or retiring
+a reusable workflow needs no edit to the catalog.
+
+```bash
+# check one repo, or many
+python3 scripts/check-workflow-centralization.py path/to/repo
+python3 scripts/check-workflow-centralization.py ../services/*/*  --format json
+
+# regenerate the control table in this README from the catalog
+python3 scripts/check-workflow-centralization.py --write-docs README.md
+```
+
+What it deliberately does **not** claim: WFC-001 matches on workflow filename, which is a strong
+signal with no false positives across the current fleet but is not proof — a repo that reimplements a
+central workflow's logic under an unrelated name is not detected. It also does not assert that every
+repo must call every published workflow, since applicability is a property of the repo (a docs repo
+has no schema to check) and a required-adoption matrix would duplicate the archetype registry
+(ADR-0064). The narrower rule is provable: if you keep your own copy of something published here,
+that is drift.
+
+There is still no ADR defining the intended **scope** of fleet-wide CI centralization — which
+workflow families belong here and which are legitimately per-repo. ADR-0081 covers documentation
+governance only. These controls enforce the boundary that is already clear and stay silent on the
+open question.
+
+### Control catalog (policy-as-code)
+
+<!-- BEGIN workflow-centralization-controls (generated: scripts/check-workflow-centralization.py --write-docs) -->
+
+_Generated from `controls/workflow-centralization.yaml` by `scripts/check-workflow-centralization.py --write-docs` — do not edit by hand._
+
+| Control | Policy | Severity | Scope | Owner | Status |
+| ------- | ------ | -------- | ----- | ----- | ------ |
+| WFC-001 | A consumer repository MUST NOT contain a workflow whose filename matches a workflow that coderaxis/github-actions publishes as reusable (`on.workflow_call`) unless that workflow is a caller of it — that is, unless it contains `uses: coderaxis/github-actions/.github/workflows/<name>@<ref>`. | major | caller-workflow | platform-infrastructure | active |
+| WFC-002 | A call to a coderaxis/github-actions reusable workflow MUST reference a major version tag (`@v1`, `@v2`, ...). It MUST NOT reference a branch (`@main`), an exact patch tag (`@v1.6.0`), or a commit SHA. | major | caller-workflow | platform-infrastructure | active |
+
+<!-- END workflow-centralization-controls -->
+
 ## Versioning
 
 - Consumers pin the **major** tag `@v1`, which is a moving tag updated to the latest `v1.x.y`.

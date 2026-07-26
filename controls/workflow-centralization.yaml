@@ -1,0 +1,104 @@
+# Workflow centralization control catalog (declarative policy-as-code).
+#
+# This is the single source of WHICH invariants govern the boundary between the workflows this
+# repository PUBLISHES as reusable and the copies that consumer repositories keep locally. As in
+# controls/delivery-model.yaml, the catalog defines POLICY ONLY: each control's `detector` key
+# binds it to an implementation in scripts/check-workflow-centralization.py, which may evolve
+# WITHOUT any change to this catalog.
+#
+# WHY THIS CATALOG EXISTS. Every other control here governs what a central workflow DOES once it
+# is called — DM-001..DM-013 check the delivery model, DS-001.. the Dockerfile standard, DOC-001..
+# the doc-governance contract. None of them ask whether a repository USES the central workflow at
+# all. That gap is not theoretical: a repo can keep an entire bespoke implementation of a workflow
+# the platform already publishes, and no check anywhere complains, because every control is scoped
+# to the reusable workflow rather than to its adoption. Centralization was therefore a convention,
+# and conventions decay silently — which is exactly the failure mode the platform's own governance
+# philosophy exists to prevent: a rule that lives only in prose gets violated eventually.
+#
+# SCOPE, AND WHAT THIS DELIBERATELY DOES NOT CLAIM. WFC-001 detects a local workflow that SHADOWS a
+# published reusable workflow — same workflow filename, but implementing the steps itself instead of
+# calling the central one. Filename correspondence is a strong signal and produces no false
+# positives in the current fleet, but it is a heuristic, not a proof: a repository that reimplements
+# a central workflow's logic under an unrelated filename is NOT detected, and this catalog does not
+# pretend otherwise. Closing that would require comparing behaviour, not names, and is a much larger
+# piece of work. Being loud about the 1:1 name collisions is the high-value 90%.
+#
+# It also does NOT assert that every repo must call every published workflow. Applicability is a
+# property of the repo (a docs repo has no schema to check), and inventing a required-adoption
+# matrix here would duplicate the archetype registry (ADR-0064). The rule is narrower and provable:
+# if you have your own copy of something we publish, that is drift.
+#
+# Control IDs (WFC-NNN) are STABLE and permanent — see controls/delivery-model.yaml header for the
+# full ID/lifecycle discipline; it applies identically here.
+#
+# Policy SSOT (architecture is owned by the decision records; this catalog only enforces them):
+#   ADR-0081 - Docs-governance CI centralization; established the reusable-workflow + thin-caller
+#              pattern, and the principle that shared logic lives centrally and per-repo data stays
+#              local. This catalog generalises that principle's ENFORCEMENT beyond docs governance.
+#   ADR-0051 - Artifact promotion; source of the "a delivery change is made ONCE centrally and
+#              rolled out by moving @v1, never by editing this file across the fleet" discipline
+#              that WFC-002 protects.
+#
+# KNOWN GAP this catalog does not close: there is no ADR that defines the intended SCOPE of
+# fleet-wide CI centralization — which workflow families should be central and which are legitimately
+# per-repo. ADR-0081 covers documentation governance only. Until such a decision exists these
+# controls enforce the boundary that is already unambiguous (do not shadow what we publish; pin the
+# supported tag) and stay silent on the genuinely open question.
+
+version: 1
+domain: workflow-centralization
+policy_ssot:
+  - ADR-0081
+  - ADR-0051
+
+controls:
+  - id: WFC-001
+    title: A repo does not keep a local implementation of a workflow the platform publishes as reusable
+    owner: platform-infrastructure
+    scope: caller-workflow
+    status: active
+    severity: major
+    applies_to_capabilities: []
+    policy: >-
+      A consumer repository MUST NOT contain a workflow whose filename matches a workflow that
+      coderaxis/github-actions publishes as reusable (`on.workflow_call`) unless that workflow is a
+      caller of it — that is, unless it contains
+      `uses: coderaxis/github-actions/.github/workflows/<name>@<ref>`.
+    rationale: >-
+      A local copy is a fork with none of a fork's visibility. It keeps passing while the central
+      version gains a check, a fix, or a security control, so the repo silently runs an older policy
+      than the fleet believes it runs, and the divergence is invisible precisely because CI is green.
+      Fixing the central workflow then does not fix the fleet, which defeats the reason the workflow
+      was centralised at all.
+    remediation: >-
+      Replace the local steps with a thin caller — `uses:
+      coderaxis/github-actions/.github/workflows/<name>@v1` plus the inputs it declares — and delete
+      the duplicated logic. If the repo genuinely needs behaviour the central workflow does not
+      offer, add it centrally as an input so every consumer benefits, rather than forking. If the
+      workflow is unrelated to the central one and merely shares its name, rename the local file.
+    detector: local_shadow_of_published_reusable
+    refs: [ADR-0081]
+
+  - id: WFC-002
+    title: Calls to a central reusable workflow pin the supported major tag
+    owner: platform-infrastructure
+    scope: caller-workflow
+    status: active
+    severity: major
+    applies_to_capabilities: []
+    policy: >-
+      A call to a coderaxis/github-actions reusable workflow MUST reference a major version tag
+      (`@v1`, `@v2`, ...). It MUST NOT reference a branch (`@main`), an exact patch tag (`@v1.6.0`),
+      or a commit SHA.
+    rationale: >-
+      The major tag is the rollout mechanism: a delivery change is published once and reaches the
+      fleet by moving `@v1`. `@main` opts a repo into unreleased changes and turns any central
+      commit into an untested fleet-wide deploy. A pinned patch tag has the opposite failure — the
+      repo stops receiving fixes and quietly becomes the oldest consumer, with nothing reporting
+      that it has been left behind. Both break the guarantee that one tag describes what the fleet
+      is running. This control currently has no findings; it exists to keep it that way.
+    remediation: >-
+      Change the ref to the major tag, e.g. `@v1`. If you pinned a patch tag to avoid a regression,
+      fix or revert the regression centrally instead and let the major tag move.
+    detector: central_call_pins_major_tag
+    refs: [ADR-0051]
