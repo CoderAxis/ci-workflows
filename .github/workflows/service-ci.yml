@@ -223,8 +223,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          GOWORK=off go test \
-            $(GOWORK=off go list ./... | grep -Ev '/tests/(contracts|integration)') \
+          # mapfile rather than an unquoted command substitution: a package path containing a space
+          # would otherwise split into two arguments and go test would fail on a path that does not
+          # exist, reported as a test failure rather than a quoting bug.
+          mapfile -t pkgs < <(GOWORK=off go list ./... | grep -Ev '/tests/(contracts|integration)')
+          GOWORK=off go test "${pkgs[@]}" \
             -coverprofile=coverage.out -covermode=atomic
           go tool cover -func=coverage.out | tail -5
 

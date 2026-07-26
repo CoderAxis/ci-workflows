@@ -611,7 +611,9 @@ jobs:
           echo "Canonical build started: ${BUILD_ID}"
           describe() { aws codebuild batch-get-builds --region "${AWS_REGION}" --ids "${BUILD_ID}"; }
           DEEPLINK="$(describe | jq -r '.builds[0].logs.deepLink // empty')"
-          [[ -n "${DEEPLINK}" ]] && echo "CodeBuild: ${DEEPLINK}" || true
+          if [[ -n "${DEEPLINK}" ]]; then
+            echo "CodeBuild: ${DEEPLINK}"
+          fi
           BUILD_JSON=""
           while :; do
             BUILD_JSON="$(describe)"

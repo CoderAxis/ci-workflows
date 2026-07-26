@@ -196,13 +196,15 @@ jobs:
           if [[ -z "${latest}" ]]; then range="HEAD"; base="0.0.0"; else range="${latest}..HEAD"; base="${latest#v}"; fi
           msgs="$(git log --no-merges --format='%s%n%b' "${range}" 2>/dev/null || true)"
 
+          # Quoted: `patch` and `major` are also real commands, so an unquoted assignment reads as a
+          # command substitution to shellcheck (SC2209) and is a genuine footgun in other contexts.
           bump=""
           if grep -qiE '^[a-z]+(\([^)]+\))?!:' <<<"${msgs}" || grep -qE 'BREAKING[ -]CHANGE' <<<"${msgs}"; then
-            bump=major
+            bump="major"
           elif grep -qE '^feat(\([^)]+\))?:' <<<"${msgs}"; then
-            bump=minor
+            bump="minor"
           elif grep -qE '^(fix|perf|refactor)(\([^)]+\))?:' <<<"${msgs}"; then
-            bump=patch
+            bump="patch"
           fi
 
           # ci/chore/docs/test commits are deliberately not releasable, so a docs-only merge does
@@ -255,7 +257,7 @@ jobs:
           # commit, so the pin must be a real tag before this module can claim a version of its own.
           if pseudo="$(grep -nE 'github\.com/coderaxis/[^ ]+ v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{14}-[0-9a-f]{12}' go.mod)"; then
             echo "::error::go.mod pins a platform module at a pseudo-version, so this module cannot be released:"
-            echo "${pseudo}" | sed 's/^/  /'
+            awk '{ print "  " $0 }' <<<"${pseudo}"
             echo "Re-pin to a released tag first (SHARED_CORE_RELEASE_AND_PROMOTION.md §8)."
             exit 1
           fi

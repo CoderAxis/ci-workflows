@@ -371,14 +371,15 @@ jobs:
           PR: ${{ steps.cpr.outputs.pull-request-number }}
         run: |
           set -euo pipefail
-          tier=patch
+          # Quoted: `patch` and `major` are also real commands (SC2209).
+          tier="patch"
           cv="${CURRENT#v}"; rv="${VERSION#v}"
           if [[ "${cv}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${rv}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             cmaj="${cv%%.*}"; rmaj="${rv%%.*}"
             cmin="$(cut -d. -f2 <<<"${cv}")"; rmin="$(cut -d. -f2 <<<"${rv}")"
-            if [[ "${rmaj}" -gt "${cmaj}" ]]; then tier=major
-            elif [[ "${rmaj}" == "0" && "${cmaj}" == "0" && "${rmin}" -gt "${cmin}" ]]; then tier=major
-            elif [[ "${rmin}" -gt "${cmin}" ]]; then tier=minor
+            if [[ "${rmaj}" -gt "${cmaj}" ]]; then tier="major"
+            elif [[ "${rmaj}" == "0" && "${cmaj}" == "0" && "${rmin}" -gt "${cmin}" ]]; then tier="major"
+            elif [[ "${rmin}" -gt "${cmin}" ]]; then tier="minor"
             fi
           fi
           echo "::notice::bump tier=${tier} (${CURRENT:-none} -> ${VERSION})"
