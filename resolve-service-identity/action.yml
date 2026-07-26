@@ -1,0 +1,120 @@
+name: Resolve service identity
+description: >-
+  Derive what the calling repository IS - service, language, tier, messaging role, Dockerfile
+  capabilities, coverage gate - from its immutable GitHub repository id and the platform-owned
+  catalog. Takes no facts from the caller, so nothing a repository states about itself can
+  select which gates apply to it.
+
+inputs:
+  catalog-owner:
+    description: "Account owning the catalog repo (the App token is minted per owner)."
+    required: false
+    default: coderaxis
+  catalog-repo:
+    description: "Repository holding the service catalog and standards."
+    required: false
+    default: coderaxis/core-docs
+  catalog-ref:
+    description: "Ref of the catalog to resolve against."
+    required: false
+    default: main
+  app-id:
+    description: "GitHub App id used to read the catalog."
+    required: true
+  private-key:
+    description: "GitHub App private key used to read the catalog."
+    required: true
+  coverage-override:
+    description: "Escape hatch for a tier the standard does not yet cover. Normally empty."
+    required: false
+    default: ""
+  assert-service:
+    description: >-
+      If set, fail unless the resolved service matches. Used to reject a caller-supplied
+      service_name that contradicts the catalog, while that input is being retired.
+    required: false
+    default: ""
+
+outputs:
+  service:
+    description: "Catalog service name. Authoritative; never taken from the caller."
+    value: ${{ steps.resolve.outputs.service }}
+  language:
+    description: "runtime.language from the catalog."
+    value: ${{ steps.resolve.outputs.language }}
+  archetype:
+    description: "Service archetype."
+    value: ${{ steps.resolve.outputs.archetype }}
+  tier:
+    description: "Service tier, which decides the coverage gate."
+    value: ${{ steps.resolve.outputs.tier }}
+  owner:
+    description: "Owning domain team."
+    value: ${{ steps.resolve.outputs.owner }}
+  deployable:
+    description: "True for a service/gateway/bff repo; false for a core module."
+    value: ${{ steps.resolve.outputs.deployable }}
+  owns_database:
+    description: "True when the service owns a Postgres schema."
+    value: ${{ steps.resolve.outputs.owns_database }}
+  seeds:
+    description: "True when the service ships seed data or logic."
+    value: ${{ steps.resolve.outputs.seeds }}
+  has_rest:
+    description: "True when the catalog declares a REST interface."
+    value: ${{ steps.resolve.outputs.has_rest }}
+  has_grpc:
+    description: "True when the catalog declares a gRPC interface."
+    value: ${{ steps.resolve.outputs.has_grpc }}
+  has_events:
+    description: "True when the catalog declares published or consumed events."
+    value: ${{ steps.resolve.outputs.has_events }}
+  coverage_threshold:
+    description: "Minimum coverage percent, derived from tier."
+    value: ${{ steps.resolve.outputs.coverage_threshold }}
+  role:
+    description: "Messaging role per ENTERPRISE_NOTIFICATION_PATTERN §7, derived not declared."
+    value: ${{ steps.resolve.outputs.role }}
+  capabilities:
+    description: "Dockerfile capability set from the platform's capability matrix."
+    value: ${{ steps.resolve.outputs.capabilities }}
+
+runs:
+  using: composite
+  steps:
+    - name: Mint a catalog-read token
+      id: catalog_token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ${{ inputs.catalog-owner }}
+
+    - name: Check out the catalog
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.catalog-repo }}
+        ref: ${{ inputs.catalog-ref }}
+        token: ${{ steps.catalog_token.outputs.token }}
+        path: .service-identity-catalog
+        sparse-checkout: |
+          catalog/services
+          standards/infrastructure
+
+    - name: Resolve
+      id: resolve
+      shell: bash
+      env:
+        COVERAGE_OVERRIDE: ${{ inputs.coverage-override }}
+        ASSERT_SERVICE: ${{ inputs.assert-service }}
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        python3 "${GITHUB_ACTION_PATH}/../scripts/resolve_service_identity.py" \
+          --catalog-root .service-identity-catalog \
+          ${ASSERT_SERVICE:+--assert-service "${ASSERT_SERVICE}"}
+
+    - name: Drop the catalog checkout
+      if: always()
+      shell: bash
+      run: rm -rf .service-identity-catalog

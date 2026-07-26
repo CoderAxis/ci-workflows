@@ -145,11 +145,39 @@ permissions:
   id-token: write # GitHub OIDC — assume the ci-build orchestrator role (no long-lived keys)
 
 concurrency:
-  group: inboxxhq-${{ inputs.service_name }}-build-${{ github.ref }}
+  group: inboxxhq-${{ github.repository }}-build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # Identity is derived here, not accepted. Inside a reusable workflow GITHUB_REPOSITORY_ID is
+  # the ORIGINAL caller, so calling this workflow directly gains nothing: a repo always resolves
+  # to its own catalog-bound identity and cannot publish as another service.
+  resolve:
+    name: Resolve service identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      service: ${{ steps.id.outputs.service }}
+      deployable: ${{ steps.id.outputs.deployable }}
+    steps:
+      - name: Derive identity from the immutable repository id
+        id: id
+        uses: coderaxis/github-actions/resolve-service-identity@v1
+        with:
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          assert-service: ${{ inputs.service_name }}
+
+      - name: Refuse to build a non-deployable repository
+        if: steps.id.outputs.deployable != 'true'
+        shell: bash
+        run: |
+          echo "::error::${{ steps.id.outputs.service }} resolved to a non-deployable repository"
+          echo "::error::(a core module). Delivery only publishes service, gateway and bff repos."
+          exit 1
+
   contract-gate:
+    needs: resolve
     name: Contract Gate (breaking-change detection)
     runs-on: ${{ fromJSON(inputs.runner) }}
     steps:
@@ -185,7 +213,7 @@ jobs:
           curl -sSL \
             -H "Authorization: Bearer ${CROSS_REPO_TOKEN}" \
             -H "Accept: application/vnd.github.raw" \
-            "https://api.github.com/repos/${{ inputs.contract_repo }}/contents/${{ inputs.service_name }}/latest.json" \
+            "https://api.github.com/repos/${{ inputs.contract_repo }}/contents/${{ needs.resolve.outputs.service }}/latest.json" \
             -o /tmp/published-contract.json
           echo "Downloaded published contract ($(wc -c < /tmp/published-contract.json) bytes)"
 
@@ -215,7 +243,7 @@ jobs:
 
   build-and-pin:
     name: Build canonical artifact + pin dev
-    needs: contract-gate
+    needs: [resolve, contract-gate]
     runs-on: ${{ fromJSON(inputs.runner) }}
     outputs:
       contract_version: ${{ steps.contract.outputs.version }}
@@ -513,7 +541,7 @@ jobs:
         with:
           role-to-assume: ${{ inputs.ci_build_role_arn }}
           aws-region: ${{ inputs.aws_region }}
-          role-session-name: gha-${{ inputs.service_name }}-build
+          role-session-name: gha-${{ needs.resolve.outputs.service }}-build
 
       - name: Ensure AWS CLI is available
         shell: bash
@@ -558,7 +586,7 @@ jobs:
         env:
           AWS_REGION: ${{ inputs.aws_region }}
           BUILD_PROJECT: ${{ inputs.build_project }}
-          SERVICE_NAME: ${{ inputs.service_name }}
+          SERVICE_NAME: ${{ needs.resolve.outputs.service }}
           GITHUB_TOKEN: ${{ secrets.CROSS_REPO_TOKEN || secrets.GH_PAT }}
         run: |
           set -euo pipefail
@@ -608,7 +636,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.CROSS_REPO_TOKEN || secrets.GH_PAT }}
-          SERVICE_NAME: ${{ inputs.service_name }}
+          SERVICE_NAME: ${{ needs.resolve.outputs.service }}
           INFRA_REPO: ${{ inputs.infra_repo }}
         run: |
           set -euo pipefail
