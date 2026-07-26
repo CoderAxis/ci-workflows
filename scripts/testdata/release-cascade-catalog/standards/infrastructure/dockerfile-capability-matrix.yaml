@@ -1,0 +1,8 @@
+# Minimal capability matrix for the release-cascade fixture. The resolver fails closed when a
+# deployable is absent here, because an empty capability set silently waives every Dockerfile
+# mandate — so the fixture must declare its deployable to exercise the DAG derivation at all.
+services:
+  - repo: inboxxhq-fixture-service
+    capabilities:
+      - db-owner
+      - seeder

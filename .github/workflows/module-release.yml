@@ -1,0 +1,440 @@
+name: Module release
+
+# The single release pipeline for every versioned Go module in the fleet: the `*-core`
+# libraries and the `*-core-postgres` schema adapters.
+#
+# A core repository contains ONE workflow, and it declares nothing about itself:
+#
+#   jobs:
+#     release:
+#       uses: coderaxis/github-actions/.github/workflows/module-release.yml@v1
+#       secrets: inherit
+#
+# WHAT REPLACED WHAT. Each core repo carried three local workflows: release.yml (version,
+# build, tag, release), sbom.yml (a second, separate SBOM run), and
+# reusable-notify-consumers.yml (a hand-maintained fan-out matrix). Sixty-five repositories
+# held sixty-five copies, and they disagreed:
+#
+#   - The fan-out was gated on a repo variable, ENABLE_CORE_RELEASE_AUTOMATION. Across the
+#     65 core modules it was true in 38, false in 15 and unset in 12. A release therefore
+#     either notified its consumers or silently did not, decided by a variable outside the
+#     reviewed code. That is an opt-out, not a gate.
+#   - In five families (announcement, billing, communication, compliance, notification) the
+#     core and its own adapter disagreed on that variable. The adapter would release and
+#     never tell the service, so the service kept an old adapter pin against a new core -
+#     manufacturing precisely the version skew SHARED_CORE_RELEASE_AND_PROMOTION.md §8
+#     warns about.
+#   - The matrices named repositories in an organisation the catalog does not model, so the
+#     platform's own model of "who consumes this" and the thing actually doing the
+#     notifying had diverged with nothing to detect it.
+#
+# So the fan-out is DERIVED from the catalog's dependency direction and is unconditional.
+# There is no enable variable. A module that is released always notifies everything the
+# catalog says depends on it, because a release whose consumers are optional is not a
+# release - it is a tag nobody hears about.
+#
+# THE GATES. Ordering is the correctness property here: the dependency direction is
+# core <- core-postgres <- deployable, so a module must never be published ahead of what it
+# pins. Two gates enforce that, and they run before the tag is created because a tag cannot
+# be withdrawn once consumers have fetched it:
+#
+#   1. No pseudo-version pins (§8). A pseudo-version means "an untagged commit", so
+#      releasing against one publishes a version whose own dependency cannot be resolved by
+#      anyone else.
+#   2. The upstream pin must already be released. An adapter tagged against an unreleased
+#      core is the documented auth failure: the adapter claims a core version that does not
+#      exist for consumers.
+#
+# Policy SSOT: SHARED_CORE_RELEASE_AND_PROMOTION.md (release/bump ordering),
+# VERSIONING_STRATEGY.md (conventional-commit versioning), RFC-0020 (supply-chain
+# integrity), ADR-0081 (central workflow + thin caller pattern).
+
+on:
+  workflow_call:
+    inputs:
+      catalog_owner:
+        description: >-
+          Account owning the catalog repo. Kept separate from catalog_repo because GitHub
+          expressions have no string-split function and the App token is minted per owner.
+        required: false
+        type: string
+        default: coderaxis
+      catalog_repo:
+        description: "Repository holding the service catalog (the SSOT for the dependency graph)."
+        required: false
+        type: string
+        default: coderaxis/core-docs
+      catalog_ref:
+        description: "Ref of the catalog repo to resolve against."
+        required: false
+        type: string
+        default: main
+      version:
+        description: >-
+          Explicit version, with or without the leading v. Left blank the version is computed
+          from conventional commits since the last tag, which is the normal path.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      CODERAXIS_APP_ID:
+        required: true
+      CODERAXIS_APP_PRIVATE_KEY:
+        required: true
+      # Distinct from the module-reader App above: dispatching into a consumer repository needs
+      # write, and minting that per target keeps a release from holding fleet-wide write.
+      RELEASE_BOT_APP_ID:
+        required: true
+      RELEASE_BOT_APP_PRIVATE_KEY:
+        required: true
+      SLACK_BOT_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialised, never cancelled: a cancelled run can leave a pushed tag with no GitHub Release
+  # and no consumer notification, which is the one state that needs a human to untangle.
+  group: module-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  # ── identity ──────────────────────────────────────────────────────────────────────────────
+  resolve:
+    name: Resolve module identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      service: ${{ steps.id.outputs.service }}
+      repo_kind: ${{ steps.id.outputs.repo_kind }}
+      module_path: ${{ steps.id.outputs.module_path }}
+      upstream_module: ${{ steps.id.outputs.upstream_module }}
+      dispatch_event: ${{ steps.id.outputs.dispatch_event }}
+      consumers: ${{ steps.id.outputs.consumers }}
+    steps:
+      - name: Derive identity from the immutable repository id
+        id: id
+        uses: coderaxis/github-actions/resolve-service-identity@v1
+        with:
+          catalog-owner: ${{ inputs.catalog_owner }}
+          catalog-repo: ${{ inputs.catalog_repo }}
+          catalog-ref: ${{ inputs.catalog_ref }}
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+
+      # A deployable is an image, not a module: it is published by service-ci.yml and pinned by
+      # digest. If one reaches this workflow it has been wired to the wrong pipeline, and the
+      # failure says so rather than tagging a repo that nothing can `go get`.
+      - name: Reject a repo that is not a releasable module
+        env:
+          KIND: ${{ steps.id.outputs.repo_kind }}
+          MODULE: ${{ steps.id.outputs.module_path }}
+        run: |
+          set -euo pipefail
+          if [[ "${KIND}" != "core" && "${KIND}" != "schema" ]]; then
+            echo "::error::repo_kind=${KIND} is not a releasable Go module. Deployables publish an" \
+                 "image through service-ci.yml and are pinned by digest, not tagged as modules."
+            exit 1
+          fi
+          [[ -n "${MODULE}" ]] || { echo "::error::catalog bound this repo but declares no module path"; exit 1; }
+
+  # ── release ───────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Verify, tag, and publish
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # push the tag, create the release
+      id-token: write # keyless provenance
+      attestations: write
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      releasable: ${{ steps.ver.outputs.releasable }}
+    env:
+      GOPRIVATE: github.com/coderaxis/*
+      GONOSUMDB: github.com/coderaxis/*
+      GONOSUMCHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # conventional-commit versioning needs the full history and all tags
+
+      - name: Resolve version (tag, explicit input, or conventional commits)
+        id: ver
+        env:
+          EXPLICIT: ${{ inputs.version }}
+          MODULE: ${{ needs.resolve.outputs.module_path }}
+        run: |
+          set -euo pipefail
+          semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+          # Pushing a tag by hand stays supported: the tag IS the decision, so it is validated
+          # and used as-is rather than recomputed.
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            V="${GITHUB_REF_NAME}"
+            [[ "${V}" =~ ${semver} ]] || { echo "::error::tag ${V} is not vMAJOR.MINOR.PATCH"; exit 1; }
+            { echo "version=${V}"; echo "releasable=true"; echo "createtag=false"; } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          latest="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1)"
+
+          if [[ -n "${EXPLICIT}" ]]; then
+            V="v${EXPLICIT#v}"
+            [[ "${V}" =~ ${semver} ]] || { echo "::error::version ${EXPLICIT} is not MAJOR.MINOR.PATCH"; exit 1; }
+            # Forward-only: re-releasing an existing tag would change what a pinned consumer
+            # resolves to, which is the one thing a version must never do.
+            if git rev-parse -q --verify "refs/tags/${V}" >/dev/null; then
+              echo "::error::${V} already exists; versions are immutable once published"; exit 1
+            fi
+            { echo "version=${V}"; echo "releasable=true"; echo "createtag=true"; } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [[ -z "${latest}" ]]; then range="HEAD"; base="0.0.0"; else range="${latest}..HEAD"; base="${latest#v}"; fi
+          msgs="$(git log --no-merges --format='%s%n%b' "${range}" 2>/dev/null || true)"
+
+          bump=""
+          if grep -qiE '^[a-z]+(\([^)]+\))?!:' <<<"${msgs}" || grep -qE 'BREAKING[ -]CHANGE' <<<"${msgs}"; then
+            bump=major
+          elif grep -qE '^feat(\([^)]+\))?:' <<<"${msgs}"; then
+            bump=minor
+          elif grep -qE '^(fix|perf|refactor)(\([^)]+\))?:' <<<"${msgs}"; then
+            bump=patch
+          fi
+
+          # ci/chore/docs/test commits are deliberately not releasable, so a docs-only merge does
+          # not fan a no-op bump PR across every consumer.
+          if [[ -z "${bump}" ]]; then
+            echo "::notice::no releasable commits since ${latest:-the beginning}; nothing to publish"
+            echo "releasable=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          IFS=. read -r MA MI PA <<< "${base}"
+          case "${bump}" in
+            major) MA=$((MA + 1)); MI=0; PA=0 ;;
+            minor) MI=$((MI + 1)); PA=0 ;;
+            patch) PA=$((PA + 1)) ;;
+          esac
+          { echo "version=v${MA}.${MI}.${PA}"; echo "releasable=true"; echo "createtag=true"; } >> "${GITHUB_OUTPUT}"
+          echo "::notice::${MODULE}: ${bump} bump, ${latest:-none} -> v${MA}.${MI}.${PA}"
+
+      - uses: actions/setup-go@v5
+        if: steps.ver.outputs.releasable == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Mint module-read token
+        id: modauth
+        if: steps.ver.outputs.releasable == 'true'
+        uses: coderaxis/github-actions/module-auth@v1
+        with:
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+
+      - name: Configure private module access
+        if: steps.ver.outputs.releasable == 'true'
+        env:
+          MOD_TOKEN: ${{ steps.modauth.outputs.token }}
+        run: |
+          set -euo pipefail
+          [[ -n "${MOD_TOKEN}" ]] || { echo "::error::no module-read token minted"; exit 1; }
+          git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      # ── ordering gates: both run BEFORE the tag, because a tag cannot be withdrawn ─────────
+      - name: Gate - no pseudo-version pins
+        if: steps.ver.outputs.releasable == 'true'
+        run: |
+          set -euo pipefail
+          # A pseudo-version (v0.0.0-20260518192409-9f39cdd313ed) names an UNTAGGED commit. Publish
+          # against one and the release is unresolvable for anyone who does not already have that
+          # commit, so the pin must be a real tag before this module can claim a version of its own.
+          if pseudo="$(grep -nE 'github\.com/coderaxis/[^ ]+ v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{14}-[0-9a-f]{12}' go.mod)"; then
+            echo "::error::go.mod pins a platform module at a pseudo-version, so this module cannot be released:"
+            echo "${pseudo}" | sed 's/^/  /'
+            echo "Re-pin to a released tag first (SHARED_CORE_RELEASE_AND_PROMOTION.md §8)."
+            exit 1
+          fi
+          echo "no pseudo-version pins on platform modules"
+
+      - name: Gate - upstream module is already released
+        if: steps.ver.outputs.releasable == 'true' && needs.resolve.outputs.upstream_module != ''
+        env:
+          UPSTREAM: ${{ needs.resolve.outputs.upstream_module }}
+        run: |
+          set -euo pipefail
+          # This adapter pins its core directly and the deployable pins BOTH, so the two must agree
+          # on one core version. Tagging the adapter against a core tag that was never published is
+          # the documented auth skew: the adapter advertises a dependency consumers cannot fetch.
+          pin="$(awk -v m="${UPSTREAM}" '$1 == m { print $2; exit }' go.mod)"
+          if [[ -z "${pin}" ]]; then
+            echo "::error::catalog says ${UPSTREAM} is upstream of this module, but go.mod does not require it."
+            echo "Either the catalog's dependency direction or this go.mod is wrong; they must agree."
+            exit 1
+          fi
+          echo "pinned ${UPSTREAM} at ${pin}"
+          if ! git ls-remote --exit-code --tags "https://${UPSTREAM}.git" "refs/tags/${pin}" >/dev/null 2>&1; then
+            echo "::error::${UPSTREAM} ${pin} is not a published tag. Release the upstream module first;"
+            echo "releases flow bottom-up (SHARED_CORE_RELEASE_AND_PROMOTION.md §1)."
+            exit 1
+          fi
+          echo "upstream ${UPSTREAM} ${pin} is published"
+
+      - name: Verify module tidy
+        if: steps.ver.outputs.releasable == 'true'
+        run: |
+          set -euo pipefail
+          GOWORK=off go mod tidy
+          # A go.mod that changes under tidy means the committed dependency set is not the one that
+          # actually builds, so the published version would not reproduce.
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Build
+        if: steps.ver.outputs.releasable == 'true'
+        run: |
+          set -euo pipefail
+          # Both target architectures, because the consuming images run on arm64 as well and a
+          # core that only compiles for amd64 breaks them at their build, not here.
+          GOWORK=off GOOS=linux GOARCH=amd64 go build ./...
+          GOWORK=off GOOS=linux GOARCH=arm64 go build ./...
+
+      - name: Test
+        if: steps.ver.outputs.releasable == 'true'
+        run: GOWORK=off go test -race -count=1 ./...
+
+      - name: Create tag
+        if: steps.ver.outputs.releasable == 'true' && steps.ver.outputs.createtag == 'true'
+        env:
+          V: ${{ steps.ver.outputs.version }}
+          SERVICE: ${{ needs.resolve.outputs.service }}
+        run: |
+          set -euo pipefail
+          git config user.name "coderaxis-release-bot[bot]"
+          git config user.email "coderaxis-release-bot[bot]@users.noreply.github.com"
+          git tag -a "${V}" -m "${GITHUB_REPOSITORY##*/} ${V} (${SERVICE})"
+          git push origin "${V}"
+
+      - name: Generate SBOM (SPDX)
+        if: steps.ver.outputs.releasable == 'true'
+        uses: anchore/sbom-action@v0
+        with:
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: true
+
+      - name: Generate SBOM (CycloneDX)
+        if: steps.ver.outputs.releasable == 'true'
+        uses: anchore/sbom-action@v0
+        with:
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+          upload-artifact: true
+
+      # Deliberately NOT continue-on-error. The per-repo release.yml tolerated attestation
+      # failure, which meant a release could be published with no provenance and still look
+      # green - so the supply-chain guarantee RFC-0020 claims was best-effort in practice.
+      - name: Attest build provenance
+        if: steps.ver.outputs.releasable == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            sbom.spdx.json
+            sbom.cyclonedx.json
+
+      - name: Create GitHub Release
+        if: steps.ver.outputs.releasable == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          files: |
+            sbom.spdx.json
+            sbom.cyclonedx.json
+          body: |
+            ## ${{ needs.resolve.outputs.module_path }} ${{ steps.ver.outputs.version }}
+
+            Released Go module for `${{ needs.resolve.outputs.service }}` consumers.
+            SPDX and CycloneDX SBOMs are attached and provenance is attested.
+
+  # ── fan-out ───────────────────────────────────────────────────────────────────────────────
+  # Unconditional by design. The only condition is "was anything released", never "is this repo
+  # allowed to notify" - that second question is what ENABLE_CORE_RELEASE_AUTOMATION answered
+  # differently in 65 repos.
+  notify-consumers:
+    name: Notify ${{ matrix.kind }} ${{ matrix.repository }}
+    needs: [resolve, release]
+    if: needs.release.outputs.releasable == 'true' && needs.resolve.outputs.consumers != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      # One unreachable consumer must not suppress the others; a partial fan-out is recoverable
+      # by re-dispatch, whereas a cancelled fan-out hides which targets were reached.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.consumers) }}
+    steps:
+      - name: Split the target into owner and repo
+        id: t
+        env:
+          TARGET: ${{ matrix.repository }}
+        run: |
+          set -euo pipefail
+          echo "owner=${TARGET%%/*}" >> "${GITHUB_OUTPUT}"
+          echo "repo=${TARGET##*/}" >> "${GITHUB_OUTPUT}"
+
+      # Scoped to the single target repository, so a release holds write on exactly the consumer
+      # it is notifying and not on the fleet.
+      - name: Mint release-bot token for this target
+        id: bottoken
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_APP_PRIVATE_KEY }}
+          owner: ${{ steps.t.outputs.owner }}
+          repositories: ${{ steps.t.outputs.repo }}
+
+      - name: Dispatch the bump
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ steps.bottoken.outputs.token }}
+          repository: ${{ matrix.repository }}
+          event-type: ${{ needs.resolve.outputs.dispatch_event }}
+          client-payload: |
+            {
+              "module": "${{ needs.resolve.outputs.module_path }}",
+              "version": "${{ needs.release.outputs.version }}",
+              "consumer_kind": "${{ matrix.kind }}",
+              "source_repository": "${{ github.repository }}",
+              "source_sha": "${{ github.sha }}"
+            }
+
+  # A dispatch that silently fails to land is how a consumer ends up a major version behind
+  # without anyone noticing, so an incomplete fan-out is surfaced rather than left in the log.
+  fan-out-report:
+    name: Report fan-out result
+    needs: [resolve, release, notify-consumers]
+    if: always() && needs.release.outputs.releasable == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any consumer was not notified
+        env:
+          RESULT: ${{ needs.notify-consumers.result }}
+          CONSUMERS: ${{ needs.resolve.outputs.consumers }}
+          VERSION: ${{ needs.release.outputs.version }}
+          MODULE: ${{ needs.resolve.outputs.module_path }}
+        run: |
+          set -euo pipefail
+          echo "released ${MODULE} ${VERSION}"
+          echo "consumers: ${CONSUMERS}"
+          if [[ "${RESULT}" != "success" ]]; then
+            echo "::error::fan-out result was '${RESULT}'. ${MODULE} ${VERSION} is published but at" \
+                 "least one consumer was not notified, so it will keep building against the old" \
+                 "version. Re-run this job to re-dispatch."
+            exit 1
+          fi
+          echo "every catalog-declared consumer was notified"

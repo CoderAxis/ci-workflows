@@ -1,0 +1,84 @@
+name: Release Cascade Guard
+
+# Self-CI for the release cascade itself: the dependency-DAG derivation in
+# resolve_service_identity.py and the pin policy in check_module_pins.py.
+#
+# The arrangement these replaced failed silently. A hand-copied fan-out matrix in 65 core repos,
+# gated by a per-repo variable, meant a release either notified its consumers or did not, with
+# nothing reporting which; and a pin policy that named its modules literally checked nothing at
+# all in a repo whose modules it had not been updated to list. Both states looked green.
+#
+# So the two cases asserted here are the ones that hide: a fan-out that notifies nobody, and a
+# gate that blocks nothing. If either detector stops firing, this fails here rather than fleet-wide.
+#
+# Policy SSOT: SHARED_CORE_RELEASE_AND_PROMOTION.md, ADR-0081. Twin of
+# workflow-centralization-guard.yml.
+
+on:
+  push:
+    paths:
+      - "scripts/resolve_service_identity.py"
+      - "scripts/check_module_pins.py"
+      - "scripts/test_release_cascade.py"
+      - "scripts/testdata/module-pins/**"
+      - "scripts/testdata/release-cascade-catalog/**"
+      - ".github/workflows/module-release.yml"
+      - ".github/workflows/module-bump.yml"
+      - ".github/workflows/release-cascade-guard.yml"
+      - "resolve-service-identity/action.yml"
+  pull_request:
+    paths:
+      - "scripts/resolve_service_identity.py"
+      - "scripts/check_module_pins.py"
+      - "scripts/test_release_cascade.py"
+      - "scripts/testdata/module-pins/**"
+      - "scripts/testdata/release-cascade-catalog/**"
+      - ".github/workflows/module-release.yml"
+      - ".github/workflows/module-bump.yml"
+      - ".github/workflows/release-cascade-guard.yml"
+      - "resolve-service-identity/action.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  release-cascade-guard:
+    name: DAG derivation + pin policy self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: DAG derivation and pin policy mutation tests
+        run: python3 scripts/test_release_cascade.py
+
+      # The composite action is what the workflows actually call, so an output added to the script
+      # but not surfaced by the action resolves to an empty string at runtime - and an empty
+      # consumers list is a fan-out that notifies nobody, silently.
+      - name: Every resolver output is exposed by the composite action
+        run: |
+          set -euo pipefail
+          missing=0
+          for key in service repo_kind module_path upstream_module dispatch_event consumers \
+                     required_modules language archetype tier owner deployable owns_database \
+                     seeds has_rest has_grpc has_events coverage_threshold role capabilities; do
+            if ! grep -qE "^  ${key}:" resolve-service-identity/action.yml; then
+              echo "::error::resolver emits '${key}' but resolve-service-identity/action.yml does not"
+              echo "expose it as an output, so callers would silently receive an empty value."
+              missing=1
+            fi
+          done
+          [ "${missing}" -eq 0 ] && echo "all resolver outputs are exposed by the action"
+
+      - name: Workflows lint clean
+        uses: raven-actions/actionlint@v2
+        with:
+          files: ".github/workflows/*.yml"

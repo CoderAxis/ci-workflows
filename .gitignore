@@ -1,0 +1,5 @@
+
+# Python bytecode. A compiled artifact was tracked here (scripts/__pycache__/*.pyc), which
+# makes every local run of a checker show up as a repository modification.
+__pycache__/
+*.py[cod]
