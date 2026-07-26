@@ -83,6 +83,27 @@ outputs:
   capabilities:
     description: "Dockerfile capability set from the platform's capability matrix."
     value: ${{ steps.resolve.outputs.capabilities }}
+  module_path:
+    description: "Go module path for a core or schema repo; empty for a deployable."
+    value: ${{ steps.resolve.outputs.module_path }}
+  upstream_module:
+    description: >-
+      Module this one pins directly and must not release ahead of. Set only for a schema
+      adapter, whose core pin is gated on being a released stable tag.
+    value: ${{ steps.resolve.outputs.upstream_module }}
+  dispatch_event:
+    description: "repository_dispatch type a release of this module emits (<name>-released)."
+    value: ${{ steps.resolve.outputs.dispatch_event }}
+  required_modules:
+    description: >-
+      JSON array of platform modules this repo must pin directly, replace-free, and at a stable
+      tag on a release branch. Read up the same DAG the fan-out reads down.
+    value: ${{ steps.resolve.outputs.required_modules }}
+  consumers:
+    description: >-
+      JSON array of {repository, kind} a release must notify, derived from the catalog's
+      dependency direction rather than a matrix hand-copied into each core repo.
+    value: ${{ steps.resolve.outputs.consumers }}
 
 runs:
   using: composite

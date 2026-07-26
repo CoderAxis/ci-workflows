@@ -32,6 +32,7 @@ directly gains an attacker nothing: it derives the caller's own identity either 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
 import sys
@@ -119,6 +120,85 @@ def resolve_capabilities(catalog_root: pathlib.Path, repo_name: str, *, deployab
     return caps
 
 
+def _repo_ref(block: dict) -> str:
+    """owner/name for a catalog repository block, or "" when the block is absent."""
+    org = (block or {}).get("organization")
+    name = (block or {}).get("name")
+    return f"{org}/{name}" if org and name else ""
+
+
+def resolve_release_targets(entry: dict, repo_kind: str) -> dict[str, str]:
+    """Derive the module path and the consumers a release must notify.
+
+    The dependency direction is fixed by SHARED_CORE_RELEASE_AND_PROMOTION.md §1:
+
+        core  <-  core-postgres  <-  deployable
+
+    so the fan-out follows the arrows. Releasing a core notifies the schema adapter AND the
+    deployable (both pin the core directly - the "diamond"); releasing the adapter notifies
+    only the deployable; a deployable is an image, not a module, so it releases nothing.
+
+    Deriving this from the catalog replaces a hand-maintained matrix duplicated into every
+    core repo. Those matrices drifted three ways at once: they named a second brand the
+    catalog does not model, they were gated by a per-repo ENABLE_CORE_RELEASE_AUTOMATION
+    variable that was true in 38 repos, false in 15 and unset in 12, and in five families
+    the core and its adapter disagreed - so the adapter released and never told the service,
+    manufacturing exactly the version skew §8 warns about. A derived fan-out cannot disagree
+    with itself, and cannot forget a consumer that the catalog knows about.
+    """
+    core = entry.get("repository") or {}
+    schema = entry.get("schema_repository") or {}
+    deployable = entry.get("deployable_repository") or {}
+
+    if repo_kind == "core":
+        source, downstream = core, [("schema", schema), ("deployable", deployable)]
+    elif repo_kind == "schema":
+        source, downstream = schema, [("deployable", deployable)]
+    else:
+        return {"module_path": "", "dispatch_event": "", "consumers": "[]"}
+
+    org = source.get("organization")
+    name = source.get("name")
+    if not (org and name):
+        return {"module_path": "", "dispatch_event": "", "consumers": "[]"}
+
+    consumers = [
+        {"repository": ref, "kind": kind}
+        for kind, block in downstream
+        if (ref := _repo_ref(block))
+    ]
+    return {
+        "module_path": f"github.com/{org}/{name}",
+        "dispatch_event": f"{name}-released",
+        "consumers": json.dumps(consumers, separators=(",", ":")),
+    }
+
+
+def resolve_required_modules(entry: dict, repo_kind: str) -> str:
+    """The platform modules this repo must pin DIRECTLY, as a JSON array.
+
+    Reading up the same DAG the fan-out reads down. A deployable pins both the core and the
+    schema adapter - the "diamond" - so both must be present, direct, replace-free and, on a
+    release branch, at a stable tag. An adapter pins only the core.
+
+    The per-repo check_core_module_versions.sh hardcoded its two module paths, so the policy
+    was correct only for the one repo it was copied into, and a service that pinned a core
+    it forgot to list was simply not checked. Derived from the catalog, the list cannot fall
+    out of step with what the service actually is.
+    """
+    core = _repo_ref(entry.get("repository") or {})
+    schema = _repo_ref(entry.get("schema_repository") or {})
+
+    if repo_kind == "deployable":
+        refs = [r for r in (core, schema) if r]
+    elif repo_kind == "schema":
+        refs = [r for r in (core,) if r]
+    else:
+        refs = []  # a core sits at the bottom of the DAG and pins no platform module
+
+    return json.dumps([f"github.com/{r}" for r in refs], separators=(",", ":"))
+
+
 def resolve(catalog_root: pathlib.Path, repo_full: str, repo_id: int,
             coverage_override: str = "") -> dict[str, str]:
     repo = repo_full.split("/", 1)[1] if "/" in repo_full else repo_full
@@ -157,9 +237,22 @@ def resolve(catalog_root: pathlib.Path, repo_full: str, repo_id: int,
     deployable = (repo_kind == "deployable"
                   if repo_kind != "unknown" else (want or repo).endswith(DEPLOYABLE_SUFFIXES))
 
+    # The adapter pins the core directly, so releasing the adapter against an unreleased or
+    # pseudo-versioned core is what produced the documented auth skew. The release workflow
+    # gates on this pin, so it needs to know which module is upstream of this one.
+    upstream = (
+        f"github.com/{(entry.get('repository') or {}).get('organization')}"
+        f"/{(entry.get('repository') or {}).get('name')}"
+        if repo_kind == "schema" and (entry.get("repository") or {}).get("name")
+        else ""
+    )
+
     return {
         "service": str(entry.get("name") or repo),
         "repo_kind": repo_kind,
+        "upstream_module": upstream,
+        "required_modules": resolve_required_modules(entry, repo_kind),
+        **resolve_release_targets(entry, repo_kind),
         "language": str((entry.get("runtime") or {}).get("language") or "unknown"),
         "archetype": str(entry.get("archetype") or "unresolved"),
         "tier": tier,

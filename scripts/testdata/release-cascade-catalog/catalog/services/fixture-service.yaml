@@ -1,0 +1,38 @@
+name: fixture-service
+domain: fixture
+owner: platform-infrastructure
+tier: platform-critical
+service_tier: tier-0
+brands: [inboxxhq]
+repository_pattern: "<brand>-fixture-service"
+# The three repositories a service is spread across. The release cascade reads this block to
+# derive both directions of the DAG: the fan-out downward (who must be notified) and the pin
+# requirements upward (what this repo must depend on directly).
+repository:
+  organization: coderaxis
+  name: fixture-core
+  github_id: 900000001
+schema_repository:
+  organization: coderaxis
+  name: fixture-core-postgres
+  github_id: 900000002
+deployable_repository:
+  organization: InboxxHQ-CoderAxis
+  name: inboxxhq-fixture-service
+  github_id: 900000003
+archetype: stateful-api-service
+runtime:
+  language: go
+interfaces:
+  rest:
+    - fixture-service.http.v1
+  events:
+    publishes:
+      - fixture.thing.happened.v1
+database:
+  mode: owned
+  schemas:
+    - name: fixture
+      migrationTool: goose
+seeding:
+  mechanism: argo-hook
