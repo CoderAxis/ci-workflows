@@ -120,6 +120,33 @@ jobs:
           private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
           coverage-override: ${{ inputs.coverage_threshold }}
 
+  # The language-specific jobs below are necessarily conditional, which means an unrecognised
+  # language would skip build, test, coverage and CodeQL and still report the pipeline green.
+  # Every repo in the fleet is Go today, so this guard costs nothing now and is the difference
+  # between "the first non-Go service is unbuilt and nobody notices" and "the first non-Go
+  # service fails loudly until this workflow learns its toolchain".
+  supported-language:
+    name: Language is supported
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Refuse a language this pipeline cannot build
+        shell: bash
+        env:
+          LANGUAGE: ${{ needs.resolve.outputs.language }}
+        run: |
+          set -euo pipefail
+          case "${LANGUAGE}" in
+            go) echo "language ${LANGUAGE}: build, test, coverage and CodeQL apply" ;;
+            *)
+              echo "::error::the catalog reports runtime.language=${LANGUAGE} for this repository,"
+              echo "::error::which service-ci.yml has no toolchain for. Build, test, coverage and"
+              echo "::error::CodeQL would all be skipped and this pipeline would still pass. Add"
+              echo "::error::the toolchain centrally before onboarding this repo."
+              exit 1 ;;
+          esac
+
   # ── universal standards ─────────────────────────────────────────────────────────────────────
   # Applies to every repository regardless of language or archetype. Nothing here reads a script
   # from the repository being checked; that is the whole point.
@@ -251,10 +278,20 @@ jobs:
       - uses: github/codeql-action/analyze@v3
 
   # ── contract gates, selected by what the catalog says the service exposes ────────────────────
+  # These run for EVERY repository, deliberately unconditioned.
+  #
+  # Gating them on catalog facts looked tidy and was wrong: schema-compatibility runs in 91 repos
+  # today and event-handling-compliance in 60, so gating on `owns_database` / `has_events` would
+  # have silently switched them off for roughly half the fleet — the checks would have kept
+  # reporting green while enforcing nothing, which is worse than deleting them outright.
+  #
+  # Running them unconditionally also makes each check assert the NEGATIVE rather than assume it.
+  # role=E is derived for a service the catalog says has no events, and the compliance check then
+  # verifies that claim against the code, catching a service that grew a Kafka producer without
+  # ever declaring it. A skipped job can never catch that.
   events:
     name: Event handling compliance
     needs: resolve
-    if: needs.resolve.outputs.has_events == 'true'
     uses: coderaxis/github-actions/.github/workflows/event-handling-compliance.yml@v1
     with:
       role: ${{ needs.resolve.outputs.role }}
@@ -262,13 +299,11 @@ jobs:
   seeding:
     name: Seeding contract
     needs: resolve
-    if: needs.resolve.outputs.seeds == 'true'
     uses: coderaxis/github-actions/.github/workflows/seed-contract-check.yml@v1
 
   schema:
     name: Schema compatibility
     needs: resolve
-    if: needs.resolve.outputs.owns_database == 'true'
     uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yml@v1
 
   dockerfile:
@@ -285,7 +320,7 @@ jobs:
   # Argo CD reconciles from there, so nothing below this line touches a cluster.
   artifact:
     name: Canonical build and GitOps pin
-    needs: [resolve, standards, build-test, events, seeding, schema, dockerfile]
+    needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema, dockerfile]
     if: |
       always()
       && github.event_name == 'push'
