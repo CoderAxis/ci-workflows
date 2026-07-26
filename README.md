@@ -56,6 +56,45 @@ jobs:
  secrets: inherit
 ```
 
+### Images composed from more than one repository
+
+Almost every image is built from its own repo alone, and those repos need nothing beyond the
+caller above. A repo whose image also composes **another** repository declares that in
+`.platform/build-inputs.json`; the caller stays the same size:
+
+```json
+{
+  "version": 1,
+  "inputs": [
+    { "repo": "coderaxis/core-docs", "ref": "main", "path": ".core-docs",
+      "reason": "shared canonical docs composed into the site" }
+  ]
+}
+```
+
+The reusable workflow reads that file from the calling repo, checks each input out **inside** the
+primary source tree at the declared path, resolves each `ref` to a concrete commit SHA, and reports
+the complete resolved set to the canonical build. Two consequences follow, and they are the point
+(ADR-0051 §8):
+
+- **The build is hermetic.** Every input is inside the uploaded source revision, so the Dockerfile
+  fetches nothing at build time and the artifact is reproducible from what was recorded.
+- **The cache key and the provenance cover every input.** A change in *any* declared input produces
+  a new key and therefore a new build, and the SLSA `materials` list names every revision that went
+  in. With a single input the key is unchanged — `src-<sha[:12]>`, exactly as before.
+
+Declaring inputs needs the App credentials that mint the short-lived cross-org read token:
+
+```yaml
+    secrets:
+      CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}        # writes the GitOps digest pin
+      CODERAXIS_APP_ID: ${{ secrets.CODERAXIS_APP_ID }}        # reads the declared inputs
+      CODERAXIS_APP_PRIVATE_KEY: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+```
+
+All declared inputs must currently share one owner, since one installation token is minted per
+build. That is a deliberate limit; it fails loudly rather than half-working.
+
 Stateful service repos also carry a thin seed-contract caller:
 
 ```yaml
@@ -200,6 +239,7 @@ _Generated from `controls/delivery-model.yaml` by `scripts/check-delivery-model.
 | DM-010 | The reusable workflow exposes a contract_version workflow_call output (versioned public API). | major | reusable-workflow | platform-infrastructure | active |
 | DM-011 | The reusable workflow exposes the promoted image_digest as a workflow_call output. | minor | reusable-workflow | platform-infrastructure | active |
 | DM-012 | The header references ADR-0051 and RFC-0020 so implementation and policy SSOT cannot drift apart. | minor | reusable-workflow | architecture-review-board | active |
+| DM-013 | A repository whose image is composed from more than its own source must be able to declare those inputs in a validated manifest. The workflow must resolve each declared input to an immutable commit SHA, report the complete resolved set to the canonical build, and must NOT compute or pass the image tag itself - the build executor derives the cache key, because only it knows the rest of what that key must cover. | critical | reusable-workflow | platform-infrastructure | active |
 
 <!-- END delivery-controls -->
 

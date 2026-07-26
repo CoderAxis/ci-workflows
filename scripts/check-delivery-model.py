@@ -87,6 +87,9 @@ PIN_ENV_RE = re.compile(r"(?:set-image|release-metadata|gitops[\w-]*)[\w.-]*\.sh
 QUALIFIED_OVERLAY_RE = re.compile(r"overlays/(staging|preprod|prod)\b")
 QUALIFIED_ENVS = ("staging", "preprod", "prod")
 FORBIDDEN_ROLE_RE = re.compile(r":role/[\w.+=,@-]*(deploy|terraform-apply)[\w.+=,@-]*", re.IGNORECASE)
+CB_ENV_OVERRIDE = "name={},value=".format  # CodeBuild start-build --environment-variables-override
+DECLARED_MANIFEST_RE = re.compile(r"build_inputs_manifest|MANIFEST_REL")
+DECLARED_RESOLVE_RE = re.compile(r"\bgit\b[^\n]*\brev-parse\b")
 DOCS_TAG_RES = [
     (re.compile(r"GO_BUILD_TAGS\s*=\s*[\"']?[^\"'\n]*swagger", re.IGNORECASE), "GO_BUILD_TAGS=...swagger"),
     (re.compile(r"name=GO_BUILD_TAGS,value=[^,\n]*swagger", re.IGNORECASE), "CodeBuild GO_BUILD_TAGS override =...swagger"),
@@ -297,6 +300,57 @@ def no_docs_build_variant(wf: Workflow) -> Finding:
     return Finding(True, "no swagger/docs build-variant tag injected into the canonical build")
 
 
+def declared_inputs_recorded(wf: Workflow) -> Finding:
+    """An image built from several repos must be keyed and attested on all of them.
+
+    Four things have to hold together, so all four are asserted rather than the presence of any
+    one of them: a repo can DECLARE extra inputs, the declaration is VALIDATED before it is acted
+    on, each input is RESOLVED to an immutable SHA, and the resolved set REACHES the build - with
+    the tag left to the build executor, which is the only component that knows everything else the
+    cache key must cover.
+    """
+    problems: list[str] = []
+    evidence: list[str] = []
+
+    wc_inputs = (wf.on_block().get("workflow_call") or {}).get("inputs") or {}
+    if "build_inputs_manifest" in wc_inputs:
+        evidence.append("declarable via inputs.build_inputs_manifest")
+    else:
+        problems.append("no build_inputs_manifest input, so a repo cannot declare its extra build inputs")
+
+    # Whatever reads the manifest must also be able to reject it. An unvalidated manifest is an
+    # unvalidated checkout path and an unvalidated repository.
+    reading = [b for b in wf.runs if DECLARED_MANIFEST_RE.search(b)]
+    if not reading:
+        problems.append("no step reads the declared-inputs manifest")
+    elif not any("::error::" in b for b in reading):
+        problems.append("the declared-inputs manifest is acted on without being validated")
+    else:
+        evidence.append("manifest schema-validated before use")
+
+    if any(DECLARED_RESOLVE_RE.search(b) for b in wf.runs):
+        evidence.append("inputs resolved to an immutable commit SHA")
+    else:
+        problems.append("declared inputs are never resolved to a commit SHA (a moving ref is not a revision)")
+
+    starts = [b for b in wf.runs if CANONICAL_BUILD_RE.search(b)]
+    if not starts:
+        problems.append("no canonical build invocation to carry the resolved input set")
+    else:
+        if any(CB_ENV_OVERRIDE("SOURCE_INPUTS") in b for b in starts):
+            evidence.append("resolved set passed as SOURCE_INPUTS")
+        else:
+            problems.append("the resolved input set is not passed to the canonical build as SOURCE_INPUTS")
+        if any(CB_ENV_OVERRIDE("IMAGE_TAG") in b for b in starts):
+            problems.append("the workflow passes IMAGE_TAG; the cache key must be derived by the build executor")
+        else:
+            evidence.append("no IMAGE_TAG passed (single author for the cache key)")
+
+    if problems:
+        return Finding(False, "; ".join(problems))
+    return Finding(True, "; ".join(evidence))
+
+
 def cites_policy_ssot(wf: Workflow) -> Finding:
     missing = [r for r in ("ADR-0051", "RFC-0020") if r not in wf.text]
     if missing:
@@ -317,6 +371,7 @@ DETECTORS = {
     "output_contract_version": output_contract_version,
     "output_image_digest": output_image_digest,
     "cites_policy_ssot": cites_policy_ssot,
+    "declared_inputs_recorded": declared_inputs_recorded,
 }
 
 
