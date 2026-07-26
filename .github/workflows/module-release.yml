@@ -196,6 +196,17 @@ jobs:
           if [[ -z "${latest}" ]]; then range="HEAD"; base="0.0.0"; else range="${latest}..HEAD"; base="${latest#v}"; fi
           msgs="$(git log --no-merges --format='%s%n%b' "${range}" 2>/dev/null || true)"
 
+          # Recovery: a prior run tagged HEAD but failed before creating the GitHub Release (the
+          # attestation API rejects user-owned private repos even with a valid App token). Re-run
+          # must finalize that tag, not compute a duplicate or skip as "nothing to publish".
+          if [[ -n "${latest}" ]] && [[ "$(git rev-parse "refs/tags/${latest}^{commit}" 2>/dev/null || true)" == "$(git rev-parse HEAD)" ]]; then
+            if ! gh release view "${latest}" >/dev/null 2>&1; then
+              echo "::notice::tag ${latest} exists at HEAD but has no GitHub Release; finalizing"
+              { echo "version=${latest}"; echo "releasable=true"; echo "createtag=false"; } >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          fi
+
           # Quoted: `patch` and `major` are also real commands, so an unquoted assignment reads as a
           # command substitution to shellcheck (SC2209) and is a genuine footgun in other contexts.
           bump=""
@@ -336,16 +347,67 @@ jobs:
           output-file: sbom.cyclonedx.json
           upload-artifact: true
 
-      # Deliberately NOT continue-on-error. The per-repo release.yml tolerated attestation
-      # failure, which meant a release could be published with no provenance and still look
-      # green - so the supply-chain guarantee RFC-0020 claims was best-effort in practice.
-      - name: Attest build provenance
+      # GitHub Attestations API availability is a platform constraint, not an auth one. The App
+      # mints valid tokens and attestations: write is granted, but GitHub still rejects persistence
+      # for user-owned private repositories. Authentication stays on the App; attestation posture
+      # is tiered by repo owner type. Deployable images continue to get cosign/SLSA in CodeBuild.
+      - name: Detect GitHub Attestations availability
+        id: attest
         if: steps.ver.outputs.releasable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner_type="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.owner.type')"
+          is_private="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.private')"
+          if [[ "${owner_type}" == "User" && "${is_private}" == "true" ]]; then
+            echo "available=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::GitHub Attestations API is unavailable for user-owned private repos."
+            echo "SBOMs attach to this release; image provenance uses CodeBuild cosign/SLSA."
+          else
+            echo "available=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Attest build provenance (GitHub Attestations)
+        if: steps.ver.outputs.releasable == 'true' && steps.attest.outputs.available == 'true'
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
             sbom.spdx.json
             sbom.cyclonedx.json
+
+      - name: Write module provenance record
+        if: steps.ver.outputs.releasable == 'true'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          MODULE: ${{ needs.resolve.outputs.module_path }}
+          ATTEST: ${{ steps.attest.outputs.available }}
+        run: |
+          set -euo pipefail
+          if [[ "${ATTEST}" == "true" ]]; then
+            note="GitHub Attestations predicate stored by GitHub for this release."
+          else
+            note="GitHub Attestations API unavailable for user-owned private repositories; deployable images use CodeBuild cosign/SLSA (RFC-0020)."
+          fi
+          jq -n \
+            --arg module "${MODULE}" \
+            --arg version "${VERSION}" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg repo "${GITHUB_REPOSITORY}" \
+            --arg builder "coderaxis/github-actions/.github/workflows/module-release.yml@v1" \
+            --arg run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg api "${ATTEST}" \
+            --arg note "${note}" \
+            '{
+              _type: "https://inboxxhq.com/provenance/module-release/v1",
+              module: $module,
+              version: $version,
+              materials: [{ uri: ("git+https://github.com/" + $repo + "@" + $commit), digest: { gitCommit: $commit } }],
+              builder: { id: $builder },
+              invocation: { url: $run },
+              github_attestations_api: $api,
+              note: $note
+            }' > provenance.module.json
 
       - name: Create GitHub Release
         if: steps.ver.outputs.releasable == 'true'
@@ -356,11 +418,14 @@ jobs:
           files: |
             sbom.spdx.json
             sbom.cyclonedx.json
+            provenance.module.json
           body: |
             ## ${{ needs.resolve.outputs.module_path }} ${{ steps.ver.outputs.version }}
 
             Released Go module for `${{ needs.resolve.outputs.service }}` consumers.
-            SPDX and CycloneDX SBOMs are attached and provenance is attested.
+            SPDX and CycloneDX SBOMs are attached.
+
+            **Provenance:** ${{ steps.attest.outputs.available == 'true' && 'GitHub Attestations (SLSA predicate stored by GitHub).' || 'GitHub Attestations unavailable on user-owned private repos; `provenance.module.json` is attached. Deployable images use CodeBuild cosign/SLSA (RFC-0020).' }}
 
   # ── fan-out ───────────────────────────────────────────────────────────────────────────────
   # Unconditional by design. The only condition is "was anything released", never "is this repo
