@@ -1,0 +1,11 @@
+# Compliant fixture: a thin caller. The filename matches a workflow the platform publishes as
+# reusable, and it calls that workflow at the supported major tag — so WFC-001 and WFC-002 both
+# hold. This is the shape every consumer repo should have.
+name: Schema Compatibility
+
+on:
+  pull_request: {}
+
+jobs:
+  schema-compatibility:
+    uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yml@v1

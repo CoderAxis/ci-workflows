@@ -1,0 +1,12 @@
+# WFC-002 violation fixture: calls the central workflow, but tracks a branch instead of the
+# supported major tag. `@main` turns every central commit into an untested fleet-wide deploy and
+# opts this repo out of the release discipline that moving `@v1` provides.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yml@main
