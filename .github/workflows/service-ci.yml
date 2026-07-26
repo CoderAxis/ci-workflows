@@ -99,6 +99,7 @@ jobs:
       tier: ${{ steps.id.outputs.tier }}
       owner: ${{ steps.id.outputs.owner }}
       deployable: ${{ steps.id.outputs.deployable }}
+      repo_kind: ${{ steps.id.outputs.repo_kind }}
       owns_database: ${{ steps.id.outputs.owns_database }}
       seeds: ${{ steps.id.outputs.seeds }}
       has_rest: ${{ steps.id.outputs.has_rest }}
@@ -334,20 +335,43 @@ jobs:
       - name: Required files, directories and Make targets
         shell: bash
         env:
-          DEPLOYABLE: ${{ needs.resolve.outputs.deployable }}
+          REPO_KIND: ${{ needs.resolve.outputs.repo_kind }}
         run: |
           set -euo pipefail
           rc=0
-          files="README.md Makefile go.mod"
-          # A core module is a library: it ships no image and declares no service contract.
-          [[ "${DEPLOYABLE}" == "true" ]] && files="${files} Dockerfile service.contract.yaml"
+          # Three repo kinds, three shapes. The old per-repo quality-check.yml only ever encoded
+          # the deployable one, and applying that set to the modules fails 27 of them on absences
+          # that are CORRECT: auth-core has no internal/ because it exports its packages by
+          # design, no schema module has a Makefile or a cmd/ at all, and neither kind has
+          # build/run/ci targets because there is nothing to build or run. Each set below is the
+          # intersection of what that kind actually has across the fleet, so it asserts a real
+          # standard instead of being a permanently red gate people learn to ignore.
+          case "${REPO_KIND}" in
+            deployable)
+              files="README.md Makefile go.mod Dockerfile service.contract.yaml"
+              dirs="cmd internal scripts tests docs"
+              targets="build run clean test lint fmt ci" ;;
+            core)
+              files="README.md go.mod"
+              dirs="docs"
+              targets="" ;;
+            schema)
+              # sqlc.yaml + schema/ + sql/ are what MAKE it a schema module, so requiring them is
+              # stronger than the generic set it used to be checked against.
+              files="README.md go.mod sqlc.yaml"
+              dirs="schema sql internal"
+              targets="" ;;
+            *)
+              echo "::error::repo_kind=${REPO_KIND} is not a shape this gate knows how to check"
+              exit 1 ;;
+          esac
           for f in ${files}; do
             [[ -f "${f}" ]] || { echo "::error::missing required file: ${f}"; rc=1; }
           done
-          for d in cmd internal scripts tests docs; do
+          for d in ${dirs}; do
             [[ -d "${d}" ]] || { echo "::error::missing required directory: ${d}"; rc=1; }
           done
-          for t in build run clean test lint fmt ci; do
+          for t in ${targets}; do
             make -n "${t}" >/dev/null 2>&1 || { echo "::error::missing required Make target: ${t}"; rc=1; }
           done
           exit "${rc}"

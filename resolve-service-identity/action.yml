@@ -52,8 +52,13 @@ outputs:
     description: "Owning domain team."
     value: ${{ steps.resolve.outputs.owner }}
   deployable:
-    description: "True for a service/gateway/bff repo; false for a core module."
+    description: "True for a service/gateway/bff repo; false for a core or schema module."
     value: ${{ steps.resolve.outputs.deployable }}
+  repo_kind:
+    description: >-
+      Which of a service's three repositories this is: deployable | core | schema. They are three
+      different shapes, so gates that inspect repo layout must switch on this.
+    value: ${{ steps.resolve.outputs.repo_kind }}
   owns_database:
     description: "True when the service owns a Postgres schema."
     value: ${{ steps.resolve.outputs.owns_database }}

@@ -63,13 +63,23 @@ def load_bindings(catalog_root: pathlib.Path) -> tuple[dict, dict]:
     expected: dict[int, str] = {}
     for path in sorted(services.glob("*.yaml")):
         entry = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        # deployable_repository first: it is the repo CI actually runs in. `repository` is the
-        # sibling core module, which shares the service's standards.
-        for block in (entry.get("deployable_repository") or {}, entry.get("repository") or {}):
+        # A service is spread across up to three repositories and CI runs in all of them:
+        # the deployable, the core Go module, and the core-postgres schema module. All three
+        # must be bound, or the unbound ones resolve to nothing and silently get no pipeline -
+        # which is exactly what happened to all 30 *-core-postgres repos before this.
+        for kind, key in (("deployable", "deployable_repository"),
+                          ("core", "repository"),
+                          ("schema", "schema_repository")):
+            block = entry.get(key) or {}
             gid = block.get("github_id")
             if gid:
                 by_id.setdefault(int(gid), entry)
-                expected.setdefault(int(gid), block.get("name"))
+                # The KIND is recorded alongside the name because these three repos are three
+                # different shapes, not one shape with optional parts. A deployable ships an
+                # image; a core module is a Go library; a schema module owns sql/ + sqlc.yaml and
+                # has no Makefile at all. Gating them on one requirement set fails 27 of them on
+                # absences that are correct.
+                expected.setdefault(int(gid), (block.get("name"), kind))
     return by_id, expected
 
 
@@ -126,7 +136,7 @@ def resolve(catalog_root: pathlib.Path, repo_full: str, repo_id: int,
 
     # The name is never used to resolve, but a mismatch means the repo was renamed without the
     # catalog being updated. That is drift between model and reality, so it stops the build.
-    want = expected.get(repo_id)
+    want, repo_kind = expected.get(repo_id, (None, "unknown"))
     if want and want != repo:
         raise Unresolved(
             f"repository id {repo_id} is bound to {want!r} in the catalog but GitHub reports "
@@ -142,11 +152,14 @@ def resolve(catalog_root: pathlib.Path, repo_full: str, repo_id: int,
     has_events = bool(events.get("publishes") or events.get("consumes"))
     owns_db = database.get("mode") == "owned"
     tier = str(entry.get("service_tier") or entry.get("tier") or "unknown")
-    # A core module is a library: linted and tested, never built into an image.
-    deployable = (want or repo).endswith(DEPLOYABLE_SUFFIXES)
+    # Which catalog block bound this id is authoritative. The name suffix is only a fallback for
+    # an entry that predates the kind-aware bindings.
+    deployable = (repo_kind == "deployable"
+                  if repo_kind != "unknown" else (want or repo).endswith(DEPLOYABLE_SUFFIXES))
 
     return {
         "service": str(entry.get("name") or repo),
+        "repo_kind": repo_kind,
         "language": str((entry.get("runtime") or {}).get("language") or "unknown"),
         "archetype": str(entry.get("archetype") or "unresolved"),
         "tier": tier,
