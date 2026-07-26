@@ -26,6 +26,20 @@ name: Reusable Deploy (canonical build + dev pin)
 #   canonical image (GO_BUILD_TAGS=""); developer docs come from local `-tags swagger`
 #   builds and the central contract registry, not the deployed service.
 #
+# DECLARED INPUTS (ADR-0051 §8 — an artifact is a function of its declared, immutable
+# inputs). Almost every repo's image is built from that repo alone, and for those
+# NOTHING below changes. A repo whose image also composes another repository declares
+# that in `.platform/build-inputs.json` (inputs.build_inputs_manifest); this workflow
+# then checks each declared input out INSIDE the primary source tree at a pinned ref,
+# resolves it to a concrete commit SHA, and reports the complete resolved input set to
+# the canonical build as SOURCE_INPUTS. That is what makes the build hermetic — the
+# uploaded source revision contains every input, and the Dockerfile never fetches
+# anything — and it is what lets the build's cache key and its provenance be functions
+# of ALL the inputs rather than of one of them.
+#
+# This workflow stays generic: it knows "there may be declared inputs", never what any
+# of them are.
+#
 # Versioning: consumers pin @v1 (moving major tag). Breaking changes bump @v2. The
 # workflow also exposes a `contract_version` output so callers can assert the behavioral
 # contract they built against.
@@ -80,6 +94,14 @@ on:
         required: false
         type: string
         default: '["self-hosted", "linux", "x64", "inboxxhq-deploy"]'
+      build_inputs_manifest:
+        description: >-
+          Path, relative to the calling repo, of the declared build-inputs manifest. When the file
+          is absent the build has exactly one input (the calling repo) and behaves identically to
+          before this input existed — which is the case for every repo that has not opted in.
+        required: false
+        type: string
+        default: .platform/build-inputs.json
     outputs:
       # The reusable workflow is a public API for ~40 consuming repos: version its
       # behavioral contract explicitly. Bump on any breaking change to inputs/outputs
@@ -102,6 +124,20 @@ on:
         required: false
       GH_PAT:
         description: "Optional fallback for CROSS_REPO_TOKEN."
+        required: false
+      # TWO CREDENTIALS, TWO JOBS — deliberately, not by accident.
+      #   CROSS_REPO_TOKEN  writes: it pushes the digest pin to the infra GitOps repo, and is handed
+      #                     to the canonical build for private Go module fetch. Long-lived.
+      #   CODERAXIS_APP_*   reads: mints a ~1h GitHub App installation token used only to check out
+      #                     the repos a build declares as inputs. This is the credential the platform
+      #                     already uses for cross-org reads (see module-auth/action.yml, which
+      #                     exists to replace long-lived PATs), so a new read-only cross-repo path
+      #                     must not reintroduce one. Only multi-input builds need these.
+      CODERAXIS_APP_ID:
+        description: "GitHub App id for reading declared build inputs (short-lived installation token). Multi-input builds only."
+        required: false
+      CODERAXIS_APP_PRIVATE_KEY:
+        description: "GitHub App private key PEM matching CODERAXIS_APP_ID. Multi-input builds only."
         required: false
 
 permissions:
@@ -207,6 +243,129 @@ jobs:
         with:
           path: ${{ github.event.repository.name }}
 
+      # --- declared build inputs -------------------------------------------------------------
+      # Read + schema-validate the calling repo's manifest. Kept inline rather than in a script
+      # under scripts/: only the CALLING repo is checked out here, so a script in this repo would
+      # not be on disk. No manifest => count=0 => every step below is a no-op and the build is
+      # exactly the single-input build it has always been.
+      - name: Read declared build inputs
+        id: declared
+        shell: bash
+        env:
+          MANIFEST_REL: ${{ inputs.build_inputs_manifest }}
+        run: |
+          set -euo pipefail
+          MANIFEST="${{ github.event.repository.name }}/${MANIFEST_REL}"
+          if [[ ! -f "${MANIFEST}" ]]; then
+            {
+              echo "count=0"
+              echo "plan=[]"
+              echo "owner="
+            } >> "${GITHUB_OUTPUT}"
+            echo "No ${MANIFEST_REL} in this repo — single-input build (the case for every repo that has not opted in)."
+            exit 0
+          fi
+          echo "Declared build inputs: ${MANIFEST}"
+          python3 - "${MANIFEST}" <<'PY' >> "${GITHUB_OUTPUT}"
+          import json, re, sys
+          from pathlib import PurePosixPath
+
+          path = sys.argv[1]
+          try:
+              doc = json.loads(open(path, encoding="utf-8").read())
+          except Exception as exc:
+              sys.exit(f"::error::declared build inputs: {path} is not valid JSON: {exc}")
+          if not isinstance(doc, dict) or doc.get("version") != 1:
+              sys.exit(f"::error::declared build inputs: {path}: 'version' must be 1")
+          entries = doc.get("inputs")
+          if not isinstance(entries, list) or not entries:
+              sys.exit(f"::error::declared build inputs: {path}: 'inputs' must be a non-empty list")
+
+          repo_re = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+          plan, owners, seen = [], set(), set()
+          for i, entry in enumerate(entries):
+              where = f"{path}: inputs[{i}]"
+              if not isinstance(entry, dict):
+                  sys.exit(f"::error::declared build inputs: {where} must be an object")
+              repo, ref, dest = entry.get("repo"), entry.get("ref"), entry.get("path")
+              if not isinstance(repo, str) or not repo_re.match(repo):
+                  sys.exit(f"::error::declared build inputs: {where}.repo must be 'owner/name'; got {repo!r}")
+              if not isinstance(ref, str) or not ref.strip():
+                  sys.exit(f"::error::declared build inputs: {where}.ref must be a non-empty string")
+              if not isinstance(dest, str) or not dest.strip():
+                  sys.exit(f"::error::declared build inputs: {where}.path must be a non-empty string")
+              # The checkout must land INSIDE the primary source tree, so the existing tar step
+              # picks it up unchanged and the uploaded revision really is the whole build context.
+              parts = PurePosixPath(dest).parts
+              if dest.startswith("/") or ".." in parts or dest.strip() in (".", "./"):
+                  sys.exit(f"::error::declared build inputs: {where}.path must be relative and inside the repo; got {dest!r}")
+              if dest in seen:
+                  sys.exit(f"::error::declared build inputs: {where}.path {dest!r} is declared twice")
+              seen.add(dest)
+              owners.add(repo.split("/", 1)[0])
+              plan.append({"repo": repo, "ref": ref, "path": dest})
+
+          # One installation token is minted per build, so every declared input must live under one
+          # owner. A deliberate limit that fails loudly rather than half-working.
+          if len(owners) > 1:
+              sys.exit(f"::error::declared build inputs: {path}: all inputs must share one owner; got {sorted(owners)}")
+
+          print(f"count={len(plan)}")
+          print(f"owner={owners.pop()}")
+          print("plan=" + json.dumps(plan, separators=(",", ":"), sort_keys=True))
+          PY
+
+      # Short-lived (~1h) App installation token, minted only when something is actually declared.
+      # This is the platform's cross-org READ credential (module-auth/action.yml wraps the same
+      # action for private Go modules); the underlying action is used directly here because this
+      # job needs a token for a clone, not a global `git config url.insteadOf` rewrite left behind
+      # on a shared self-hosted runner.
+      - name: Mint a read token for the declared inputs
+        id: input_token
+        if: steps.declared.outputs.count != '0'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          owner: ${{ steps.declared.outputs.owner }}
+
+      # Always runs: even a single-input build declares its input set, so provenance can state it
+      # rather than leave it implied. `ref` is the input SPECIFICATION (a branch is fine); the
+      # resolved SHA is what identity and provenance are built from.
+      - name: Resolve declared build inputs to immutable revisions
+        id: inputs
+        shell: bash
+        env:
+          APP_TOKEN: ${{ steps.input_token.outputs.token }}
+          PLAN: ${{ steps.declared.outputs.plan }}
+        run: |
+          set -euo pipefail
+          SERVICE_DIR="${{ github.event.repository.name }}"
+          RESOLVED="${GITHUB_REPOSITORY}@${GITHUB_SHA}"
+          while IFS=$'\t' read -r repo ref dest; do
+            [[ -n "${repo}" ]] || continue
+            target="${GITHUB_WORKSPACE}/${SERVICE_DIR}/${dest}"
+            rm -rf "${target}"
+            mkdir -p "${target}"
+            git init --quiet "${target}"
+            git -C "${target}" remote add origin "https://x-access-token:${APP_TOKEN}@github.com/${repo}.git"
+            # One fetch form for all three kinds of ref (branch, tag, full SHA).
+            git -C "${target}" fetch --quiet --depth 1 origin "${ref}"
+            git -C "${target}" checkout --quiet FETCH_HEAD
+            sha="$(git -C "${target}" rev-parse HEAD)"
+            # The git metadata is not a build input, and it holds the token we just used. Dropping
+            # it also leaves the existing tar step below completely untouched.
+            rm -rf "${target}/.git"
+            echo "  ${repo}@${ref} -> ${sha}  (${SERVICE_DIR}/${dest})"
+            RESOLVED="${RESOLVED} ${repo}@${sha}"
+          done < <(printf '%s' "${PLAN}" | jq -r '.[] | [.repo, .ref, .path] | @tsv')
+          # Sorted, so the same input set always serialises identically no matter what order it was
+          # declared or resolved in. Pipe-separated because the AWS CLI splits shorthand structures
+          # on whitespace.
+          SOURCE_INPUTS="$(printf '%s' "${RESOLVED}" | tr ' ' '\n' | LC_ALL=C sort | paste -sd'|' -)"
+          echo "source_inputs=${SOURCE_INPUTS}" >> "${GITHUB_OUTPUT}"
+          echo "Declared input set: ${SOURCE_INPUTS}"
+
       - name: Enforce core module release policy
         shell: bash
         working-directory: ${{ github.event.repository.name }}
@@ -266,6 +425,9 @@ jobs:
           set -euo pipefail
           SERVICE_DIR="${{ github.event.repository.name }}"
           TMP_TARBALL="/tmp/${SERVICE_DIR}-${GITHUB_RUN_ID}.tgz"
+          # Unchanged by the declared-inputs work, and that is the point: inputs are checked out
+          # INSIDE ${SERVICE_DIR} with their .git removed, so this command already captures every
+          # one of them. What goes to S3 is the complete build context — the build fetches nothing.
           tar -czf "${TMP_TARBALL}" \
             --exclude="${SERVICE_DIR}/.git" \
             --exclude="${SERVICE_DIR}/node_modules" \
@@ -293,6 +455,12 @@ jobs:
         run: |
           set -euo pipefail
           SERVICE_DIR="${{ github.event.repository.name }}"
+          # SOURCE_INPUTS declares the complete, resolved input set. It is a FACT this job is the
+          # only one able to establish, because this job performs the checkouts. It is deliberately
+          # NOT accompanied by an IMAGE_TAG: the cache key is derived by the buildspec, which is the
+          # only component that knows the other things the key must cover (its own BUILDER_VERSION
+          # and the build args it passes). Splitting it any other way would mean two components
+          # having to agree on a formula, which is exactly how a cache key silently goes wrong.
           BUILD_ID="$(aws codebuild start-build \
             --region "${AWS_REGION}" \
             --project-name "${BUILD_PROJECT}" \
@@ -301,6 +469,7 @@ jobs:
               "name=SERVICE_DIR,value=${SERVICE_DIR},type=PLAINTEXT" \
               "name=SOURCE_TARBALL_S3_URI,value=${{ steps.source.outputs.source_uri }},type=PLAINTEXT" \
               "name=SOURCE_COMMIT,value=${GITHUB_SHA},type=PLAINTEXT" \
+              "name=SOURCE_INPUTS,value=${{ steps.inputs.outputs.source_inputs }},type=PLAINTEXT" \
               "name=GITHUB_TOKEN,value=${GITHUB_TOKEN},type=PLAINTEXT" \
             --query 'build.id' --output text)"
           echo "Canonical build started: ${BUILD_ID}"

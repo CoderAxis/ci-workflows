@@ -221,3 +221,30 @@ controls:
     remediation: Reference ADR-0051 and RFC-0020 in the workflow header.
     detector: cites_policy_ssot
     refs: [ADR-0051, RFC-0020]
+
+  - id: DM-013
+    title: Every declared build input is resolved, reported, and left to the builder to key on
+    owner: platform-infrastructure
+    scope: reusable-workflow
+    status: active
+    severity: critical
+    policy: >-
+      A repository whose image is composed from more than its own source must be able to declare
+      those inputs in a validated manifest. The workflow must resolve each declared input to an
+      immutable commit SHA, report the complete resolved set to the canonical build, and must NOT
+      compute or pass the image tag itself - the build executor derives the cache key, because only
+      it knows the rest of what that key must cover.
+    rationale: >-
+      The build cache is keyed on the tag. A key that covers only one of an image's inputs means a
+      change to any other input finds the key already published and silently serves the previous
+      artifact - the image stops tracking its own sources with no error anywhere. Resolving to a SHA
+      rather than trusting a moving ref is what makes the recorded input a fact instead of a
+      pointer, and is what lets the provenance answer which revisions actually produced an image.
+      Two components computing the same key from different information is the standard way a cache
+      key goes quietly wrong, so there is exactly one author.
+    remediation: >-
+      Keep the build_inputs_manifest input; validate the manifest before acting on it; resolve each
+      declared input with git rev-parse; pass the sorted resolved set as SOURCE_INPUTS on the
+      canonical build; do not pass IMAGE_TAG.
+    detector: declared_inputs_recorded
+    refs: [ADR-0051, RFC-0020]
