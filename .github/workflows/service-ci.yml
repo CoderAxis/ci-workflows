@@ -314,13 +314,227 @@ jobs:
     with:
       capabilities: ${{ needs.resolve.outputs.capabilities }}
 
+  # ── repository structure ────────────────────────────────────────────────────────────────────
+  # Absorbed from the per-repo quality-check.yml. Entirely generic: it asserts the shape every
+  # Go service is required to have, so there was never a reason for each repo to carry its own.
+  structure:
+    name: Repository structure
+    needs: resolve
+    if: needs.resolve.outputs.language == 'go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Required files, directories and Make targets
+        shell: bash
+        env:
+          DEPLOYABLE: ${{ needs.resolve.outputs.deployable }}
+        run: |
+          set -euo pipefail
+          rc=0
+          files="README.md Makefile go.mod"
+          # A core module is a library: it ships no image and declares no service contract.
+          [[ "${DEPLOYABLE}" == "true" ]] && files="${files} Dockerfile service.contract.yaml"
+          for f in ${files}; do
+            [[ -f "${f}" ]] || { echo "::error::missing required file: ${f}"; rc=1; }
+          done
+          for d in cmd internal scripts tests docs; do
+            [[ -d "${d}" ]] || { echo "::error::missing required directory: ${d}"; rc=1; }
+          done
+          for t in build run clean test lint fmt ci; do
+            make -n "${t}" >/dev/null 2>&1 || { echo "::error::missing required Make target: ${t}"; rc=1; }
+          done
+          exit "${rc}"
+
+      - name: Go formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l . | grep -v '^vendor/' || true)"
+          if [[ -n "${unformatted}" ]]; then
+            echo "::error::gofmt would rewrite these files; run 'make fmt'"
+            echo "${unformatted}"
+            exit 1
+          fi
+
+  # ── vulnerabilities ─────────────────────────────────────────────────────────────────────────
+  # Absorbed from the per-repo security-scan.yml, with one behavioural change: it blocks.
+  # That workflow read SECURITY_BLOCKING from a repo variable and DEFAULTED IT TO 'false', so
+  # across the fleet vulnerability findings were reported and then ignored, and a repo could
+  # keep it that way by doing nothing. Severity is a platform decision, not a repo setting.
+  vulnerabilities:
+    name: Vulnerabilities
+    needs: resolve
+    if: needs.resolve.outputs.language == 'go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+      GONOSUMDB: github.com/coderaxis/*
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: High-signal secret scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATTERN='(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|sk_live_[0-9A-Za-z]{16,}|xox[baprs]-[0-9A-Za-z-]+|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----)'
+          if git grep -nIE "${PATTERN}" -- ':!go.sum' ':!**/*.md' ':!docs/**' ':!testdata/**'; then
+            echo "::error::high-signal secret pattern detected"
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Mint module-read token
+        id: modauth
+        uses: coderaxis/github-actions/module-auth@v1
+        with:
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+
+      - name: Known vulnerabilities in dependencies
+        shell: bash
+        env:
+          MOD_TOKEN: ${{ steps.modauth.outputs.token }}
+        run: |
+          set -euo pipefail
+          git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOWORK=off "$(go env GOPATH)/bin/govulncheck" ./...
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+  # ── generated-code and query drift ──────────────────────────────────────────────────────────
+  sqlc:
+    name: SQLC drift and raw-SQL guard
+    needs: resolve
+    if: needs.resolve.outputs.language == 'go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+      GONOSUMDB: github.com/coderaxis/*
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Mint module-read token
+        id: modauth
+        uses: coderaxis/github-actions/module-auth@v1
+        with:
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+
+      - name: Verify sqlc generated code is current
+        shell: bash
+        env:
+          MOD_TOKEN: ${{ steps.modauth.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f sqlc.yaml && ! -f sqlc.yml ]]; then
+            echo "no sqlc.yaml in this repo; nothing to verify"
+            exit 0
+          fi
+          git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
+          go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0
+          "$(go env GOPATH)/bin/sqlc" generate
+          git diff --exit-code -- sqlc rootsqlc \
+            || { echo "::error::sqlc generated code drift; run 'sqlc generate' and commit"; exit 1; }
+
+      # The guard used to be scripts/check-no-raw-sql.py inside each repo. Two repos carried it
+      # and the copies had already diverged, so it now lives here as one implementation.
+      - name: Check out the central checkers
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/github-actions
+          ref: v1
+          path: .central
+          sparse-checkout: scripts
+
+      - name: Raw SQL guard
+        shell: bash
+        run: python3 .central/scripts/check_no_raw_sql.py
+
+  # ── documentation ───────────────────────────────────────────────────────────────────────────
+  # Replaces the per-repo docs-lint.yml and stale-docs-check.yml, which both ran
+  # scripts/validate_docs.py from the repository being checked. That file existed in 91
+  # repositories as 91 byte-different files - every repo validated its docs against its own
+  # private definition of valid, and passing meant nothing comparable. core-docs already owns
+  # check_service_docs.py, so the standard is read from the platform, not from the subject.
+  docs:
+    name: Service documentation
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: service
+
+      - name: Mint a catalog-read token
+        id: catalog_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          owner: ${{ inputs.catalog_owner }}
+
+      - name: Check out the documentation standard
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.catalog_repo }}
+          ref: ${{ inputs.catalog_ref }}
+          token: ${{ steps.catalog_token.outputs.token }}
+          path: core-docs
+
+      - name: Validate against the central standard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          python3 core-docs/scripts/check_service_docs.py --service-dir service
+
+  dependency-review:
+    name: Dependency review
+    needs: resolve
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
   # ── artifact ────────────────────────────────────────────────────────────────────────────────
   # Only on trunk, only for a deployable, and only once every gate above is green. The service
   # name comes from the catalog, not from the repo. This job ends at the GitOps digest pin —
   # Argo CD reconciles from there, so nothing below this line touches a cluster.
   artifact:
     name: Canonical build and GitOps pin
-    needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema, dockerfile]
+    needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
+            dockerfile, structure, vulnerabilities, sqlc, docs]
     if: |
       always()
       && github.event_name == 'push'
