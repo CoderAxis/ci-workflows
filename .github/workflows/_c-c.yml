@@ -683,3 +683,15 @@ jobs:
   # Only on trunk, only for a deployable, and only once every gate above is green. The service
   # name comes from the catalog, not from the repo. This job ends at the GitOps digest pin —
   # Argo CD reconciles from there, so nothing below this line touches a cluster.
+  artifact:
+    name: Canonical build and GitOps pin
+    needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
+            dockerfile, structure, vulnerabilities, sqlc, docs]
+    if: |
+      always()
+      && github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && needs.resolve.outputs.deployable == 'true'
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
+    uses: coderaxis/github-actions/.github/workflows/seed-contract-check.yml@v1

@@ -1,0 +1,22 @@
+name: probe c
+# Diagnostic only. Each variant changes exactly one property of the artifact job, which the bisect
+# identified as the job GitHub refuses to load: (a) adds the missing job-level permissions,
+# (b) collapses the multi-line block-scalar if:, (c) repoints uses: at a leaf callee to test whether
+# the deploy-reusable reference is rejected at this nesting depth.
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  probe:
+    uses: coderaxis/github-actions/.github/workflows/_c-c.yml@v1
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    secrets:
+      CODERAXIS_APP_ID: ${{ secrets.CODERAXIS_APP_ID }}
+      CODERAXIS_APP_PRIVATE_KEY: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}

@@ -1,17 +1,15 @@
-name: probe svcci
-
-# Diagnostic only. One callee per file so that a reference GitHub refuses to load fails only
-# this file - sharing one file made every dispatch fail regardless of which target was chosen,
-# because GitHub validates every 'uses:' in a workflow before it creates any job.
+name: probe b
+# Diagnostic only. Each variant changes exactly one property of the artifact job, which the bisect
+# identified as the job GitHub refuses to load: (a) adds the missing job-level permissions,
+# (b) collapses the multi-line block-scalar if:, (c) repoints uses: at a leaf callee to test whether
+# the deploy-reusable reference is rejected at this nesting depth.
 on:
   workflow_dispatch: {}
-
 permissions:
   contents: read
-
 jobs:
   probe:
-    uses: coderaxis/github-actions/.github/workflows/_c-svcci.yml@v1
+    uses: coderaxis/github-actions/.github/workflows/_c-b.yml@v1
     permissions:
       contents: read
       security-events: write
