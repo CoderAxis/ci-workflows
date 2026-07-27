@@ -1,0 +1,465 @@
+name: CI
+
+# This repository's own self-tests, in the one lane WFC-006 permits.
+#
+# Seven separate guard workflows used to live beside the eight reusable workflows this repository
+# PUBLISHES. Only the published eight are exempt from the lane allowlist, and the exemption is a
+# GitHub constraint rather than a concession: a reusable workflow resolves only at
+# `<owner>/<repo>/.github/workflows/<file>@<ref>`, so it has to live where it is published from.
+# A guard has no such constraint - it is an ordinary lane that happened to have its own file - so
+# the seven are jobs here, and the platform repository now satisfies the control it enforces on the
+# other 97 repositories rather than exempting itself from it.
+#
+# They stay SEPARATE JOBS on purpose. Each one is the executable form of a different control
+# catalog, and folding them together would replace seven independent verdicts with one, so a red
+# run would no longer say which control stopped holding.
+#
+# There are deliberately NO `paths:` filters. Each guard used to carry its own, which meant the
+# centralization self-check ran only when the checker or its fixtures changed - so a workflow file
+# added anywhere else in this directory would not have triggered the control written to catch
+# exactly that. A self-test suite that can be skipped by editing the right file is the failure mode
+# these guards exist to prevent, so the whole suite runs on every push and every pull request.
+
+on:
+  push: {}
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  # `head_ref || ref` collapses a pull request's push and pull_request events onto one group, so a
+  # branch has a single in-flight run rather than two racing ones.
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── central scripts (was central-scripts-guard.yaml) ────────────────────────────────────────
+  # service-ci.yaml runs several checkers from scripts/ against every repository in the fleet, which
+  # makes a bug in one of them a fleet-wide event in both directions: a false negative turns a gate
+  # into decoration, and a false positive fails builds for a reason the owning team cannot act on.
+  # Neither shows up in the checker's own repository, because nothing here is what it runs against.
+  #
+  # The scripts already covered elsewhere are deliberately not repeated:
+  #   resolve_service_identity.py, check_module_pins.py -> release-cascade job
+  #   check-delivery-model.py                           -> delivery-model job
+  #   check-workflow-centralization.py                  -> workflow-centralization job
+  # This job covers the rest, and new central checkers should arrive with a self-test here.
+  central-scripts-raw-sql:
+    name: Central scripts - raw-SQL guard precision and recall
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Asserts both directions. Precision alone is not enough: the quickest way to stop the
+      # false positives would be to require uppercase keywords, which would quietly stop detecting
+      # real lowercase SQL, so the fixture pins a lowercase statement as well.
+      - name: Fixture pins both false positives and detection
+        run: python3 scripts/test_raw_sql_guard.py
+
+      # A checker that crashes or finds nothing must not read as a pass. The fixture directory is
+      # known to contain violations, so a zero exit here means the detector stopped matching.
+      - name: Mutation test - the checker still fails a dirty tree
+        run: |
+          set +e
+          (cd scripts/testdata/raw-sql && python3 "${GITHUB_WORKSPACE}/scripts/check_no_raw_sql.py")
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the raw-sql fixture contains real SQL but the checker passed it"
+            exit 1
+          fi
+          echo "checker fails the dirty fixture as expected (exit $rc)"
+
+  # ── App-token broker, positive case (was ci-app-token-guard.yaml) ───────────────────────────
+  # Self-check for the App-token broker (ADR-0110).
+  #
+  # This guard exists because both failure modes are silent. If the trust policy stopped admitting
+  # central workflows, CI would fail loudly and someone would fix it. But if it started admitting
+  # ANYTHING - a wildcard widened, job_workflow_ref dropped, the tag condition removed - nothing
+  # would fail, and the platform's most powerful credential would be reachable from any workflow in
+  # the estate. So the negative case below is asserted on every change, not just the positive one.
+  #
+  # MOVING THIS JOB CHANGES ITS OIDC IDENTITY. `job_workflow_ref` names the workflow a job is
+  # DEFINED in, so both jobs now present `.../.github/workflows/ci.yaml@<ref>` instead of
+  # `.../ci-app-token-guard.yaml@<ref>`. Both assertions survive the rename for the same reasons
+  # they held before: the read role admits the whole central workflow directory at @v1, which
+  # ci.yaml is in, and the publish role admits only module-release and module-bump, which ci.yaml
+  # is not. If either role is ever narrowed to a filename list, this file has to be on the read
+  # list and must stay off the publish list.
+  ci-app-token-admits-central:
+    name: App token - admits a job defined in a central workflow
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mint a read-scoped token
+        id: tok
+        uses: ./ci-app-token
+        with:
+          scope: read
+          owner: coderaxis
+          repositories: auth-core
+
+      - name: The token must actually work
+        env:
+          GH_TOKEN: ${{ steps.tok.outputs.token }}
+        run: |
+          set -euo pipefail
+          # Proves the credential is real and correctly scoped, rather than just
+          # non-empty: a token minted for the wrong installation would still be a
+          # plausible-looking string.
+          slug=$(gh api /repos/coderaxis/auth-core --jq '.full_name')
+          [ "$slug" = "coderaxis/auth-core" ] || { echo "::error::unexpected repo: $slug"; exit 1; }
+          echo "read token works and resolves coderaxis/auth-core"
+
+      - name: A read token must NOT be able to write
+        env:
+          GH_TOKEN: ${{ steps.tok.outputs.token }}
+        run: |
+          set -uo pipefail
+          # The read App has no write scope. If this ever succeeds, the two Apps
+          # have been conflated and the read/publish split is no longer real.
+          if gh api -X POST /repos/coderaxis/auth-core/git/refs \
+               -f ref=refs/heads/ci-app-token-guard-should-fail \
+               -f sha=0000000000000000000000000000000000000000 >/dev/null 2>&1; then
+            echo "::error::a read-scoped token was able to create a ref"
+            exit 1
+          fi
+          echo "read token correctly cannot write"
+
+  # ── App-token broker, negative case (was ci-app-token-guard.yaml) ───────────────────────────
+  # The real negative case. This job requests the PUBLISH scope from a workflow that is
+  # deliberately NOT on the publishing allowlist (only module-release and module-bump are). It must
+  # be refused by AWS.
+  ci-app-token-refuses-unlisted-workflow:
+    name: App token - refuses publish scope from a non-publishing workflow
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # continue-on-error is the mechanism of the assertion, not a relaxation of it: the step is
+      # REQUIRED to fail, and the step after it fails the job if it did not.
+      - name: Requesting publish from here must be denied
+        id: attempt
+        continue-on-error: true
+        uses: ./ci-app-token
+        with:
+          scope: publish
+          owner: coderaxis
+
+      - name: Assert it was denied
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::this workflow is not on the publishing allowlist yet it obtained a publish token."
+            echo "::error::job_workflow_ref scoping on inboxxhq-ci-app-token-publish is not being enforced."
+            exit 1
+          fi
+          echo "publish scope correctly denied to a non-publishing workflow"
+
+  # ── delivery model (was delivery-model-guard.yaml) ──────────────────────────────────────────
+  # Executable governance for the canonical reusable deploy workflow.
+  #
+  # Runs scripts/check-delivery-model.py against .github/workflows/deploy-reusable.yaml on every
+  # change, so the build-once / promote-by-digest delivery model cannot silently regress - e.g.
+  # someone adding a local image build, a second/per-variant build (incl. a swagger/docs image),
+  # pinning a staging/preprod/prod overlay, widening permissions, swapping in a non-ci-build OIDC
+  # role, or dropping the main-only guard.
+  #
+  # The catalog of controls (id, policy, severity) is declarative in controls/delivery-model.yaml;
+  # the checker binds each control to a detector. critical/major controls fail CI; minor controls
+  # are advisory. A machine-readable JSON report is uploaded as an artifact for dashboards /
+  # compliance tooling.
+  #
+  # Policy SSOT: ADR-0051 (Artifact Promotion, Digest-Pinned Deployment) + RFC-0020 (Supply-Chain
+  # Integrity and Artifact Promotion). This is the delivery-model twin of the seed-contract gate:
+  # policy that used to live only in workflow comments is now machine-verified on this repo itself.
+  delivery-model:
+    name: Delivery model invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Verify control docs are in sync with the catalog
+        run: python3 scripts/check-delivery-model.py --verify-docs README.md
+
+      - name: Enforce delivery-model invariants (ADR-0051 / RFC-0020)
+        run: |
+          python3 scripts/check-delivery-model.py \
+            .github/workflows/deploy-reusable.yaml \
+            --report delivery-model-report.json
+
+      - name: Upload delivery-model report (machine-readable)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: delivery-model-report
+          path: delivery-model-report.json
+          if-no-files-found: warn
+
+  # ── Dockerfile standard (was dockerfile-standard-guard.yaml) ────────────────────────────────
+  # Governance for the Dockerfile-standard control catalog itself: validates the catalog schema,
+  # keeps the checker's control docs in sync, and dry-runs the checker against its own canonical
+  # template so a catalog/checker change that breaks the template is caught here, not fleet-wide.
+  #
+  # Policy SSOT: ADR-0072 (Enterprise Dockerfile Standard).
+  dockerfile-standard:
+    name: Dockerfile standard - catalog + template self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Validate control catalog schema
+        run: |
+          python3 scripts/check-dockerfile-standard.py --format markdown > /dev/null
+          echo "control catalog schema OK"
+
+      - name: Verify control docs are in sync with the catalog
+        run: python3 scripts/check-dockerfile-standard.py --verify-docs README.md
+
+      - name: Prepare a filled-in copy of the canonical template for a self-check
+        run: |
+          sed \
+            -e 's/__SERVICE_NAME__/example/g' \
+            -e 's/__REPO_NAME__/inboxxhq-example-service/g' \
+            -e 's/__CAPABILITY_LIST__/http-api/g' \
+            -e 's/__SERVICE_PORT__/4000/g' \
+            templates/Dockerfile.service > /tmp/Dockerfile.instantiated
+
+      - name: Self-check the instantiated template (http-api capability only)
+        run: |
+          python3 scripts/check-dockerfile-standard.py \
+            /tmp/Dockerfile.instantiated \
+            --capabilities http-api \
+            --fail-on major
+
+  # ── docs governance (was docs-governance-guard.yaml) ────────────────────────────────────────
+  # Governance for the docs-governance control catalog + checker themselves: validates the catalog
+  # schema, keeps the README control table in sync with the catalog, and smoke-runs the checker
+  # end-to-end against a minimal compliant fixture so a catalog/checker change that breaks
+  # execution is caught here, not fleet-wide.
+  #
+  # Policy SSOT: ADR-0081.
+  docs-governance:
+    name: Docs governance - catalog + checker self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Validate control catalog schema
+        run: |
+          python3 scripts/check-docs-governance.py --format markdown > /dev/null
+          echo "control catalog schema OK"
+
+      - name: Verify control docs are in sync with the catalog
+        run: python3 scripts/check-docs-governance.py --verify-docs README.md
+
+      - name: Smoke-run the checker end-to-end against the compliant fixture
+        run: |
+          python3 scripts/check-docs-governance.py \
+            scripts/testdata/docs-governance-fixture \
+            --fail-on major
+
+  # ── release cascade (was release-cascade-guard.yaml) ────────────────────────────────────────
+  # Self-CI for the release cascade itself: the dependency-DAG derivation in
+  # resolve_service_identity.py and the pin policy in check_module_pins.py.
+  #
+  # The arrangement these replaced failed silently. A hand-copied fan-out matrix in 65 core repos,
+  # gated by a per-repo variable, meant a release either notified its consumers or did not, with
+  # nothing reporting which; and a pin policy that named its modules literally checked nothing at
+  # all in a repo whose modules it had not been updated to list. Both states looked green.
+  #
+  # So the two cases asserted here are the ones that hide: a fan-out that notifies nobody, and a
+  # gate that blocks nothing. If either detector stops firing, this fails here rather than
+  # fleet-wide.
+  #
+  # Policy SSOT: SHARED_CORE_RELEASE_AND_PROMOTION.md, ADR-0081.
+  release-cascade:
+    name: Release cascade - DAG derivation + pin policy self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: DAG derivation and pin policy mutation tests
+        run: python3 scripts/test_release_cascade.py
+
+      # The composite action is what the workflows actually call, so an output added to the script
+      # but not surfaced by the action resolves to an empty string at runtime - and an empty
+      # consumers list is a fan-out that notifies nobody, silently.
+      - name: Every resolver output is exposed by the composite action
+        run: |
+          set -euo pipefail
+          missing=0
+          for key in service repo_kind module_path upstream_module consumers \
+                     unorderable_consumers required_modules language archetype tier owner \
+                     deployable owns_database seeds has_rest has_grpc has_events \
+                     coverage_threshold role capabilities; do
+            if ! grep -qE "^  ${key}:" resolve-service-identity/action.yaml; then
+              echo "::error::resolver emits '${key}' but resolve-service-identity/action.yaml does not"
+              echo "expose it as an output, so callers would silently receive an empty value."
+              missing=1
+            fi
+          done
+          [ "${missing}" -eq 0 ] && echo "all resolver outputs are exposed by the action"
+
+      # Globs `.yaml`, not `.yml`. This step spent the whole `.yml` -> `.yaml` migration matching
+      # zero files and reporting success, which is the same shape of silent pass the rest of this
+      # suite exists to catch: a lint that lints nothing cannot fail.
+      - name: Workflows lint clean
+        uses: raven-actions/actionlint@v2
+        with:
+          files: ".github/workflows/*.yaml"
+
+  # ── workflow centralization (was workflow-centralization-guard.yaml) ────────────────────────
+  # Governance for the workflow-centralization control catalog + checker themselves: validates the
+  # catalog schema, confirms this repo is clean against its own controls, and - because a control
+  # that only ever passes proves nothing - mutation-tests the checker against a fixture that
+  # violates both controls. If either control stops firing, this fails here rather than letting the
+  # drift it was written to catch slip through fleet-wide.
+  #
+  # Policy SSOT: ADR-0081, ADR-0051.
+  workflow-centralization:
+    name: Workflow centralization - catalog + checker self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Validate control catalog schema
+        run: |
+          python3 scripts/check-workflow-centralization.py --format json > /dev/null
+          echo "control catalog schema OK"
+
+      - name: Verify control docs are in sync with the catalog
+        run: python3 scripts/check-workflow-centralization.py --verify-docs README.md
+
+      - name: This repo upholds its own controls
+        run: python3 scripts/check-workflow-centralization.py . --fail-on major
+
+      - name: Compliant fixture passes
+        run: |
+          python3 scripts/check-workflow-centralization.py \
+            scripts/testdata/workflow-centralization-fixture \
+            --fail-on major
+
+      # A control catalog is only worth its detectors. Assert the violating fixture actually fails,
+      # and that each control is named in the output, so a detector that silently stops matching
+      # cannot masquerade as a clean fleet.
+      - name: Mutation test - violating fixture must fail every control
+        run: |
+          set +e
+          out="$(python3 scripts/check-workflow-centralization.py \
+                   scripts/testdata/workflow-centralization-violation-fixture \
+                   --fail-on major 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::violating fixture passed; the centralization detectors are not firing"
+            exit 1
+          fi
+          for control in WFC-001 WFC-002 WFC-004; do
+            if ! echo "$out" | grep -q "::error::\[$control\]"; then
+              echo "::error::$control did not fire against the violating fixture"
+              exit 1
+            fi
+          done
+          echo "all controls fired as expected (exit $rc)"
+
+      # WFC-004 compares two files, so its detector has a failure mode the fixtures cannot show:
+      # treating an absent `permissions:` block as "grants nothing" rather than as the repository
+      # default token. That reads every permissionless caller of a `contents: read` workflow as
+      # broken - 4 of the 5 findings on its first fleet run were this false positive, against
+      # callers that pass in CI today. A control that cries wolf gets switched off, so the
+      # distinction is pinned here rather than left to the reviewer.
+      - name: Unit test - WFC-004 models the default token, not the empty set
+        run: |
+          python3 - <<'PY'
+          import importlib.util, pathlib, sys
+          spec = importlib.util.spec_from_file_location(
+              "wfc", pathlib.Path("scripts/check-workflow-centralization.py"))
+          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          gaps = m.permission_gaps
+          cases = [
+              # (granted, declared, declared_present, expected_gap_count, why)
+              (None, {"contents": "read"}, False, 0, "no block anywhere still carries contents: read"),
+              (None, {"contents": "read", "id-token": "write"}, False, 1, "id-token is never implicit"),
+              ({"contents": "read"}, {"contents": "read", "id-token": "write"}, True, 1,
+               "declaring a block drops unlisted scopes to none - the service-ci artifact bug"),
+              ({"contents": "read", "id-token": "write"}, {"contents": "read", "id-token": "write"},
+               True, 0, "exact grant covers the callee"),
+              ({"contents": "write"}, {"contents": "read"}, True, 0, "write satisfies read"),
+              ({"contents": "read"}, {"contents": "write"}, True, 1, "read does not satisfy write"),
+              ("write-all", {"id-token": "write"}, True, 0, "blanket grant covers everything"),
+              ({"contents": "read"}, None, True, 0, "callee declaring nothing asks for nothing"),
+          ]
+          bad = 0
+          for granted, declared, present, want, why in cases:
+              got = len(gaps(granted, declared, present))
+              if got != want:
+                  print(f"::error::expected {want} gap(s), got {got}: {why}"); bad += 1
+          if bad: sys.exit(1)
+          print(f"{len(cases)} permission-model cases hold")
+          PY

@@ -201,8 +201,8 @@ guard **enforces** it:
  Integrity and Artifact Promotion).
 - Implementation: [`deploy-reusable.yaml`](.github/workflows/deploy-reusable.yaml).
 - Enforcement: [`scripts/check-delivery-model.py`](scripts/check-delivery-model.py) run
- by the [`delivery-model-guard`](.github/workflows/delivery-model-guard.yaml) self-CI
- workflow on every change to the reusable workflow or the checker.
+ by the `delivery-model` job in this repository's own
+ [`ci.yaml`](.github/workflows/ci.yaml) on every change.
 
 This closes the gap where the model existed only as header comments that could drift
 from the implementation. The checker is the **executable form of ADR-0051**.
@@ -302,8 +302,8 @@ the [Enterprise Dockerfile Standard](https://github.com/coderaxis/microservices/
 Implementation: [`templates/Dockerfile.service`](templates/Dockerfile.service).
 Enforcement: [`scripts/check-dockerfile-standard.py`](scripts/check-dockerfile-standard.py)
 run by [`dockerfile-standard.yaml`](.github/workflows/dockerfile-standard.yaml) against every
-caller, and self-checked by
-[`dockerfile-standard-guard.yaml`](.github/workflows/dockerfile-standard-guard.yaml) on every
+caller, and self-checked by the `dockerfile-standard` job in this repository's own
+[`ci.yaml`](.github/workflows/ci.yaml) on every
 change to the catalog/checker/template. Static analysis only — never runs `docker build`,
 so it cannot conflict with DM-001 above.
 
@@ -350,7 +350,8 @@ Policy SSOT (in `coderaxis/core-docs`): `ADR-0081` (Centralized, reusable
 documentation-governance CI).
 Implementation: [`scripts/check-docs-governance.py`](scripts/check-docs-governance.py) run by
 [`docs-governance.yaml`](.github/workflows/docs-governance.yaml) against every governed docs repo,
-and self-checked by [`docs-governance-guard.yaml`](.github/workflows/docs-governance-guard.yaml) on
+and self-checked by the `docs-governance` job in this repository's own
+[`ci.yaml`](.github/workflows/ci.yaml) on
 every change to the catalog / checker / fixture. Static analysis only — no repo code is executed.
 
 Every governed documentation repository (the shared-engine `core-docs`, and each client
@@ -459,6 +460,7 @@ _Generated from `controls/workflow-centralization.yaml` by `scripts/check-workfl
 | WFC-002 | A call to a coderaxis/github-actions reusable workflow MUST reference a major version tag (`@v1`, `@v2`, ...). It MUST NOT reference a branch (`@main`), an exact patch tag (`@v1.6.0`), or a commit SHA. | major | caller-workflow | platform-infrastructure | active |
 | WFC-004 | A job whose `uses:` targets a reusable workflow MUST grant, at job level, every permission that the called workflow declares at its own workflow level, at or above the declared access (`write` satisfies `read`; `read` does not satisfy `write`). A job that declares no `permissions:` block inherits the calling workflow's, and that inherited set is what is checked. | critical | caller-workflow | platform-infrastructure | active |
 | WFC-005 | A repository MUST NOT contain a workflow that performs a dependency bump, nor one that subscribes to a `repository_dispatch` event of the form `<module>-released`. Version propagation is performed by the central release, which resolves consumers from the platform artifact graph and opens the pull request directly. | major | caller-workflow | platform-infrastructure | active |
+| WFC-006 | A repository's `.github/workflows` directory MUST contain only `ci.yaml`, `release.yaml`, and workflows that the repository itself PUBLISHES as reusable (`on.workflow_call`). Any other workflow file is a finding, whether or not its behaviour duplicates something central. Every YAML file on the platform MUST use the `.yaml` extension; `.yml` is a finding on its own, independent of the filename. | major | caller-workflow | platform-infrastructure | active |
 
 <!-- END workflow-centralization-controls -->
 
