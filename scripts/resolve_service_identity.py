@@ -24,7 +24,7 @@ order-service, and pin that digest into order-service's GitOps overlay - destroy
 service nobody touched. Keyed on the id, the renamed repo still resolves to auth-service,
 and the name mismatch is reported as catalog drift instead of silently obeyed.
 
-This runs identically from service-ci.yml and from deploy-reusable.yml. Because a reusable
+This runs identically from service-ci.yaml and from deploy-reusable.yaml. Because a reusable
 workflow sees the ORIGINAL caller in GITHUB_REPOSITORY_ID, calling the delivery workflow
 directly gains an attacker nothing: it derives the caller's own identity either way.
 """

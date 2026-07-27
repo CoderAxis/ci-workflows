@@ -21,7 +21,7 @@ Accepted
 
 ## Context
 
-The `docs-governance-guard.yml` self-CI workflow needs a compliant repository shape to run
+The `docs-governance-guard.yaml` self-CI workflow needs a compliant repository shape to run
 `check-docs-governance.py` against end-to-end, so a catalog/checker change that breaks
 execution is caught in this repo rather than fleet-wide.
 

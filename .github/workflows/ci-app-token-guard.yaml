@@ -12,11 +12,11 @@ on:
   push:
     paths:
       - "ci-app-token/**"
-      - ".github/workflows/ci-app-token-guard.yml"
+      - ".github/workflows/ci-app-token-guard.yaml"
   pull_request:
     paths:
       - "ci-app-token/**"
-      - ".github/workflows/ci-app-token-guard.yml"
+      - ".github/workflows/ci-app-token-guard.yaml"
   workflow_dispatch:
 
 permissions:

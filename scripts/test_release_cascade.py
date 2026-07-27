@@ -84,7 +84,7 @@ def test_fan_out_downward() -> None:
           json.loads(schema["consumers"]), [deployable_consumer])
 
     # A deployable is an image pinned by digest, not a module anything can `go get`. If it ever
-    # produced a module path, module-release.yml would tag a repo no consumer can resolve.
+    # produced a module path, module-release.yaml would tag a repo no consumer can resolve.
     dep = facts("InboxxHQ-CoderAxis/inboxxhq-fixture-service", DEPLOYABLE_ID)
     check("deployable repo_kind", dep["repo_kind"], "deployable")
     check("deployable is not releasable as a module", dep["module_path"], "")

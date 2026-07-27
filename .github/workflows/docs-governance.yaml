@@ -5,7 +5,7 @@ name: Documentation Governance
 #
 #   jobs:
 #     docs-governance:
-#       uses: coderaxis/github-actions/.github/workflows/docs-governance.yml@v1
+#       uses: coderaxis/github-actions/.github/workflows/docs-governance.yaml@v1
 #       with:
 #         docs_root: .          # or e.g. docs/core-docs for a docs-in-monorepo layout
 #

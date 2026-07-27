@@ -1,14 +1,14 @@
 name: Central Scripts Guard
 
-# service-ci.yml runs several checkers from scripts/ against every repository in the fleet, which
+# service-ci.yaml runs several checkers from scripts/ against every repository in the fleet, which
 # makes a bug in one of them a fleet-wide event in both directions: a false negative turns a gate
 # into decoration, and a false positive fails builds for a reason the owning team cannot act on.
 # Neither shows up in the checker's own repository, because nothing here is what it runs against.
 #
 # The scripts already covered elsewhere are deliberately not repeated:
-#   resolve_service_identity.py, check_module_pins.py -> release-cascade-guard.yml
-#   check-delivery-model.py                           -> delivery-model-guard.yml
-#   check-workflow-centralization.py                  -> workflow-centralization-guard.yml
+#   resolve_service_identity.py, check_module_pins.py -> release-cascade-guard.yaml
+#   check-delivery-model.py                           -> delivery-model-guard.yaml
+#   check-workflow-centralization.py                  -> workflow-centralization-guard.yaml
 # This guard covers the rest, and new central checkers should arrive with a self-test here.
 
 on:
@@ -18,13 +18,13 @@ on:
       - "scripts/check_no_raw_sql.py"
       - "scripts/test_raw_sql_guard.py"
       - "scripts/testdata/raw-sql/**"
-      - ".github/workflows/central-scripts-guard.yml"
+      - ".github/workflows/central-scripts-guard.yaml"
   pull_request:
     paths:
       - "scripts/check_no_raw_sql.py"
       - "scripts/test_raw_sql_guard.py"
       - "scripts/testdata/raw-sql/**"
-      - ".github/workflows/central-scripts-guard.yml"
+      - ".github/workflows/central-scripts-guard.yaml"
   workflow_dispatch: {}
 
 permissions:

@@ -3,7 +3,7 @@
 build-once / promote-by-digest delivery model.
 
 This is the enforcement twin of the canonical reusable deploy workflow
-(.github/workflows/deploy-reusable.yml). It turns architectural policy into
+(.github/workflows/deploy-reusable.yaml). It turns architectural policy into
 machine-verifiable controls so the model cannot silently regress.
 
 Framework (how mature governance systems layer):
@@ -54,7 +54,7 @@ try:
 except ModuleNotFoundError as exc:  # pragma: no cover
     raise SystemExit("PyYAML required: python3 -m pip install PyYAML") from exc
 
-DEFAULT_TARGET = ".github/workflows/deploy-reusable.yml"
+DEFAULT_TARGET = ".github/workflows/deploy-reusable.yaml"
 DEFAULT_CONTROLS = Path(__file__).resolve().parent.parent / "controls" / "delivery-model.yaml"
 SEVERITY_ORDER = {"critical": 3, "major": 2, "minor": 1}
 VALID_SEVERITY = set(SEVERITY_ORDER)

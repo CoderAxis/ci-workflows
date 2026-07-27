@@ -16,7 +16,7 @@ owner_registry:
 # Owner Directory (fixture)
 
 Minimal owner directory for the `check-docs-governance.py` end-to-end self-test. Not a real
-governed repository — it exists only so `docs-governance-guard.yml` can prove the checker
+governed repository — it exists only so `docs-governance-guard.yaml` can prove the checker
 runs clean against a compliant repository shape.
 
 | Slug | Scope |

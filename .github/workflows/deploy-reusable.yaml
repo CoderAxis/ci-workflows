@@ -5,7 +5,7 @@ name: Reusable Deploy (canonical build + dev pin)
 #
 #   jobs:
 #     deploy:
-#       uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yml@v1
+#       uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yaml@v1
 #       with: { service_name: auth-service }
 #       secrets: inherit
 #
@@ -343,7 +343,7 @@ jobs:
           PY
 
       # Short-lived (~1h) App installation token, minted only when something is actually declared.
-      # This is the platform's cross-org READ credential (module-auth/action.yml wraps the same
+      # This is the platform's cross-org READ credential (module-auth/action.yaml wraps the same
       # action for private Go modules); the underlying action is used directly here because this
       # job needs a token for a clone, not a global `git config url.insteadOf` rewrite left behind
       # on a shared self-hosted runner.

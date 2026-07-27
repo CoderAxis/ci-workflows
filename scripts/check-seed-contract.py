@@ -35,7 +35,7 @@ Enforced invariants (file-based seeders — HARD failures):
      fail. Checked for BOTH layouts:
         canonical:  <data>/staging|preprod|prod/*.json
         flat:       <data>/*.staging.json  *.preprod.json  *.prod.json
-  4. deploy-reusable.yml (if present) has no  SEED_COMMAND=""  override
+  4. deploy-reusable.yaml (if present) has no  SEED_COMMAND=""  override
 
 Recommended (SOFT — informational ::notice::, never fails):
   * canonical subdir layout  system/ dev/ staging/ preprod/ prod/
@@ -49,7 +49,7 @@ the file/data checks do not apply because the data SSOT is not in this repo.
 This is the single-repo enforcement twin of the seeding standard's §6b.
 
 SSOT: this file lives in coderaxis/github-actions and is invoked by the central
-reusable workflow .github/workflows/seed-contract-check.yml. Service repos carry
+reusable workflow .github/workflows/seed-contract-check.yaml. Service repos carry
 only a thin caller; they do NOT vendor this script.
 """
 from __future__ import annotations
@@ -306,7 +306,7 @@ def check_reference_data_integrity(data_dir: Path | None, notices: list[str]) ->
 
 
 def check_no_seed_command_override(root: Path, errors: list[str]) -> None:
-    wf = root / ".github" / "workflows" / "deploy-reusable.yml"
+    wf = root / ".github" / "workflows" / "deploy-reusable.yaml"
     if not wf.is_file():
         return
     text = wf.read_text(encoding="utf-8", errors="replace")
@@ -319,7 +319,7 @@ def check_no_seed_command_override(root: Path, errors: list[str]) -> None:
     if "SEED_BINARY" in text:
         return
     errors.append(
-        ".github/workflows/deploy-reusable.yml: hardcodes SEED_COMMAND=\"\" "
+        ".github/workflows/deploy-reusable.yaml: hardcodes SEED_COMMAND=\"\" "
         "with no SEED_BINARY logic (seeding disabled); this is not permitted"
     )
 

@@ -3,7 +3,7 @@
 # Central schema-compatibility + canonical-outbox-conformance logic (SSOT).
 #
 # Single source of truth consumed by
-#   .github/workflows/schema-compatibility.yml
+#   .github/workflows/schema-compatibility.yaml
 # and therefore, via a thin caller, by every *-core-postgres repo on the
 # platform. Change the gate HERE and roll it out by moving the @v1 tag — never
 # by editing ~27 service repos (mirrors scripts/check-seed-contract.py).
