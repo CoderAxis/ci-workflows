@@ -471,7 +471,7 @@ jobs:
             exit 1
           fi
 
-  # ── workflow lanes (WFC-003) ────────────────────────────────────────────────────────────────
+  # ── workflow lanes (WFC-006) ────────────────────────────────────────────────────────────────
   # Absorbed from the per-repo pipeline-policy.yml, which asserted that thirteen named workflow
   # files EXISTED in the repository - quality-check.yml, security-scan.yml, codeql.yml,
   # gitleaks.yml, actionlint.yaml, deploy.yaml, post-deploy.yaml, preview-env.yml and others.
