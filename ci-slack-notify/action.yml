@@ -1,0 +1,202 @@
+name: CI Slack notify
+description: >-
+  Post a CI notification to Slack without the calling repository holding a Slack
+  credential. The job proves who it is with a GitHub OIDC token; AWS decides
+  whether that identity may read the bot token.
+
+# WHY THIS EXISTS. Identical shape to ci-app-token, and for the same reason: a
+# reusable workflow runs in its caller's context, so central CI could only reach
+# Slack if every repository forwarded SLACK_BOT_TOKEN. It reached ~90 declarations.
+#
+# The failure mode that forced this was not the sprawl, it was how the sprawl
+# failed. Every call site was guarded by `if: env.SLACK_BOT_TOKEN != ''`, so a
+# repository that never set the secret did not get an error — it got a pipeline
+# that quietly posted nothing. The alert that exists to tell you a release broke
+# was itself the thing that broke, invisibly, and only in the repos nobody had
+# gotten around to configuring.
+#
+# So this action does not have an "unconfigured" mode. Either it posts, or it
+# says loudly why it could not.
+#
+# The token is read and spent inside a single step. It is deliberately NOT an
+# output: step outputs travel through the workflow-command stream, and a
+# credential that only ever needs to be used here has no reason to be published
+# to the rest of the job.
+
+inputs:
+  status:
+    description: >-
+      One of success, failure, warning, info. Chooses the colour and icon so
+      call sites do not each reinvent them and drift.
+    required: false
+    default: info
+  title:
+    description: "Headline, e.g. 'CI failed'. Combined with the repository name."
+    required: true
+  text:
+    description: "Optional body text below the headline. Slack mrkdwn."
+    required: false
+    default: ""
+  fields:
+    description: >-
+      Optional JSON array of {title, value, short} objects rendered as attachment
+      fields. Invalid JSON is a hard error rather than a dropped field, because a
+      silently truncated alert is worse than a loud one.
+    required: false
+    default: ""
+  channel:
+    description: >-
+      Target channel. Defaults to the SLACK_ALERTS_CHANNEL variable when the
+      status is failure, otherwise SLACK_NOTIFICATIONS_CHANNEL, so routine
+      success traffic does not drown the channel people are paged from.
+    required: false
+    default: ""
+  aws-region:
+    description: "Region holding the bot token."
+    required: false
+    default: us-east-1
+
+runs:
+  using: composite
+  steps:
+    - name: Post to Slack
+      shell: bash
+      env:
+        SLACK_STATUS: ${{ inputs.status }}
+        SLACK_TITLE: ${{ inputs.title }}
+        SLACK_TEXT: ${{ inputs.text }}
+        SLACK_FIELDS: ${{ inputs.fields }}
+        SLACK_CHANNEL: ${{ inputs.channel }}
+        AWS_REGION: ${{ inputs.aws-region }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
+      run: |
+        # Not `set -e`: a notification must never be the reason a build goes red.
+        # Every failure path below warns and exits 0 deliberately.
+        set -uo pipefail
+
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "::warning::No OIDC token available, so no Slack notification was sent."
+          echo "::warning::The calling job needs 'permissions: id-token: write'."
+          exit 0
+        fi
+
+        python3 <<'PY'
+        import json, os, subprocess, sys, urllib.error, urllib.request
+
+        ROLE = "arn:aws:iam::063088900996:role/inboxxhq-ci-slack-notify"
+        SECRET = "inboxxhq/ci/slack/bot-token"
+
+        PRESET = {
+            "success": ("good", ":large_green_circle:"),
+            "failure": ("danger", ":red_circle:"),
+            "warning": ("warning", ":warning:"),
+            "info": ("#4a90d9", ":information_source:"),
+        }
+
+        def skip(msg):
+            # A warning, never an error. But never silence either: the whole point
+            # of centralising this was that the old guard failed without saying so.
+            print(f"::warning::Slack notification not sent: {msg}")
+            sys.exit(0)
+
+        status = os.environ.get("SLACK_STATUS", "info").lower()
+        color, icon = PRESET.get(status, PRESET["info"])
+
+        channel = os.environ.get("SLACK_CHANNEL", "").strip()
+        if not channel:
+            var = "SLACK_ALERTS_CHANNEL" if status == "failure" else "SLACK_NOTIFICATIONS_CHANNEL"
+            channel = os.environ.get(var, "").strip() or "#platform-ci"
+
+        fields_raw = os.environ.get("SLACK_FIELDS", "").strip()
+        fields = []
+        if fields_raw:
+            try:
+                fields = json.loads(fields_raw)
+                if not isinstance(fields, list):
+                    raise ValueError("expected a JSON array")
+            except Exception as e:
+                # Hard-fails the parse, not the build: report it rather than post a
+                # half-built alert that looks complete.
+                skip(f"the `fields` input is not a JSON array ({e})")
+
+        repo = os.environ.get("GITHUB_REPOSITORY", "?")
+        run_url = (f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
+                   f"{repo}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}")
+        fields.append({"title": "Run", "value": run_url, "short": False})
+
+        # 1. Prove identity to AWS. Unauthenticated call: the OIDC token is the proof.
+        oidc_url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=sts.amazonaws.com"
+        req = urllib.request.Request(oidc_url)
+        req.add_header("Authorization", f"bearer {os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']}")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                id_token = json.load(r)["value"]
+        except Exception as e:
+            skip(f"could not obtain an OIDC token ({e})")
+
+        sts = subprocess.run(
+            ["aws", "sts", "assume-role-with-web-identity",
+             "--role-arn", ROLE, "--role-session-name", "ci-slack-notify",
+             "--web-identity-token", id_token, "--duration-seconds", "900",
+             "--query", "Credentials", "--output", "json"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if sts.returncode != 0:
+            skip("this job is not authorised to read the Slack bot token. Expected "
+                 "when a repository calls the central workflows from a fork or an "
+                 f"unlisted ref. Details: {sts.stderr.strip()[:300]}")
+
+        creds = json.loads(sts.stdout)
+        env = {**os.environ,
+               "AWS_ACCESS_KEY_ID": creds["AccessKeyId"],
+               "AWS_SECRET_ACCESS_KEY": creds["SecretAccessKey"],
+               "AWS_SESSION_TOKEN": creds["SessionToken"]}
+
+        # 2. Read the token. Masked immediately so nothing downstream can echo it.
+        sm = subprocess.run(
+            ["aws", "secretsmanager", "get-secret-value", "--secret-id", SECRET,
+             "--query", "SecretString", "--output", "text"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        if sm.returncode != 0:
+            skip(f"could not read {SECRET} ({sm.stderr.strip()[:200]})")
+
+        raw = sm.stdout.strip()
+        # Accepts a bare token or {"bot_token": "..."} so the stored shape can gain
+        # fields later without breaking every caller at once.
+        try:
+            token = json.loads(raw).get("bot_token", "")
+        except json.JSONDecodeError:
+            token = raw
+        if not token:
+            skip(f"{SECRET} is empty or has no bot_token field")
+        print(f"::add-mask::{token}")
+
+        # 3. Post.
+        title = os.environ.get("SLACK_TITLE", "").strip()
+        body = {
+            "channel": channel,
+            "text": f"{icon} *{title}* — `{repo}`",
+            "attachments": [{
+                "color": color,
+                "text": os.environ.get("SLACK_TEXT", ""),
+                "fields": fields,
+            }],
+        }
+        req = urllib.request.Request("https://slack.com/api/chat.postMessage",
+                                     data=json.dumps(body).encode(), method="POST")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Content-Type", "application/json; charset=utf-8")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                resp = json.load(r)
+        except Exception as e:
+            skip(f"Slack API call failed ({e})")
+
+        # Slack returns HTTP 200 with ok:false for auth and channel errors, so the
+        # status code alone would report success for a message nobody received.
+        if not resp.get("ok"):
+            skip(f"Slack rejected the message: {resp.get('error', 'unknown error')}")
+
+        print(f"Posted a {status} notification to {channel}")
+        PY

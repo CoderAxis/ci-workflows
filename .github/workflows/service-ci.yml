@@ -59,26 +59,14 @@ on:
         required: false
         type: string
         default: ""
-    secrets:
-      # The App credentials are DEPRECATED and no longer read anywhere in this pipeline. Every
-      # token is now minted from the job's own OIDC identity via ci-app-token, so a repository
-      # forwards nothing: the platform decides what a caller may mint, rather than each caller
-      # holding the credential that decides it.
-      #
-      # Kept declared, and now optional, purely so the ~90 callers still passing them keep
-      # starting while they are cleaned up — a caller that passes a secret the callee does not
-      # declare is a hard startup error, so removing these before the callers would break the
-      # fleet. Delete once no caller passes them.
-      CODERAXIS_APP_ID:
-        required: false
-      CODERAXIS_APP_PRIVATE_KEY:
-        required: false
-      SLACK_BOT_TOKEN:
-        required: false
-      SONAR_TOKEN:
-        required: false
-      SONAR_HOST_URL:
-        required: false
+
+# No `secrets:` block, deliberately. Every token this pipeline uses is minted from the job's own
+# OIDC identity via ci-app-token and ci-slack-notify, so a repository forwards nothing: the
+# platform decides what a caller may mint, rather than each caller holding the credential that
+# decides it.
+#
+# A caller that passes a secret the callee does not declare is a hard startup error, so the
+# callers were cleaned up before this block was removed rather than after.
 
 permissions:
   contents: read
@@ -553,7 +541,8 @@ jobs:
           absorbed="actionlint gitleaks codeql quality-check security-scan dependency-review
                     docs-lint stale-docs-check schema-compatibility event-handling-compliance
                     seed-contract-check sqlc-guard core-guard sbom deploy post-deploy
-                    reusable-notify-consumers reusable-module-auth pipeline-policy"
+                    reusable-notify-consumers reusable-module-auth pipeline-policy
+                    adr-validation openapi-validation dockerfile-standard docs-governance"
           for name in ${absorbed}; do
             if [[ -f "${wf}/${name}.yml" ]]; then
               echo "::error::${wf}/${name}.yml is absorbed by central CI but still present here."
@@ -718,6 +707,124 @@ jobs:
         shell: bash
         run: python3 .central/scripts/check_no_raw_sql.py
 
+  # ── contracts ───────────────────────────────────────────────────────────────────────────────
+  # Absorbs the per-repo adr-validation.yml and openapi-validation.yml, which existed in 91
+  # repositories each and could not fail. Every finding in adr-validation.yml was emitted as
+  # `::warning` and the script ended in `exit 0`; openapi-validation.yml returned 0 when the spec
+  # was absent. Both therefore reported success on a repository with no ADRs, no contract, and no
+  # index - 182 workflow files whose only effect was to make the checks list look longer.
+  #
+  # Here the same checks block. Whether they APPLY is decided by the catalog rather than by what
+  # the repository happens to contain, which is the part that made the old versions vacuous: a
+  # service that had lost its OpenAPI spec passed the OpenAPI gate precisely because it had lost it.
+  contracts:
+    name: ADR and API contract validation
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the central checkers
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/github-actions
+          ref: v1
+          path: .central
+          sparse-checkout: scripts
+
+      - name: ADR structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -d docs/adr ]] || { echo "no docs/adr in this repo"; exit 0; }
+          mapfile -t adrs < <(find docs/adr -maxdepth 1 -type f -name 'ADR-*.md' | sort)
+          rc=0
+          for adr in "${adrs[@]}"; do
+            base="$(basename "${adr}")"
+            [[ "${base}" =~ ^ADR-[0-9]{4}-.+\.md$ ]] \
+              || { echo "::error file=${adr}::ADR filenames must match ADR-0001-title.md"; rc=1; }
+            [[ -s "${adr}" ]] || { echo "::error file=${adr}::ADR file is empty"; rc=1; }
+            grep -Eq '^# .+' "${adr}" \
+              || { echo "::error file=${adr}::ADR must have a top-level markdown heading"; rc=1; }
+          done
+          # An unindexed ADR is invisible to every reader who starts at the index, which is all of
+          # them. The old check warned about this and 91 repos accumulated the drift.
+          if [[ -f docs/adr/ADR_INDEX.md ]]; then
+            for adr in "${adrs[@]}"; do
+              base="$(basename "${adr}")"
+              grep -Fq "${base}" docs/adr/ADR_INDEX.md \
+                || { echo "::error file=docs/adr/ADR_INDEX.md::${base} is not listed"; rc=1; }
+            done
+          elif [[ ${#adrs[@]} -gt 0 ]]; then
+            echo "::error::docs/adr contains ADRs but has no ADR_INDEX.md"
+            rc=1
+          fi
+          exit "${rc}"
+
+      - name: OpenAPI contract
+        shell: bash
+        env:
+          HAS_REST: ${{ needs.resolve.outputs.has_rest }}
+          REPO_KIND: ${{ needs.resolve.outputs.repo_kind }}
+        run: |
+          set -euo pipefail
+          spec=""
+          for c in docs/openapi.json docs/openapi.yaml docs/openapi.yml \
+                   api/openapi.json api/openapi.yaml api/openapi.yml; do
+            [[ -f "${c}" ]] && { spec="${c}"; break; }
+          done
+
+          # The catalog decides whether a contract is owed. Keying this off the file's presence -
+          # what the old workflow did - means deleting the spec is how you pass the check.
+          if [[ -z "${spec}" ]]; then
+            if [[ "${HAS_REST}" == "true" && "${REPO_KIND}" == "deployable" ]]; then
+              echo "::error::the catalog declares a REST interface but no OpenAPI contract is committed"
+              exit 1
+            fi
+            echo "no REST interface declared and no spec committed; nothing to validate"
+            exit 0
+          fi
+
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          python3 - "${spec}" <<'PY'
+          import json, sys, pathlib
+          import yaml
+          p = pathlib.Path(sys.argv[1])
+          raw = p.read_text(encoding="utf-8")
+          spec = json.loads(raw) if p.suffix == ".json" else yaml.safe_load(raw)
+          errs = []
+          if not isinstance(spec, dict):
+              errs.append("spec is not a mapping")
+              spec = {}
+          if spec.get("openapi") is None and spec.get("swagger") is None:
+              errs.append("spec must declare an openapi or swagger version")
+          if not (spec.get("info") or {}).get("version"):
+              errs.append("spec must declare info.version")
+          if not spec.get("paths"):
+              errs.append("spec declares no paths")
+          for e in errs:
+              print(f"::error file={p}::{e}")
+          sys.exit(1 if errs else 0)
+          PY
+
+      # ADR-0006: operationIds are semver-governed public identifiers that generated SDKs, API
+      # catalogs and observability keys depend on. The guard existed centrally and was wired into
+      # nothing, so the governance it defines had never once been enforced.
+      - name: OperationId governance
+        shell: bash
+        run: |
+          set -euo pipefail
+          for c in docs/openapi.json docs/openapi.yaml docs/openapi.yml; do
+            if [[ -f "${c}" ]]; then
+              python3 .central/scripts/check_operation_ids.py --check
+              exit $?
+            fi
+          done
+          echo "no committed OpenAPI contract; operationId governance does not apply"
+
   # ── documentation ───────────────────────────────────────────────────────────────────────────
   # Replaces the per-repo docs-lint.yml and stale-docs-check.yml, which both ran
   # scripts/validate_docs.py from the repository being checked. That file existed in 91
@@ -779,7 +886,7 @@ jobs:
   artifact:
     name: Canonical build and GitOps pin
     needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
-            dockerfile, structure, vulnerabilities, sqlc, docs]
+            dockerfile, structure, vulnerabilities, sqlc, docs, contracts]
     if: |
       always()
       && github.event_name == 'push'
@@ -801,3 +908,49 @@ jobs:
       # Previously each repo passed this literal in its own deploy.yml, so a one-line edit to
       # `service_name:` was enough to publish one service's code under another's identity.
       service_name: ${{ needs.resolve.outputs.service }}
+
+  # ── notification ────────────────────────────────────────────────────────────────────────────
+  # Centralised here, and this job is a REPLACEMENT rather than an addition. Each per-repo ci.yml
+  # carried its own Slack step; absorbing them into this pipeline dropped it, so the migration was
+  # quietly making failures less visible, not more. The old steps were guarded by
+  # `if: env.SLACK_BOT_TOKEN != ''`, which meant a repository that never configured the secret had
+  # been posting nothing for its entire life and reported success while doing so.
+  #
+  # The bot token is read from Secrets Manager against this job's OIDC identity, so no caller
+  # forwards a Slack credential and there is no "unconfigured" state left to fail silently.
+  notify:
+    name: Notify on failure
+    needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
+            dockerfile, structure, lanes, vulnerabilities, sqlc, docs, contracts, dependency-review,
+            artifact]
+    # always() rather than failure(): several gates above are conditional, and a plain failure()
+    # does not run once any needed job has been skipped - which is the normal shape here, so the
+    # alert would have fired only on the subset of runs where every gate happened to be relevant.
+    if: always() && contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Naming the failed gates makes the message actionable on its own. A bare "CI failed" costs
+      # the reader a round trip to the run just to learn whether it was coverage or a CVE.
+      - name: Summarise which gates failed
+        id: summary
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          failed="$(python3 -c 'import json,os; n=json.loads(os.environ["NEEDS"]); print(", ".join(k for k,v in n.items() if v.get("result") == "failure") or "unknown")')"
+          echo "failed=${failed}" >> "${GITHUB_OUTPUT}"
+
+      - uses: coderaxis/github-actions/ci-slack-notify@v1
+        with:
+          status: failure
+          title: CI failed
+          text: "Failed gates: ${{ steps.summary.outputs.failed }}"
+          fields: |
+            [
+              {"title": "Service", "value": "${{ needs.resolve.outputs.service || github.repository }}", "short": true},
+              {"title": "Branch", "value": "${{ github.ref_name }}", "short": true}
+            ]

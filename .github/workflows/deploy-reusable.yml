@@ -125,20 +125,14 @@ on:
       GH_PAT:
         description: "Optional fallback for CROSS_REPO_TOKEN."
         required: false
-      # TWO CREDENTIALS, TWO JOBS — deliberately, not by accident.
-      #   CROSS_REPO_TOKEN  writes: it pushes the digest pin to the infra GitOps repo, and is handed
-      #                     to the canonical build for private Go module fetch. Long-lived.
-      #   CODERAXIS_APP_*   reads: mints a ~1h GitHub App installation token used only to check out
-      #                     the repos a build declares as inputs. This is the credential the platform
-      #                     already uses for cross-org reads (see module-auth/action.yml, which
-      #                     exists to replace long-lived PATs), so a new read-only cross-repo path
-      #                     must not reintroduce one. Only multi-input builds need these.
-      CODERAXIS_APP_ID:
-        description: "GitHub App id for reading declared build inputs (short-lived installation token). Multi-input builds only."
-        required: false
-      CODERAXIS_APP_PRIVATE_KEY:
-        description: "GitHub App private key PEM matching CODERAXIS_APP_ID. Multi-input builds only."
-        required: false
+      # CODERAXIS_APP_ID / CODERAXIS_APP_PRIVATE_KEY were declared here to mint a short-lived
+      # installation token for checking out declared build inputs. They are gone: that token is
+      # now minted from this job's OIDC identity via ci-app-token, so no caller forwards a key.
+      #
+      # CROSS_REPO_TOKEN and GH_PAT remain because they are still READ below, and they are the
+      # last long-lived credentials in the delivery path. They should follow the same route — the
+      # blocker is that the GitOps push targets a repository outside the App's installation, not
+      # anything about this workflow.
 
 permissions:
   contents: read

@@ -76,22 +76,13 @@ on:
         required: false
         type: string
         default: ""
-    secrets:
-      # DEPRECATED and unread: tokens are minted from the job's own OIDC identity via
-      # ci-app-token. Kept optional so callers still passing them keep starting; remove
-      # once no caller does.
-      CODERAXIS_APP_ID:
-        required: false
-      CODERAXIS_APP_PRIVATE_KEY:
-        required: false
-      # Distinct from the module-reader App above: dispatching into a consumer repository needs
-      # write, and minting that per target keeps a release from holding fleet-wide write.
-      RELEASE_BOT_APP_ID:
-        required: false
-      RELEASE_BOT_APP_PRIVATE_KEY:
-        required: false
-      SLACK_BOT_TOKEN:
-        required: false
+
+# No `secrets:` block, deliberately. Every credential this workflow needs - the module-reader App
+# key, the release bot that dispatches into consumer repositories, and the Slack bot token - is
+# read from AWS Secrets Manager against this job's own OIDC identity. A caller forwards nothing,
+# so adding a credential here no longer means editing every repository that calls it, and the
+# release bot is reachable only from this workflow and module-bump.yml rather than from anything
+# holding a copy of the key.
 
 permissions:
   contents: read
