@@ -132,3 +132,42 @@ controls:
       grants the elevated scope to every job in the file, including ones that only read code.
     detector: caller_grants_declared_permissions
     refs: [ADR-0051, ADR-0081]
+
+  - id: WFC-005
+    title: A repository does not implement or listen for dependency bumps locally
+    owner: platform-infrastructure
+    scope: caller-workflow
+    status: active
+    severity: major
+    applies_to_capabilities: []
+    policy: >-
+      A repository MUST NOT contain a workflow that performs a dependency bump, nor one that
+      subscribes to a `repository_dispatch` event of the form `<module>-released`. Version
+      propagation is performed by the central release, which resolves consumers from the platform
+      artifact graph and opens the pull request directly.
+    rationale: >-
+      Bump propagation used to be a listener in each consumer: the central release fired a
+      `repository_dispatch`, and a small workflow in the consumer woke up and called straight back
+      into the central repository the event came from. The round trip bought nothing - the release
+      job had already resolved the consumer list from the catalog and already held a write token
+      scoped to that consumer - and it cost 138 files across 91 repositories.
+
+      Worse, it made propagation depend on each repository having volunteered to receive it, and
+      coverage was decided by what happened to be copied where rather than by what the code
+      actually depends on. platform-shared-go has 85 direct consumers and the listener existed in
+      70 repositories, reaching 67 of them: every `*-core-postgres` adapter in the fleet was
+      missed. platform-contracts-go has 49 direct consumers and no listener existed anywhere, so
+      generated contract types were never propagated automatically at all. Neither gap produced a
+      failure, because a consumer that is never told about a release simply keeps building against
+      the old one.
+
+      Of the 138 files, 70 were not thin callers but a 315-line local implementation, already
+      drifted into three variants. That implementation never entered central code, so no control
+      here, no OIDC change and no fix to the shared bump logic ever applied to it.
+    remediation: >-
+      Delete the workflow. A release of any artifact in the graph now opens the bump pull request
+      in every repository whose go.mod requires it, in dependency order. If a bump is genuinely
+      missing, the dependency edge is missing from the artifact graph - add it to the catalog and
+      regenerate, rather than reinstating a local listener.
+    detector: no_local_bump_workflows
+    refs: [ADR-0051]

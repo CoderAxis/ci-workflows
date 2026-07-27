@@ -33,9 +33,10 @@ CATALOG = HERE / "testdata" / "release-cascade-catalog"
 PINS = HERE / "testdata" / "module-pins"
 CHECKER = HERE / "check_module_pins.py"
 
-CORE_ID, SCHEMA_ID, DEPLOYABLE_ID = 900000001, 900000002, 900000003
+CORE_ID, SCHEMA_ID, DEPLOYABLE_ID, SHARED_ID = 900000001, 900000002, 900000003, 900000004
 CORE_MOD = "github.com/coderaxis/fixture-core"
 SCHEMA_MOD = "github.com/coderaxis/fixture-core-postgres"
+SHARED_MOD = "github.com/coderaxis/fixture-shared"
 
 failures: list[str] = []
 
@@ -53,39 +54,80 @@ def facts(repo: str, repo_id: int) -> dict:
 
 
 def test_fan_out_downward() -> None:
-    """Releasing a module must notify everything the catalog says depends on it."""
-    print("\nfan-out (downward: who must be notified)")
+    """Releasing a module must reach everything the artifact graph says depends on it."""
+    print("\nfan-out (downward: who must be bumped)")
 
     core = facts("coderaxis/fixture-core", CORE_ID)
     check("core repo_kind", core["repo_kind"], "core")
     check("core module path", core["module_path"], CORE_MOD)
-    check("core dispatch event", core["dispatch_event"], "fixture-core-released")
     # Both, because the deployable pins the core directly as well as through the adapter - the
-    # "diamond". Notifying only the adapter would leave the service on an old core indefinitely.
-    check(
-        "core notifies adapter AND deployable",
-        json.loads(core["consumers"]),
-        [
-            {"repository": "coderaxis/fixture-core-postgres", "kind": "schema"},
-            {"repository": "InboxxHQ-CoderAxis/inboxxhq-fixture-service", "kind": "deployable"},
-        ],
-    )
+    # "diamond". Reaching only the adapter would leave the service on an old core indefinitely.
+    # Each consumer carries what IT pins, because the pin policy gate runs against the consumer.
+    # Sending the releasing repo's module set instead would enforce the wrong policy on every
+    # target, and would pass, because a set that names nothing has nothing to fail on.
+    adapter_consumer = {
+        "repository": "coderaxis/fixture-core-postgres", "kind": "schema",
+        "name": "fixture-core-postgres", "level": 2,
+        "requires": [CORE_MOD, SHARED_MOD],
+    }
+    deployable_consumer = {
+        "repository": "InboxxHQ-CoderAxis/inboxxhq-fixture-service", "kind": "deployable",
+        "name": "inboxxhq-fixture-service", "level": 3,
+        "requires": [CORE_MOD, SCHEMA_MOD, SHARED_MOD],
+    }
+    check("core reaches adapter AND deployable",
+          json.loads(core["consumers"]), [adapter_consumer, deployable_consumer])
 
     schema = facts("coderaxis/fixture-core-postgres", SCHEMA_ID)
     check("schema repo_kind", schema["repo_kind"], "schema")
-    check("schema dispatch event", schema["dispatch_event"], "fixture-core-postgres-released")
-    check(
-        "adapter notifies the deployable only",
-        json.loads(schema["consumers"]),
-        [{"repository": "InboxxHQ-CoderAxis/inboxxhq-fixture-service", "kind": "deployable"}],
-    )
+    check("adapter reaches the deployable only",
+          json.loads(schema["consumers"]), [deployable_consumer])
 
     # A deployable is an image pinned by digest, not a module anything can `go get`. If it ever
     # produced a module path, module-release.yml would tag a repo no consumer can resolve.
     dep = facts("InboxxHQ-CoderAxis/inboxxhq-fixture-service", DEPLOYABLE_ID)
     check("deployable repo_kind", dep["repo_kind"], "deployable")
     check("deployable is not releasable as a module", dep["module_path"], "")
-    check("deployable notifies nobody", json.loads(dep["consumers"]), [])
+    check("deployable reaches nobody", json.loads(dep["consumers"]), [])
+
+
+def test_shared_library_fan_out() -> None:
+    """A library shared across families must cascade like any other artifact.
+
+    This is the case the previous resolver could not express at all. It walked one service entry,
+    so a module consumed by many families resolved to nothing and had to be propagated by a
+    workflow hand-copied into each consumer - which is how platform-shared-go came to reach 67 of
+    its 85 consumers and platform-contracts-go none of its 49.
+    """
+    print("\nfan-out (a shared library is not a special case)")
+
+    shared = facts("coderaxis/fixture-shared", SHARED_ID)
+    check("shared library resolves its own identity", shared["repo_kind"], "shared-library")
+    check("shared library module path", shared["module_path"], SHARED_MOD)
+    consumers = json.loads(shared["consumers"])
+    check("reaches every consumer across families",
+          [c["name"] for c in consumers],
+          ["fixture-core", "fixture-core-postgres", "inboxxhq-fixture-service"])
+    # Ordered, so a consumer is never asked to move to a version that does not exist yet.
+    check("consumers are ordered by release level",
+          [c["level"] for c in consumers], sorted(c["level"] for c in consumers))
+
+
+def test_cycle_is_withheld() -> None:
+    """Artifacts that require each other have no release order, so neither is bumped.
+
+    Two real cycles exist on the platform today - compliance-core and notification-core each
+    require their own postgres adapter, inverting the core <- adapter layering. Picking one to
+    go first writes a version the other cannot satisfy, so the cascade must decline and say so
+    rather than choose.
+    """
+    print("\ncycles (withheld, not guessed at)")
+
+    shared = facts("coderaxis/fixture-shared", SHARED_ID)
+    names = [c["name"] for c in json.loads(shared["consumers"])]
+    check("a consumer inside a cycle is not bumped", "fixture-cycle-a" in names, False)
+    check("and it is named rather than silently dropped",
+          shared["unorderable_consumers"], "fixture-cycle-a")
 
 
 def test_pins_upward() -> None:
@@ -153,6 +195,8 @@ def test_pin_policy() -> None:
 def main() -> int:
     print("release cascade: dependency DAG derivation")
     test_fan_out_downward()
+    test_shared_library_fan_out()
+    test_cycle_is_withheld()
     test_pins_upward()
     test_pin_policy()
 

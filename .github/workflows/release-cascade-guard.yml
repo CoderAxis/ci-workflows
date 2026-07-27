@@ -67,9 +67,10 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for key in service repo_kind module_path upstream_module dispatch_event consumers \
-                     required_modules language archetype tier owner deployable owns_database \
-                     seeds has_rest has_grpc has_events coverage_threshold role capabilities; do
+          for key in service repo_kind module_path upstream_module consumers \
+                     unorderable_consumers required_modules language archetype tier owner \
+                     deployable owns_database seeds has_rest has_grpc has_events \
+                     coverage_threshold role capabilities; do
             if ! grep -qE "^  ${key}:" resolve-service-identity/action.yml; then
               echo "::error::resolver emits '${key}' but resolve-service-identity/action.yml does not"
               echo "expose it as an output, so callers would silently receive an empty value."

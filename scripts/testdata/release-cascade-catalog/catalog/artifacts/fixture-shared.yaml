@@ -1,0 +1,20 @@
+name: fixture-shared
+type: shared-library
+
+# Stands in for platform-shared-go: a library consumed by several families at once, which the
+# service catalog cannot express because it belongs to no single service. Present here so the
+# tests cover the case that previously resolved to nothing.
+module_path: github.com/coderaxis/fixture-shared
+
+repository:
+  provider: github
+  organization: coderaxis
+  name: fixture-shared
+  github_id: 900000004
+  defaultBranch: main
+
+owner: platform-infrastructure
+
+release:
+  mode: semver-tag
+  cascade: true

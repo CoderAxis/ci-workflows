@@ -1,0 +1,321 @@
+name: Bump a module pin and open a PR
+description: >-
+  Move one Go module pin in a target repository to a released version, prove the result builds
+  and passes its suites, and open (and usually auto-merge) the pull request. Everything the bump
+  needs is passed in, so this runs equally well inside the consumer repository or from the
+  central release that is pushing the bump into it.
+
+  This exists as a composite action rather than a reusable workflow because the central release
+  mints a write token per target repository at runtime, and a step output cannot be fed into a
+  reusable workflow's `uses:`. A composite action runs inside the job that minted the token, so
+  it can be handed that token directly.
+
+inputs:
+  target-repository:
+    description: "owner/name of the repository being bumped. Never inferred from the run context: when the central release pushes a bump, the run context is the RELEASING repository, and every gh call that defaulted to it would act on the wrong repo."
+    required: true
+  target-path:
+    description: "Path the target repository is checked out at."
+    required: true
+  module:
+    description: "Go module path being bumped."
+    required: true
+  version:
+    description: "Released semver tag to move to."
+    required: true
+  short:
+    description: "Short module name, used in the branch name and PR title."
+    required: true
+  base-branch:
+    description: "Branch to open the pull request against."
+    required: false
+    default: main
+  token:
+    description: "Installation token with write access to target-repository."
+    required: true
+  service:
+    description: "Catalog service the target belongs to, for the PR body."
+    required: false
+    default: ""
+  repo-kind:
+    description: "core / schema / deployable / shared-library, for the PR body."
+    required: false
+    default: ""
+  required-modules:
+    description: "JSON array of modules the target must pin directly, for the pin policy gate."
+    required: false
+    default: "[]"
+
+outputs:
+  skipped:
+    description: "true when the pin was already at or ahead of this version."
+    value: ${{ steps.guard.outputs.skip }}
+  pull-request-number:
+    description: "Number of the pull request opened, empty when nothing changed."
+    value: ${{ steps.cpr.outputs.pull-request-number }}
+
+runs:
+  using: composite
+  steps:
+    - name: Skip a stale or redundant bump
+      id: guard
+      shell: bash
+      working-directory: ${{ inputs.target-path }}
+      env:
+        MODULE: ${{ inputs.module }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        # Bumps can arrive out of order, and a release can be re-run deliberately. Without this,
+        # a late bump for an older tag would open a PR that DOWNGRADES the pin.
+        current="$(awk -v m="${MODULE}" '
+          $1 == "require" && $2 == "(" { inb = 1; next }
+          inb && $1 == ")" { inb = 0; next }
+          inb && $1 == m { print $2; exit }
+          $1 == "require" && $2 == m { print $3; exit }
+        ' go.mod || true)"
+        echo "current=${current}" >> "${GITHUB_OUTPUT}"
+        echo "skip=false" >> "${GITHUB_OUTPUT}"
+
+        if [[ -z "${current}" ]]; then
+          echo "::notice::${MODULE} is not yet a direct requirement; proceeding to add it"
+          exit 0
+        fi
+        if [[ "${current}" == "${VERSION}" ]]; then
+          echo "skip=true" >> "${GITHUB_OUTPUT}"
+          echo "::notice::already at ${VERSION}; nothing to do"
+          exit 0
+        fi
+        semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
+        if [[ "${current}" =~ ${semver} ]]; then
+          newest="$(printf '%s\n%s\n' "${current#v}" "${VERSION#v}" | sort -V | tail -1)"
+          if [[ "${newest}" == "${current#v}" ]]; then
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            echo "::notice::${current} is already newer than ${VERSION}; refusing to downgrade"
+          fi
+        fi
+
+    - uses: actions/setup-go@v5
+      if: steps.guard.outputs.skip != 'true'
+      with:
+        go-version-file: ${{ inputs.target-path }}/go.mod
+        cache: false
+
+    - name: Mint module-read token
+      id: modauth
+      if: steps.guard.outputs.skip != 'true'
+      uses: coderaxis/github-actions/ci-app-token@v1
+      with:
+        scope: read
+        configure-git: "true"
+
+    - name: Configure private module access
+      if: steps.guard.outputs.skip != 'true'
+      shell: bash
+      env:
+        MOD_TOKEN: ${{ steps.modauth.outputs.token }}
+      run: |
+        set -euo pipefail
+        [[ -n "${MOD_TOKEN}" ]] || { echo "::error::no module-read token minted"; exit 1; }
+        git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+    - name: Bump the pin
+      if: steps.guard.outputs.skip != 'true'
+      shell: bash
+      working-directory: ${{ inputs.target-path }}
+      env:
+        GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+        GONOSUMDB: github.com/coderaxis/*
+        MODULE: ${{ inputs.module }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        GOWORK=off go get "${MODULE}@${VERSION}"
+        GOWORK=off go mod tidy
+        GOWORK=off go build ./...
+
+    # A core release can change request DTOs or the operation registry, so the committed spec can
+    # be stale the moment the pin moves. The generator lives IN the bumped module, so running it
+    # regenerates the spec deterministically from the version now pinned and the drift heals
+    # inside this PR instead of surfacing later as a failed deploy. Absent in older module
+    # versions, hence the tolerated failure.
+    - name: Regenerate OpenAPI contract from the bumped module
+      if: steps.guard.outputs.skip != 'true'
+      continue-on-error: true
+      shell: bash
+      working-directory: ${{ inputs.target-path }}
+      env:
+        GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+        MODULE: ${{ inputs.module }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        gen="${MODULE}/adapters/inbound/http/openapi/cmd/openapi-contract"
+        if [[ -f docs/openapi.json ]] && GOWORK=off go run "${gen}" --spec docs/openapi.json; then
+          echo "contract regenerated from ${MODULE} ${VERSION}"
+        else
+          echo "::notice::no contract generator in ${MODULE} ${VERSION}; the contract gate still applies"
+        fi
+
+    - name: Test against the new pin
+      if: steps.guard.outputs.skip != 'true'
+      shell: bash
+      working-directory: ${{ inputs.target-path }}
+      env:
+        GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+      run: |
+        set -euo pipefail
+        # Contract and integration suites are excluded here and run as their own gates: they need
+        # a database or a running dependency, which a bump PR has no business standing up.
+        #
+        # mapfile, not `go test $(...)`: an unquoted command substitution word-splits, so a
+        # package path containing a space would be passed as two broken arguments.
+        mapfile -t pkgs < <(GOWORK=off go list ./... | grep -Ev '/tests/(contracts|integration)')
+        [[ ${#pkgs[@]} -eq 0 ]] || GOWORK=off go test "${pkgs[@]}" -count=1
+
+    - name: Contract gate
+      if: steps.guard.outputs.skip != 'true'
+      shell: bash
+      working-directory: ${{ inputs.target-path }}
+      env:
+        GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+      run: |
+        set -euo pipefail
+        # Imports the BUMPED module and validates the committed spec against it, so DTO or
+        # operationId drift fails the PR before merge rather than after deploy.
+        if [[ -d tests/contracts ]]; then
+          GOWORK=off go test ./tests/contracts/... -count=1
+        fi
+
+    - name: Check out the central checkers
+      if: steps.guard.outputs.skip != 'true'
+      uses: actions/checkout@v4
+      with:
+        repository: coderaxis/github-actions
+        ref: v1
+        path: .bump-central
+        sparse-checkout: scripts
+
+    - name: Platform module pin policy
+      if: steps.guard.outputs.skip != 'true'
+      shell: bash
+      working-directory: ${{ inputs.target-path }}
+      env:
+        REQUIRED_MODULES: ${{ inputs.required-modules }}
+        BASE: ${{ inputs.base-branch }}
+        WORKSPACE: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        # Trunk-based: the bump targets main, which IS the release branch, so the strict posture
+        # applies and a pseudo-version cannot land.
+        case "${BASE}" in
+          main|prod) MODE=prod ;;
+          preprod) MODE=preprod ;;
+          staging) MODE=staging ;;
+          *) MODE=dev ;;
+        esac
+        python3 "${WORKSPACE}/.bump-central/scripts/check_module_pins.py" --mode "${MODE}"
+
+    - name: Drop the central checkout
+      if: always()
+      shell: bash
+      run: rm -rf "${{ github.workspace }}/.bump-central"
+
+    - name: Close superseded bump PRs for this module
+      if: steps.guard.outputs.skip != 'true'
+      shell: bash
+      env:
+        # The minted target token, not github.token: when the central release pushes a bump the
+        # run's own token has no rights on the target repository at all.
+        GH_TOKEN: ${{ inputs.token }}
+        TARGET: ${{ inputs.target-repository }}
+        SHORT: ${{ inputs.short }}
+        NEW_BRANCH: chore/bump-${{ inputs.short }}-${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        # Leaving them open produces a stack of PRs for the same module at different versions,
+        # any of which could be merged out of order and downgrade the pin.
+        gh pr list --repo "${TARGET}" --state open --json number,headRefName \
+          --jq ".[] | select(.headRefName | startswith(\"chore/bump-${SHORT}-v\")) | select(.headRefName != \"${NEW_BRANCH}\") | .number" \
+        | while read -r pr; do
+            echo "closing superseded #${pr}"
+            gh pr close "${pr}" --repo "${TARGET}" --delete-branch \
+              --comment "Superseded by ${NEW_BRANCH}." || true
+          done
+
+    - name: Open the bump PR
+      id: cpr
+      if: steps.guard.outputs.skip != 'true'
+      uses: peter-evans/create-pull-request@v7
+      with:
+        token: ${{ inputs.token }}
+        path: ${{ inputs.target-path }}
+        branch: chore/bump-${{ inputs.short }}-${{ inputs.version }}
+        base: ${{ inputs.base-branch }}
+        delete-branch: true
+        # Explicit, because the default commits every change in the workspace. A bump may only
+        # move the pin and the spec regenerated from it; anything else appearing in the diff
+        # means a build step wrote into the tree and belongs in its own reviewed change.
+        add-paths: |
+          go.mod
+          go.sum
+          docs/openapi.json
+        labels: |
+          dependencies
+          core-modules
+        title: "chore(deps): bump ${{ inputs.short }} to ${{ inputs.version }}"
+        commit-message: "chore(deps): bump ${{ inputs.short }} to ${{ inputs.version }}"
+        body: |
+          Automated bump from the central release cascade.
+
+          | Field | Value |
+          | --- | --- |
+          | Module | `${{ inputs.module }}` |
+          | From | `${{ steps.guard.outputs.current || 'not pinned' }}` |
+          | To | `${{ inputs.version }}` |
+          | Service | `${{ inputs.service }}` |
+          | Repo kind | `${{ inputs.repo-kind }}` |
+
+          The pin builds, the unit and contract suites pass against it, and the platform pin
+          policy holds. Patch and minor bumps auto-merge once required checks are green; a major
+          bump is labelled for review instead.
+
+    # Auto-merge is what makes this automation rather than a queue of PRs nobody notices. It is
+    # `--auto`, so GitHub still waits for every required check: the merge happens because the
+    # gates passed, not instead of them.
+    #
+    # A major bump is withheld deliberately: it means the module removed or changed API, so a
+    # green build only proves this consumer still compiles, not that the behaviour is intended.
+    # Under semver, 0.x MINOR is also breaking, so it counts as major here.
+    - name: Auto-merge when green, or flag a major bump for review
+      if: steps.guard.outputs.skip != 'true' && steps.cpr.outputs.pull-request-number != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        TARGET: ${{ inputs.target-repository }}
+        CURRENT: ${{ steps.guard.outputs.current }}
+        VERSION: ${{ inputs.version }}
+        PR: ${{ steps.cpr.outputs.pull-request-number }}
+      run: |
+        set -euo pipefail
+        # Quoted: `patch` and `major` are also real commands (SC2209).
+        tier="patch"
+        cv="${CURRENT#v}"; rv="${VERSION#v}"
+        if [[ "${cv}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${rv}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          cmaj="${cv%%.*}"; rmaj="${rv%%.*}"
+          cmin="$(cut -d. -f2 <<<"${cv}")"; rmin="$(cut -d. -f2 <<<"${rv}")"
+          if [[ "${rmaj}" -gt "${cmaj}" ]]; then tier="major"
+          elif [[ "${rmaj}" == "0" && "${cmaj}" == "0" && "${rmin}" -gt "${cmin}" ]]; then tier="major"
+          elif [[ "${rmin}" -gt "${cmin}" ]]; then tier="minor"
+          fi
+        fi
+        echo "::notice::bump tier=${tier} (${CURRENT:-none} -> ${VERSION})"
+
+        if [[ "${tier}" == "major" ]]; then
+          gh pr edit "${PR}" --repo "${TARGET}" \
+            --add-label major-bump --add-label needs-manual-review || true
+          echo "::warning::major bump: auto-merge withheld, #${PR} needs review"
+          exit 0
+        fi
+        gh pr merge "${PR}" --repo "${TARGET}" --squash --auto \
+          || echo "::notice::auto-merge unavailable (branch protection may be off); #${PR} left open"
