@@ -23,21 +23,25 @@ jobs:
       id-token: write
     steps:
       - name: Print selected OIDC claims
+        env:
+          LEVEL: "DEPTH 1 (job defined in _oidc-outer.yml, called by the service repo)"
         run: |
           set -euo pipefail
-          tok="$(curl -sSf -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-                   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
-                 | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
-          printf '%s' "${tok}" | python3 -c '
-import base64, json, sys
-payload = sys.stdin.read().split(".")[1]
-payload += "=" * (-len(payload) % 4)
-c = json.loads(base64.urlsafe_b64decode(payload))
-print("DEPTH 1 (job defined in _oidc-outer.yml, called by the service repo)")
-for k in ("sub","aud","repository","repository_id","repository_owner","repository_owner_id",
-          "workflow_ref","job_workflow_ref","job_workflow_sha","event_name","ref","runner_environment"):
-    print(f"  {k} = {c.get(k)!r}")
-'
+          curl -sSf -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" > /tmp/idtok.json
+          python3 - <<'PY'
+          import base64, json, os
+          tok = json.load(open("/tmp/idtok.json"))["value"]
+          payload = tok.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          c = json.loads(base64.urlsafe_b64decode(payload))
+          print(os.environ["LEVEL"])
+          for k in ("sub", "aud", "repository", "repository_id", "repository_owner",
+                    "repository_owner_id", "workflow_ref", "job_workflow_ref",
+                    "job_workflow_sha", "event_name", "ref", "runner_environment"):
+              print(f"  {k} = {c.get(k)!r}")
+          PY
+          rm -f /tmp/idtok.json
 
   nested:
     name: Delegate to the nested level

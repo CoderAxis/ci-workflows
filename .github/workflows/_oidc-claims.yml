@@ -28,21 +28,25 @@ jobs:
       contents: read
       id-token: write
     steps:
-      # The ID token is itself a credential - it can assume an AWS role - so only the decoded
-      # payload's selected fields are printed, never the token or its signature.
+      # The ID token is itself a credential - it can assume an AWS role - so only selected fields of
+      # the decoded payload are printed, never the token or its signature.
       - name: Print selected OIDC claims
+        env:
+          LEVEL: "DEPTH 2 (job defined in _oidc-claims.yml, called by _oidc-outer.yml)"
         run: |
           set -euo pipefail
-          tok="$(curl -sSf -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-                   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
-                 | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
-          printf '%s' "${tok}" | python3 -c '
-import base64, json, sys
-payload = sys.stdin.read().split(".")[1]
-payload += "=" * (-len(payload) % 4)
-c = json.loads(base64.urlsafe_b64decode(payload))
-print("DEPTH 2 (job defined in _oidc-claims.yml, called by _oidc-outer.yml)")
-for k in ("sub","aud","repository","repository_id","repository_owner","repository_owner_id",
-          "workflow_ref","job_workflow_ref","job_workflow_sha","event_name","ref","runner_environment"):
-    print(f"  {k} = {c.get(k)!r}")
-'
+          curl -sSf -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" > /tmp/idtok.json
+          python3 - <<'PY'
+          import base64, json, os
+          tok = json.load(open("/tmp/idtok.json"))["value"]
+          payload = tok.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          c = json.loads(base64.urlsafe_b64decode(payload))
+          print(os.environ["LEVEL"])
+          for k in ("sub", "aud", "repository", "repository_id", "repository_owner",
+                    "repository_owner_id", "workflow_ref", "job_workflow_ref",
+                    "job_workflow_sha", "event_name", "ref", "runner_environment"):
+              print(f"  {k} = {c.get(k)!r}")
+          PY
+          rm -f /tmp/idtok.json
