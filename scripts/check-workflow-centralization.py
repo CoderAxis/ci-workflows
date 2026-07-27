@@ -312,7 +312,13 @@ def check_repo(
     # The publishing repo cannot shadow its own publications: those files ARE the central
     # workflows, and they do not call themselves.
     is_central = root == central
-    allowed_lanes = set(controls["WFC-006"].get("allowed_lanes") or ())
+    c6cfg = controls["WFC-006"]
+    allowed_lanes = set(c6cfg.get("allowed_lanes") or ())
+    # A repo-scoped extension, declared centrally. Keyed on directory name rather than on anything
+    # the repository itself asserts, so a repo cannot widen its own allowance.
+    allowed_lanes |= set(
+        ((c6cfg.get("repository_lanes") or {}).get(root.name) or {}).get("lanes") or ()
+    )
 
     for wf in consumer_workflows(root):
         try:

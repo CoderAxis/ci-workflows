@@ -182,6 +182,19 @@ controls:
     allowed_lanes:
       - ci.yaml
       - release.yaml
+    # A repository whose lifecycle genuinely is not a service pipeline declares its extra lanes
+    # HERE, in the platform's catalog, rather than by quietly adding a file to itself. That is the
+    # whole difference between an exemption and drift: this list is reviewable, greppable and
+    # attached to a reason, and a repository cannot grant itself an entry.
+    repository_lanes:
+      inboxxhq-infra:
+        lanes: [terraform-apply.yaml, promote-to-prod.yaml]
+        reason: >-
+          Terraform apply and production promotion are gated, manually-dispatched actions with
+          approval environments attached to the workflow itself. Folding them into ci.yaml as jobs
+          would put a `terraform apply` behind the same trigger as a lint, and GitHub attaches a
+          deployment environment - and therefore its required reviewers - per job, not per branch,
+          so the approval gate is a property of keeping them separate.
     policy: >-
       A repository's `.github/workflows` directory MUST contain only `ci.yaml`, `release.yaml`, and
       workflows that the repository itself PUBLISHES as reusable (`on.workflow_call`). Any other
