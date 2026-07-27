@@ -502,10 +502,9 @@ jobs:
           rc=0
           wf=".github/workflows"
 
-          # Every repo calls central CI. A core or schema module also publishes a version, and
-          # anything that pins a platform module must be able to receive a bump dispatch - without
-          # a listener the cascade stops silently at that repo, which is how a consumer ends up a
-          # major version behind while every pipeline stays green.
+          # Every repo calls central CI. A core or schema module also publishes a version, so it
+          # owns a release lane. A deployable publishes nothing and receives its pins from the
+          # cascade, so ci.yml is the whole of its surface.
           required="${wf}/ci.yml"
           case "${REPO_KIND}" in
             core)       required="${required} ${wf}/release.yml" ;;
@@ -527,13 +526,17 @@ jobs:
             return 1
           }
 
-          if [[ "${REPO_KIND}" == "schema" || "${REPO_KIND}" == "deployable" ]]; then
-            if ! any_of "${wf}/bump-core-modules.yml" "${wf}/bump-engine-core.yml"; then
-              echo "::error::this repo pins a platform module but has no bump listener"
-              echo "(bump-core-modules.yml or bump-engine-core.yml). A release would notify it and"
-              echo "nothing would happen, so it would silently fall behind."
-              rc=1
-            fi
+          # This check used to run the other way round: a schema or deployable repo was REQUIRED to
+          # hold a bump listener. That was correct while the cascade woke consumers by
+          # repository_dispatch, and became backwards when module-release.yml started writing the
+          # pin directly with bump-module-pin. A listener now duplicates a bump the cascade has
+          # already made, so its presence is the defect - and leaving the rule inverted would have
+          # failed all 64 schema and deployable repos for lacking a file the platform deleted.
+          if any_of "${wf}/bump-core-modules.yml" "${wf}/bump-engine-core.yml"; then
+            echo "::error::this repo holds a bump listener, but the cascade no longer dispatches to"
+            echo "consumers - module-release.yml writes the pin directly. The listener would open a"
+            echo "second, competing PR for a bump that has already landed. Delete it."
+            rc=1
           fi
 
           # Absorbed into this pipeline. A surviving local copy is not redundant, it is a second
@@ -542,7 +545,9 @@ jobs:
                     docs-lint stale-docs-check schema-compatibility event-handling-compliance
                     seed-contract-check sqlc-guard core-guard sbom deploy post-deploy
                     reusable-notify-consumers reusable-module-auth pipeline-policy
-                    adr-validation openapi-validation dockerfile-standard docs-governance"
+                    adr-validation openapi-validation dockerfile-standard docs-governance
+                    integration-tests contract-check openapi-contract contract-tests
+                    bump-shared-modules"
           for name in ${absorbed}; do
             if [[ -f "${wf}/${name}.yml" ]]; then
               echo "::error::${wf}/${name}.yml is absorbed by central CI but still present here."
@@ -825,6 +830,197 @@ jobs:
           done
           echo "no committed OpenAPI contract; operationId governance does not apply"
 
+  # ── integration ─────────────────────────────────────────────────────────────────────────────
+  # Absorbs the per-repo integration-tests.yml: 35 copies, of which 21 were byte-identical and the
+  # other 14 had drifted into nine variants of the same harness. All 35 authenticated with
+  # `secrets.CODERAXIS_APP_ID`, which the OIDC migration deleted - so every one of them had been
+  # unable to download a private module since that change, and the fleet's only real end-to-end
+  # coverage was failing or vacuously passing in 35 places at once.
+  #
+  # The selection rule is the substantive change. The old harness looked for
+  # tests/integration/*_test.go and set run=false when it found none, which made deleting your
+  # integration tests the way to pass the integration gate. Here the catalog decides who owes
+  # coverage, so an empty tests/integration directory is a failure for a service that owns data
+  # rather than a silent skip.
+  integration:
+    name: Integration tests
+    needs: resolve
+    if: needs.resolve.outputs.repo_kind == 'deployable' && needs.resolve.outputs.language == 'go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: service_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: public.ecr.aws/docker/library/redis:7
+        ports:
+          - 6379/tcp
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+      GONOSUMDB: github.com/coderaxis/*
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+          cache: false
+
+      - name: Resolve service endpoints
+        shell: bash
+        env:
+          PG_PORT: ${{ job.services.postgres.ports['5432'] }}
+          REDIS_PORT: ${{ job.services.redis.ports['6379'] }}
+        run: |
+          set -euo pipefail
+          dsn="postgres://postgres:postgres@localhost:${PG_PORT}/service_test?sslmode=disable"
+          {
+            echo "DATABASE_URL=${dsn}"
+            echo "POSTGRES_DSN=${dsn}"
+            echo "REDIS_ADDR=localhost:${REDIS_PORT}"
+          } >> "${GITHUB_ENV}"
+
+      # The catalog, not the working tree, decides whether this service owes integration coverage.
+      - name: Decide whether integration coverage is owed
+        id: selection
+        shell: bash
+        env:
+          OWNS_DATABASE: ${{ needs.resolve.outputs.owns_database }}
+          HAS_EVENTS: ${{ needs.resolve.outputs.has_events }}
+        run: |
+          set -euo pipefail
+          present=false
+          find tests/integration -name '*_test.go' -print -quit 2>/dev/null | grep -q . && present=true
+
+          owed=false
+          [[ "${OWNS_DATABASE}" == "true" || "${HAS_EVENTS}" == "true" ]] && owed=true
+
+          if [[ "${owed}" == "true" && "${present}" == "false" ]]; then
+            echo "::error::the catalog declares this service owns a database and/or publishes events,"
+            echo "but tests/integration contains no Go test files. The behaviour that crosses a"
+            echo "process boundary is exactly the behaviour unit tests cannot cover."
+            exit 1
+          fi
+          echo "run=${present}" >> "${GITHUB_OUTPUT}"
+          [[ "${present}" == "true" ]] \
+            || echo "service owes no integration coverage and ships none" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Mint module-read token
+        if: steps.selection.outputs.run == 'true'
+        id: modauth
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          configure-git: "true"
+
+      - name: Download private modules
+        if: steps.selection.outputs.run == 'true'
+        shell: bash
+        run: GOWORK=off go mod download
+
+      # Only started for a service the catalog says publishes or consumes events. The old harness
+      # paid for a Redpanda broker on every deployable regardless.
+      - name: Start Redpanda
+        if: steps.selection.outputs.run == 'true' && needs.resolve.outputs.has_events == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name redpanda -p 9092:9092 -p 9644:9644 \
+            redpandadata/redpanda:v24.3.6 \
+            redpanda start --overprovisioned --smp 1 --memory 512M --reserve-memory 0M \
+              --node-id 0 --check=false \
+              --kafka-addr PLAINTEXT://0.0.0.0:9092 \
+              --advertise-kafka-addr PLAINTEXT://127.0.0.1:9092
+          echo "KAFKA_BROKERS=localhost:9092" >> "${GITHUB_ENV}"
+
+      # TDD-NO-SKIP-GUARD, kept verbatim in intent from the workflow this replaces. A t.Skip() in an
+      # integration test is indistinguishable from a passing one in the check list, and the runner
+      # supplies Postgres, Redis and Kafka, so there is no legitimate reason to skip.
+      - name: Run integration tests
+        if: steps.selection.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t pkgs < <(GOWORK=off go list ./tests/integration/... 2>/dev/null)
+          if [[ ${#pkgs[@]} -eq 0 ]]; then
+            echo "::error::integration test files exist but no Go packages resolved under ./tests/integration/..."
+            exit 1
+          fi
+
+          status=0
+          GOWORK=off go test "${pkgs[@]}" -count=1 -v -json | tee integration-tests.jsonl \
+            || status="${PIPESTATUS[0]}"
+          [[ "${status}" -eq 0 ]] || { echo "::error::integration tests failed"; exit "${status}"; }
+
+          ran=$(grep -c '"Action":"run"' integration-tests.jsonl || true)
+          skipped=$(grep '"Action":"skip"' integration-tests.jsonl | grep -c '"Test":' || true)
+          echo "integration tests: executed=${ran} skipped=${skipped}"
+
+          if [[ "${ran}" -eq 0 ]]; then
+            echo "::error::no integration tests executed; the gate would have passed on an empty run"
+            exit 1
+          fi
+          if [[ "${skipped}" -gt 0 ]]; then
+            echo "::error::${skipped} integration test(s) called t.Skip(). Postgres, Redis and Kafka"
+            echo "are supplied by this job (DATABASE_URL/POSTGRES_DSN/REDIS_ADDR/KAFKA_BROKERS)."
+            grep '"Action":"skip"' integration-tests.jsonl | grep '"Test":' \
+              | sed 's/.*"Test":"\([^"]*\)".*/  skipped: \1/' | sort -u
+            exit 1
+          fi
+
+  # ── API contract lifecycle ──────────────────────────────────────────────────────────────────
+  # Absorbs contract-check.yml (33 repos) and openapi-contract.yml (5). Those two filenames held
+  # the same workflow calling the same registry pipeline, so the fleet ran one gate under two names
+  # and neither WFC nor a reader grepping for one of them would find the other.
+  #
+  # Three things were wrong with the per-repo form beyond the duplication:
+  #   - every copy pinned `@main`, so the contract gate changed under all 38 services with no
+  #     version bump. WFC-002 did not catch it because it only checks refs into
+  #     coderaxis/github-actions, and this workflow is published by another org.
+  #   - every copy passed coderaxis-app-id, which the OIDC migration deleted.
+  #   - service-name was hand-written in each file, so a rename silently pointed a service at
+  #     another service's registry directory. It is now read from the catalog.
+  #
+  # A note on what this gate currently proves: all 38 callers left `generate`, `breaking-change`
+  # and `publish-on-main` at their defaults, so the drift gate, the oasdiff breaking-change check
+  # and registry publication have never run for any service. What survives is structural validation
+  # plus the caller's contract tests. Turning the other stages on needs a published baseline to
+  # diff against, which cannot exist while publication is off - tracked rather than silently
+  # enabled here, because enabling oasdiff with no baseline produces a green check that means
+  # nothing, which is the failure mode this whole migration exists to remove.
+  contract:
+    name: API contract
+    needs: resolve
+    if: needs.resolve.outputs.repo_kind == 'deployable' && needs.resolve.outputs.has_rest == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: InboxxHQ-CoderAxis/inboxxhq-api-contracts/.github/workflows/reusable-openapi-contract.yml@v1
+    with:
+      service-name: ${{ needs.resolve.outputs.service }}
+      spec-file: docs/openapi.json
+      contract-test-command: GOWORK=off go test ./tests/contracts/... -count=1 -v
+
   # ── documentation ───────────────────────────────────────────────────────────────────────────
   # Replaces the per-repo docs-lint.yml and stale-docs-check.yml, which both ran
   # scripts/validate_docs.py from the repository being checked. That file existed in 91
@@ -922,7 +1118,7 @@ jobs:
     name: Notify on failure
     needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
             dockerfile, structure, lanes, vulnerabilities, sqlc, docs, contracts, dependency-review,
-            artifact]
+            integration, contract, artifact]
     # always() rather than failure(): several gates above are conditional, and a plain failure()
     # does not run once any needed job has been skipped - which is the normal shape here, so the
     # alert would have fired only on the subset of runs where every gate happened to be relevant.
