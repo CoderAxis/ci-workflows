@@ -71,20 +71,9 @@ on:
         required: false
         type: string
         default: main
-    secrets:
-      # DEPRECATED and unread: tokens are minted from the job's own OIDC identity via
-      # ci-app-token. Kept optional so callers still passing them keep starting; remove
-      # once no caller does.
-      CODERAXIS_APP_ID:
-        required: false
-      CODERAXIS_APP_PRIVATE_KEY:
-        required: false
-      RELEASE_BOT_APP_ID:
-        required: false
-      RELEASE_BOT_APP_PRIVATE_KEY:
-        required: false
-      SLACK_BOT_TOKEN:
-        required: false
+
+# No `secrets:` block, deliberately: every credential is minted from this job's own OIDC identity
+# against AWS. See module-release.yml for the reasoning.
 
 permissions:
   contents: read
@@ -398,25 +387,22 @@ jobs:
             || echo "::notice::auto-merge unavailable (branch protection may be off); #${PR} left open"
 
       # A bump that fails is how a consumer silently falls behind - the release succeeded, so
-      # nothing else reports a problem. skentra-auth-service sat a full major version behind its
+      # nothing else reports a problem. A consumer service can sit a full major version behind its
       # adapter this way.
+      #
+      # The token is read from Secrets Manager against this job's OIDC identity, so no repository
+      # forwards a Slack credential. The previous form was guarded by the token being non-empty,
+      # which meant an unconfigured repo silently posted nothing - the alert about a broken bump
+      # was itself the thing that broke.
       - name: Alert on a failed bump
         if: failure()
-        uses: slackapi/slack-github-action@v2.1.0
-        continue-on-error: true
+        uses: coderaxis/github-actions/ci-slack-notify@v1
         with:
-          method: chat.postMessage
-          token: ${{ secrets.SLACK_BOT_TOKEN }}
-          payload: |
-            {
-              "channel": "${{ vars.SLACK_ALERTS_CHANNEL || '#platform-bump-alerts' }}",
-              "text": ":red_circle: *Bump failed* — `${{ github.repository }}` could not bump ${{ needs.resolve.outputs.short }} to ${{ inputs.version }}",
-              "attachments": [{
-                "color": "danger",
-                "fields": [
-                  {"title": "Module", "value": "${{ inputs.module }}", "short": true},
-                  {"title": "Version", "value": "${{ inputs.version }}", "short": true},
-                  {"title": "Run", "value": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}", "short": false}
-                ]
-              }]
-            }
+          status: failure
+          title: Bump failed
+          text: "Could not bump ${{ needs.resolve.outputs.short }} to ${{ inputs.version }}"
+          fields: |
+            [
+              {"title": "Module", "value": "${{ inputs.module }}", "short": true},
+              {"title": "Version", "value": "${{ inputs.version }}", "short": true}
+            ]
