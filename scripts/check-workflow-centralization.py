@@ -78,7 +78,7 @@ def load_catalog(path: Path) -> tuple[dict, dict[str, dict]]:
         if not cid or c.get("severity") not in SEVERITY_ORDER:
             raise SystemExit(f"::error::{path}: control {cid!r} missing a valid id/severity")
         by_id[cid] = c
-    for required in ("WFC-001", "WFC-002", "WFC-004"):
+    for required in ("WFC-001", "WFC-002", "WFC-004", "WFC-005"):
         if required not in by_id:
             raise SystemExit(f"::error::{path}: catalog is missing {required}, which has a detector")
     return doc, by_id
@@ -245,6 +245,32 @@ def consumer_workflows(root: Path) -> list[Path]:
     return sorted((root / WORKFLOW_DIR).glob("*.yml"))
 
 
+_RELEASED_EVENT = re.compile(r"^[a-z0-9][a-z0-9-]*-released$")
+
+
+def _is_local_bump(filename: str, doc: dict) -> bool:
+    """A workflow that propagates a dependency bump inside the repository that hosts it.
+
+    Two independent signals, because either alone misses a real case. A listener is identified by
+    its `repository_dispatch` type - that is the mechanism, and a rename does not change it. A
+    bump driven only by `workflow_dispatch` has no such trigger, so the filename is checked as
+    well; `bump-shared-modules.yml`, the 315-line local implementation that existed in 70
+    repositories, is caught by both.
+    """
+    if filename.startswith("bump-"):
+        return True
+    on = doc.get("on") or doc.get(True)  # bare `on:` parses as the boolean True in YAML 1.1
+    if not isinstance(on, dict):
+        return False
+    dispatch = on.get("repository_dispatch")
+    if not isinstance(dispatch, dict):
+        return False
+    types = dispatch.get("types")
+    if isinstance(types, str):
+        types = [types]
+    return any(isinstance(t, str) and _RELEASED_EVENT.match(t) for t in (types or []))
+
+
 def check_repo(
     root: Path, published: dict[str, Path], controls: dict[str, dict], central: Path
 ) -> list[Finding]:
@@ -252,6 +278,7 @@ def check_repo(
     shadows: list[str] = []
     bad_refs: list[str] = []
     perm_gaps: list[str] = []
+    local_bumps: list[str] = []
 
     # The publishing repo cannot shadow its own publications: those files ARE the central
     # workflows, and they do not call themselves.
@@ -282,6 +309,13 @@ def check_repo(
             doc = None
         if not isinstance(doc, dict):
             continue
+
+        # WFC-005 — a local bump. Matched on the trigger rather than the filename, because the
+        # thing that makes a file a bump listener is that it subscribes to `<module>-released`;
+        # renaming it changes nothing. The filename is checked too, since a bump driven only by
+        # workflow_dispatch has no such trigger to match on.
+        if not is_central and _is_local_bump(wf.name, doc):
+            local_bumps.append(str(wf.relative_to(root)))
         wf_level = doc.get("permissions")
         for job_id, job in (doc.get("jobs") or {}).items():
             if not isinstance(job, dict):
@@ -358,6 +392,24 @@ def check_repo(
             if perm_gaps
             else "every reusable-workflow call grants the permissions its callee declares",
             c4["remediation"].strip(),
+        )
+    )
+
+    c5 = controls["WFC-005"]
+    findings.append(
+        Finding(
+            "WFC-005",
+            c5["severity"],
+            c5["title"],
+            "fail" if local_bumps else "pass",
+            f"{len(local_bumps)} local bump workflow(s): " + ", ".join(local_bumps)
+            if local_bumps
+            else (
+                "central release owns bump propagation; nothing to shadow here"
+                if is_central
+                else "no local bump implementation or release listener"
+            ),
+            c5["remediation"].strip(),
         )
     )
     return findings

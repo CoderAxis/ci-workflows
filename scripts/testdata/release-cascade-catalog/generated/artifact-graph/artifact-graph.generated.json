@@ -1,0 +1,89 @@
+{
+  "consumers": {
+    "fixture-core": [
+      "fixture-core-postgres",
+      "inboxxhq-fixture-service"
+    ],
+    "fixture-core-postgres": [
+      "inboxxhq-fixture-service"
+    ],
+    "fixture-shared": [
+      "fixture-core",
+      "fixture-core-postgres",
+      "fixture-cycle-a",
+      "inboxxhq-fixture-service"
+    ]
+  },
+  "edges": [
+    { "from": "fixture-core-postgres", "to": "fixture-core", "version": "v0.17.1" },
+    { "from": "inboxxhq-fixture-service", "to": "fixture-core", "version": "v0.17.1" },
+    { "from": "inboxxhq-fixture-service", "to": "fixture-core-postgres", "version": "v1.4.4" },
+    { "from": "fixture-core", "to": "fixture-shared", "version": "v1.10.1" },
+    { "from": "fixture-core-postgres", "to": "fixture-shared", "version": "v1.10.1" },
+    { "from": "inboxxhq-fixture-service", "to": "fixture-shared", "version": "v1.10.1" },
+    { "from": "fixture-cycle-a", "to": "fixture-shared", "version": "v1.10.1" },
+    { "from": "fixture-cycle-a", "to": "fixture-cycle-b", "version": "v0.1.0" },
+    { "from": "fixture-cycle-b", "to": "fixture-cycle-a", "version": "v0.4.0" }
+  ],
+  "nodes": {
+    "fixture-core": {
+      "module_path": "github.com/coderaxis/fixture-core",
+      "name": "fixture-core",
+      "repository": { "github_id": 900000001, "name": "fixture-core", "organization": "coderaxis" },
+      "service": "fixture-service",
+      "type": "core"
+    },
+    "fixture-core-postgres": {
+      "module_path": "github.com/coderaxis/fixture-core-postgres",
+      "name": "fixture-core-postgres",
+      "repository": { "github_id": 900000002, "name": "fixture-core-postgres", "organization": "coderaxis" },
+      "service": "fixture-service",
+      "type": "schema"
+    },
+    "inboxxhq-fixture-service": {
+      "module_path": null,
+      "name": "inboxxhq-fixture-service",
+      "repository": { "github_id": 900000003, "name": "inboxxhq-fixture-service", "organization": "InboxxHQ-CoderAxis" },
+      "service": "fixture-service",
+      "type": "deployable"
+    },
+    "fixture-shared": {
+      "cascade": true,
+      "module_path": "github.com/coderaxis/fixture-shared",
+      "name": "fixture-shared",
+      "repository": { "github_id": 900000004, "name": "fixture-shared", "organization": "coderaxis" },
+      "service": null,
+      "type": "shared-library"
+    },
+    "fixture-cycle-a": {
+      "module_path": "github.com/coderaxis/fixture-cycle-a",
+      "name": "fixture-cycle-a",
+      "repository": { "github_id": 900000005, "name": "fixture-cycle-a", "organization": "coderaxis" },
+      "service": null,
+      "type": "core"
+    },
+    "fixture-cycle-b": {
+      "module_path": "github.com/coderaxis/fixture-cycle-b",
+      "name": "fixture-cycle-b",
+      "repository": { "github_id": 900000006, "name": "fixture-cycle-b", "organization": "coderaxis" },
+      "service": null,
+      "type": "schema"
+    }
+  },
+  "not_checked_out": [],
+  "release_order": [
+    ["fixture-shared"],
+    ["fixture-core"],
+    ["fixture-core-postgres"],
+    ["inboxxhq-fixture-service"]
+  ],
+  "summary": {
+    "artifacts": 6,
+    "by_type": { "core": 2, "deployable": 1, "schema": 2, "shared-library": 1 },
+    "depth": 4,
+    "edges": 9,
+    "observed_repositories": 6,
+    "unorderable": 2
+  },
+  "unorderable": ["fixture-cycle-a", "fixture-cycle-b"]
+}

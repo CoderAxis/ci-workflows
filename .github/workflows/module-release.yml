@@ -107,8 +107,8 @@ jobs:
       repo_kind: ${{ steps.id.outputs.repo_kind }}
       module_path: ${{ steps.id.outputs.module_path }}
       upstream_module: ${{ steps.id.outputs.upstream_module }}
-      dispatch_event: ${{ steps.id.outputs.dispatch_event }}
       consumers: ${{ steps.id.outputs.consumers }}
+      unorderable_consumers: ${{ steps.id.outputs.unorderable_consumers }}
     steps:
       - name: Derive identity from the immutable repository id
         id: id
@@ -447,19 +447,23 @@ jobs:
   # Unconditional by design. The only condition is "was anything released", never "is this repo
   # allowed to notify" - that second question is what ENABLE_CORE_RELEASE_AUTOMATION answered
   # differently in 65 repos.
-  notify-consumers:
-    name: Notify ${{ matrix.kind }} ${{ matrix.repository }}
+  bump-consumers:
+    name: Bump ${{ matrix.kind }} ${{ matrix.repository }}
     needs: [resolve, release]
     if: needs.release.outputs.releasable == 'true' && needs.resolve.outputs.consumers != '[]'
     permissions:
       contents: read
       id-token: write
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
     strategy:
       # One unreachable consumer must not suppress the others; a partial fan-out is recoverable
-      # by re-dispatch, whereas a cancelled fan-out hides which targets were reached.
+      # by re-running, whereas a cancelled fan-out hides which targets were reached.
       fail-fast: false
+      # platform-shared-go reaches 80 consumers. Unthrottled that is 80 concurrent jobs, each
+      # cloning a repository and running a Go build, which exhausts the runner pool and trips
+      # secondary rate limits - and a rate-limited bump looks identical to a broken one.
+      max-parallel: 12
       matrix:
         include: ${{ fromJSON(needs.resolve.outputs.consumers) }}
     steps:
@@ -467,13 +471,17 @@ jobs:
         id: t
         env:
           TARGET: ${{ matrix.repository }}
+          MODULE: ${{ needs.resolve.outputs.module_path }}
         run: |
           set -euo pipefail
-          echo "owner=${TARGET%%/*}" >> "${GITHUB_OUTPUT}"
-          echo "repo=${TARGET##*/}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "owner=${TARGET%%/*}"
+            echo "repo=${TARGET##*/}"
+            echo "short=${MODULE##*/}"
+          } >> "${GITHUB_OUTPUT}"
 
       # Scoped to the single target repository, so a release holds write on exactly the consumer
-      # it is notifying and not on the fleet.
+      # it is bumping and not on the fleet.
       - name: Mint release-bot token for this target
         id: bottoken
         uses: coderaxis/github-actions/ci-app-token@v1
@@ -482,44 +490,66 @@ jobs:
           owner: ${{ steps.t.outputs.owner }}
           repositories: ${{ steps.t.outputs.repo }}
 
-      - name: Dispatch the bump
-        uses: peter-evans/repository-dispatch@v4
+      - name: Check out the consumer
+        uses: actions/checkout@v4
         with:
-          token: ${{ steps.bottoken.outputs.token }}
           repository: ${{ matrix.repository }}
-          event-type: ${{ needs.resolve.outputs.dispatch_event }}
-          client-payload: |
-            {
-              "module": "${{ needs.resolve.outputs.module_path }}",
-              "version": "${{ needs.release.outputs.version }}",
-              "consumer_kind": "${{ matrix.kind }}",
-              "source_repository": "${{ github.repository }}",
-              "source_sha": "${{ github.sha }}"
-            }
+          token: ${{ steps.bottoken.outputs.token }}
+          path: consumer
+          fetch-depth: 0
 
-  # A dispatch that silently fails to land is how a consumer ends up a major version behind
-  # without anyone noticing, so an incomplete fan-out is surfaced rather than left in the log.
+      # The bump happens here rather than in the consumer repository. Previously this step fired
+      # a repository_dispatch, whose only effect was to wake a 41-line workflow in the consumer
+      # that immediately called back into this same central repository - a round trip through the
+      # consumer to reach code that started here. The list of consumers, the dependency order and
+      # a write token for the target are all already resolved in this job, so the round trip
+      # bought nothing and cost 138 files across the fleet.
+      - name: Bump the pin and open the PR
+        uses: coderaxis/github-actions/bump-module-pin@v1
+        with:
+          target-repository: ${{ matrix.repository }}
+          target-path: consumer
+          module: ${{ needs.resolve.outputs.module_path }}
+          version: ${{ needs.release.outputs.version }}
+          short: ${{ steps.t.outputs.short }}
+          token: ${{ steps.bottoken.outputs.token }}
+          service: ${{ needs.resolve.outputs.service }}
+          repo-kind: ${{ matrix.kind }}
+          required-modules: ${{ toJSON(matrix.requires) }}
+
+  # A bump that silently fails to land is how a consumer ends up a major version behind without
+  # anyone noticing, so an incomplete fan-out is surfaced rather than left in the log.
   fan-out-report:
     name: Report fan-out result
-    needs: [resolve, release, notify-consumers]
+    needs: [resolve, release, bump-consumers]
     if: always() && needs.release.outputs.releasable == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fail if any consumer was not notified
+      - name: Fail if any consumer was not bumped
         env:
-          RESULT: ${{ needs.notify-consumers.result }}
+          RESULT: ${{ needs.bump-consumers.result }}
           CONSUMERS: ${{ needs.resolve.outputs.consumers }}
+          WITHHELD: ${{ needs.resolve.outputs.unorderable_consumers }}
           VERSION: ${{ needs.release.outputs.version }}
           MODULE: ${{ needs.resolve.outputs.module_path }}
         run: |
           set -euo pipefail
           echo "released ${MODULE} ${VERSION}"
           echo "consumers: ${CONSUMERS}"
+
+          # A consumer sitting in a dependency cycle has no release order, so the cascade declined
+          # to bump it rather than pick an arbitrary first. That is a defect in the module graph,
+          # not in this run, and it stays visible until the cycle is broken.
+          if [[ -n "${WITHHELD}" ]]; then
+            echo "::warning::withheld from the cascade because they sit in a dependency cycle:" \
+                 "${WITHHELD}. They will not receive ${MODULE} ${VERSION} until the cycle is broken."
+          fi
+
           if [[ "${RESULT}" != "success" ]]; then
             echo "::error::fan-out result was '${RESULT}'. ${MODULE} ${VERSION} is published but at" \
-                 "least one consumer was not notified, so it will keep building against the old" \
-                 "version. Re-run this job to re-dispatch."
+                 "least one consumer was not bumped, so it will keep building against the old" \
+                 "version. Re-run this job to retry the bump."
             exit 1
           fi
-          echo "every catalog-declared consumer was notified"
+          echo "every consumer the artifact graph declares was bumped"

@@ -81,6 +81,20 @@ def load_bindings(catalog_root: pathlib.Path) -> tuple[dict, dict]:
                 # has no Makefile at all. Gating them on one requirement set fails 27 of them on
                 # absences that are correct.
                 expected.setdefault(int(gid), (block.get("name"), kind))
+
+    # Shared libraries are not services and have no service entry, so before the artifact catalog
+    # existed they resolved to nothing: platform-shared-go, which 85 repositories pin, could not
+    # run central CI on its own release because the resolver did not know what it was. They bind
+    # the same way, by immutable id, and are marked with their own kind so the gates that assume
+    # a service (coverage tier, Dockerfile capabilities, deploy) do not fire on a library.
+    artifacts = catalog_root / "catalog" / "artifacts"
+    for path in sorted(artifacts.glob("*.yaml")) if artifacts.is_dir() else []:
+        entry = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        block = entry.get("repository") or {}
+        gid = block.get("github_id")
+        if gid:
+            by_id.setdefault(int(gid), entry)
+            expected.setdefault(int(gid), (block.get("name"), "shared-library"))
     return by_id, expected
 
 
@@ -127,50 +141,80 @@ def _repo_ref(block: dict) -> str:
     return f"{org}/{name}" if org and name else ""
 
 
-def resolve_release_targets(entry: dict, repo_kind: str) -> dict[str, str]:
-    """Derive the module path and the consumers a release must notify.
+def load_artifact_graph(catalog_root: pathlib.Path) -> dict:
+    """The platform artifact graph, or an empty graph when it has not been published yet."""
+    path = catalog_root / "generated" / "artifact-graph" / "artifact-graph.generated.json"
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
 
-    The dependency direction is fixed by SHARED_CORE_RELEASE_AND_PROMOTION.md §1:
+
+def resolve_release_targets(entry: dict, repo_kind: str, repo_name: str,
+                            graph: dict) -> dict[str, str]:
+    """Derive the module path and every repository a release must open a bump PR against.
+
+    This used to read one service entry and walk that family's three repositories:
 
         core  <-  core-postgres  <-  deployable
 
-    so the fan-out follows the arrows. Releasing a core notifies the schema adapter AND the
-    deployable (both pin the core directly - the "diamond"); releasing the adapter notifies
-    only the deployable; a deployable is an image, not a module, so it releases nothing.
+    which is correct for a family and blind to everything shared between families. Two modules
+    fall outside any single family and they are the two most depended-upon artifacts on the
+    platform: platform-shared-go with 85 direct consumers and platform-contracts-go with 49.
+    Neither could be expressed, so neither was cascaded - platform-shared-go was propagated by a
+    315-line workflow hand-copied into 70 repositories (which reached 67 of its 85 consumers,
+    missing every *-core-postgres adapter), and platform-contracts-go was not propagated at all,
+    because no workflow anywhere subscribed to its release.
 
-    Deriving this from the catalog replaces a hand-maintained matrix duplicated into every
-    core repo. Those matrices drifted three ways at once: they named a second brand the
-    catalog does not model, they were gated by a per-repo ENABLE_CORE_RELEASE_AUTOMATION
-    variable that was true in 38 repos, false in 15 and unset in 12, and in five families
-    the core and its adapter disagreed - so the adapter released and never told the service,
-    manufacturing exactly the version skew §8 warns about. A derived fan-out cannot disagree
-    with itself, and cannot forget a consumer that the catalog knows about.
+    Reading the artifact graph instead answers the same question for every artifact kind with no
+    special case: who directly requires this module, according to the go.mod files that the
+    compiler actually reads. The family walk is preserved exactly - it is what the graph contains
+    for a core - and the shared libraries stop being exceptions.
+
+    Consumers carry their release level so the caller can bump in dependency order. A consumer
+    the graph cannot order (it sits in a cycle) is withheld rather than guessed at: two artifacts
+    that require each other have no first, and bumping one of them arbitrarily writes a version
+    that the other cannot yet satisfy.
     """
-    core = entry.get("repository") or {}
-    schema = entry.get("schema_repository") or {}
-    deployable = entry.get("deployable_repository") or {}
+    nodes = graph.get("nodes") or {}
+    node = nodes.get(repo_name)
+    if node is None or not node.get("module_path"):
+        # A deployable is an image, not a published module: nothing can require it, so it has no
+        # consumers by construction rather than by omission.
+        return {"module_path": "", "consumers": "[]", "unorderable_consumers": ""}
 
-    if repo_kind == "core":
-        source, downstream = core, [("schema", schema), ("deployable", deployable)]
-    elif repo_kind == "schema":
-        source, downstream = schema, [("deployable", deployable)]
-    else:
-        return {"module_path": "", "dispatch_event": "", "consumers": "[]"}
+    level_of = {name: i for i, level in enumerate(graph.get("release_order") or [])
+                for name in level}
+    unorderable = set(graph.get("unorderable") or [])
 
-    org = source.get("organization")
-    name = source.get("name")
-    if not (org and name):
-        return {"module_path": "", "dispatch_event": "", "consumers": "[]"}
+    # What each consumer pins directly, read off its own outgoing edges. The pin policy gate runs
+    # against the consumer, so it needs the consumer's module set and not the releasing repo's.
+    # Deriving it from the same graph edges keeps the gate honest: the modules it enforces are
+    # exactly the ones the consumer's go.mod actually requires.
+    requires: dict[str, list[str]] = {}
+    for edge in graph.get("edges") or []:
+        target_node = nodes.get(edge["to"]) or {}
+        if target_node.get("module_path"):
+            requires.setdefault(edge["from"], []).append(target_node["module_path"])
 
-    consumers = [
-        {"repository": ref, "kind": kind}
-        for kind, block in downstream
-        if (ref := _repo_ref(block))
-    ]
+    consumers, withheld = [], []
+    for name in graph.get("consumers", {}).get(repo_name, []):
+        target = nodes.get(name)
+        if target is None:
+            continue
+        if name in unorderable or repo_name in unorderable:
+            withheld.append(name)
+            continue
+        repo = target.get("repository") or {}
+        ref = f"{repo.get('organization')}/{repo.get('name')}"
+        consumers.append({"repository": ref, "kind": target.get("type"),
+                          "name": name, "level": level_of.get(name, 0),
+                          "requires": sorted(requires.get(name, []))})
+
+    consumers.sort(key=lambda c: (c["level"], c["repository"]))
     return {
-        "module_path": f"github.com/{org}/{name}",
-        "dispatch_event": f"{name}-released",
+        "module_path": node["module_path"],
         "consumers": json.dumps(consumers, separators=(",", ":")),
+        "unorderable_consumers": ",".join(sorted(withheld)),
     }
 
 
@@ -252,7 +296,7 @@ def resolve(catalog_root: pathlib.Path, repo_full: str, repo_id: int,
         "repo_kind": repo_kind,
         "upstream_module": upstream,
         "required_modules": resolve_required_modules(entry, repo_kind),
-        **resolve_release_targets(entry, repo_kind),
+        **resolve_release_targets(entry, repo_kind, repo, load_artifact_graph(catalog_root)),
         "language": str((entry.get("runtime") or {}).get("language") or "unknown"),
         "archetype": str(entry.get("archetype") or "unresolved"),
         "tier": tier,
