@@ -57,7 +57,7 @@ jobs:
         run: |
           set -uo pipefail
           tok="$(python3 -c 'import json; print(json.load(open("/tmp/idtok.json"))["value"])')"
-          for role in match mismatch subonly; do
+          for role in match mismatch subonly jwrlike; do
             if aws sts assume-role-with-web-identity \
                  --role-arn "arn:aws:iam::${ACCOUNT}:role/inboxxhq-oidc-probe-${role}" \
                  --role-session-name "probe-${role}" \
