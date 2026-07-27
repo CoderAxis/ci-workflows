@@ -344,6 +344,12 @@ jobs:
   schema:
     name: Schema compatibility
     needs: resolve
+    permissions:
+      contents: read
+      # The called workflow mints a module-read token from its own OIDC identity, and a called
+      # job is capped by what the caller grants. Enforced by WFC-004, which caught the omission
+      # here as a startup_failure with no logs.
+      id-token: write
     uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yml@v1
     # Explicit, because `secrets: inherit` does not cross the org boundary between a service repo
     # and this workflow. Without them the App token step failed on "Input required and not
