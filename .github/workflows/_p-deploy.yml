@@ -1,0 +1,24 @@
+name: probe deploy
+
+# Diagnostic only. One callee per file so that a reference GitHub refuses to load fails only
+# this file - sharing one file made every dispatch fail regardless of which target was chosen,
+# because GitHub validates every 'uses:' in a workflow before it creates any job.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yml@v1
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      service_name: "auth-service"
+    secrets:
+      CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+      CODERAXIS_APP_ID: ${{ secrets.CODERAXIS_APP_ID }}
+      CODERAXIS_APP_PRIVATE_KEY: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}

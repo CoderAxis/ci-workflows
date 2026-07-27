@@ -1,0 +1,24 @@
+name: probe svcci
+
+# Diagnostic only. One callee per file so that a reference GitHub refuses to load fails only
+# this file - sharing one file made every dispatch fail regardless of which target was chosen,
+# because GitHub validates every 'uses:' in a workflow before it creates any job.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    uses: coderaxis/github-actions/.github/workflows/service-ci.yml@v1
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    secrets:
+      CODERAXIS_APP_ID: ${{ secrets.CODERAXIS_APP_ID }}
+      CODERAXIS_APP_PRIVATE_KEY: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
