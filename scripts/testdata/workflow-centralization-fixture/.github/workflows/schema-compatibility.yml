@@ -8,4 +8,10 @@ on:
 
 jobs:
   schema-compatibility:
+    # A caller bounds the permissions of the workflow it calls, so this must grant at least what
+    # schema-compatibility.yml's own job declares (WFC-004). id-token is what the called workflow
+    # exchanges for a short-lived App token; without it the call is rejected at load, not at run.
+    permissions:
+      contents: read
+      id-token: write
     uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yml@v1
