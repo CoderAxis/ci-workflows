@@ -19,11 +19,16 @@ inputs:
     required: false
     default: main
   app-id:
-    description: "GitHub App id used to read the catalog."
-    required: true
+    description: >-
+      DEPRECATED and ignored. The catalog-read token is now minted from the job's own OIDC
+      identity (see ci-app-token), so nothing needs to be forwarded. Kept so the ~40 callers
+      that still pass it keep working unchanged while they are cleaned up.
+    required: false
+    default: ""
   private-key:
-    description: "GitHub App private key used to read the catalog."
-    required: true
+    description: "DEPRECATED and ignored. See app-id."
+    required: false
+    default: ""
   coverage-override:
     description: "Escape hatch for a tier the standard does not yet cover. Normally empty."
     required: false
@@ -108,13 +113,17 @@ outputs:
 runs:
   using: composite
   steps:
+    # Minted from this job's OIDC identity rather than a forwarded secret. Requires the calling
+    # job to have `id-token: write`; every real caller already does, because deploying needs it
+    # for AWS. Scoped to the catalog repository alone - resolution reads the catalog and nothing
+    # else, so an installation-wide token here would be unnecessary reach.
     - name: Mint a catalog-read token
       id: catalog_token
-      uses: actions/create-github-app-token@v1
+      uses: coderaxis/github-actions/ci-app-token@v1
       with:
-        app-id: ${{ inputs.app-id }}
-        private-key: ${{ inputs.private-key }}
+        scope: read
         owner: ${{ inputs.catalog-owner }}
+        repositories: ${{ inputs.catalog-repo }}
 
     - name: Check out the catalog
       uses: actions/checkout@v4

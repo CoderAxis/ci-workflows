@@ -84,6 +84,9 @@ permissions:
 jobs:
   schema-compatibility:
     name: Schema compatibility
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 30
     services:
@@ -139,10 +142,10 @@ jobs:
       - name: Mint module-read token (GitHub App)
         if: hashFiles(inputs.go_version_file) != ''
         id: modauth
-        uses: coderaxis/github-actions/module-auth@v1
+        uses: coderaxis/github-actions/ci-app-token@v1
         with:
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          scope: read
+          configure-git: "true"
 
       - name: Configure private module access
         if: hashFiles(inputs.go_version_file) != ''

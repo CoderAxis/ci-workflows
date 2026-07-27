@@ -154,6 +154,9 @@ jobs:
   # to its own catalog-bound identity and cannot publish as another service.
   resolve:
     name: Resolve service identity
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -164,8 +167,6 @@ jobs:
         id: id
         uses: coderaxis/github-actions/resolve-service-identity@v1
         with:
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
           assert-service: ${{ inputs.service_name }}
 
       - name: Refuse to build a non-deployable repository
@@ -244,6 +245,9 @@ jobs:
   build-and-pin:
     name: Build canonical artifact + pin dev
     needs: [resolve, contract-gate]
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ${{ fromJSON(inputs.runner) }}
     outputs:
       contract_version: ${{ steps.contract.outputs.version }}
@@ -352,105 +356,24 @@ jobs:
       - name: Mint a read token for the declared inputs
         id: input_token
         if: steps.declared.outputs.count != '0'
-        uses: actions/create-github-app-token@v1
+        uses: coderaxis/github-actions/ci-app-token@v1
         with:
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          scope: read
           owner: ${{ steps.declared.outputs.owner }}
 
       # Only a manifest whose inputs span more than one owner reaches this step. A GitHub App is
       # installed per account, so a second owner is a second installation and therefore a second
-      # token — create-github-app-token takes a single `owner`, and calling it once per owner is not
-      # expressible as a fixed step list without capping the owner count arbitrarily.
-      #
-      # The tokens go to a file under RUNNER_TEMP rather than a step output: an output is written to
-      # the workflow-command stream, and these are credentials the resolve step is the only consumer
-      # of. Each is masked as well, so an accidental echo cannot print it.
+      # token. The broker mints all of them from this job's own OIDC identity and writes them to a
+      # 0600 file, so no App private key is handled here — this block used to sign the App JWT
+      # itself from a forwarded key.
       - name: Mint read tokens for additional owners
         id: extra_tokens
         if: steps.declared.outputs.extra_owners != ''
-        shell: bash
-        env:
-          APP_ID: ${{ secrets.CODERAXIS_APP_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
-          EXTRA_OWNERS: ${{ steps.declared.outputs.extra_owners }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${APP_ID}" || -z "${APP_PRIVATE_KEY}" ]]; then
-            echo "::error::declared build inputs span owners [${EXTRA_OWNERS}] but CODERAXIS_APP_ID / \
-          CODERAXIS_APP_PRIVATE_KEY are not available to this caller; a cross-owner build needs the App."
-            exit 1
-          fi
-          TOKEN_FILE="${RUNNER_TEMP}/declared-input-tokens.json"
-          install -m 600 /dev/null "${TOKEN_FILE}"
-          python3 - "${TOKEN_FILE}" <<'PY'
-          import base64, json, os, subprocess, sys, time, urllib.error, urllib.request
-
-          token_file = sys.argv[1]
-          app_id = os.environ["APP_ID"].strip()
-          owners = [o for o in os.environ["EXTRA_OWNERS"].split(",") if o]
-
-          def b64(raw: bytes) -> str:
-              return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
-
-          # RS256 via openssl: the runner has it, and this avoids adding a crypto dependency to a
-          # workflow whose only other requirements are python3 and jq.
-          now = int(time.time())
-          signing_input = ".".join((
-              b64(json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":")).encode()),
-              # iat backdated 60s: GitHub rejects a JWT whose iat is in the future by even a second
-              # of clock skew between the runner and GitHub.
-              b64(json.dumps({"iat": now - 60, "exp": now + 540, "iss": app_id},
-                             separators=(",", ":")).encode()),
-          ))
-          # openssl reads the key from a path, not stdin, so the key is written 0600 and removed
-          # immediately after signing.
-          key_path = os.path.join(os.environ["RUNNER_TEMP"], "app-key.pem")
-          with open(key_path, "w", encoding="utf-8") as fh:
-              os.chmod(key_path, 0o600)
-              fh.write(os.environ["APP_PRIVATE_KEY"].strip() + "\n")
-          try:
-              signed = subprocess.run(
-                  ["openssl", "dgst", "-sha256", "-sign", key_path, "-binary"],
-                  input=signing_input.encode(), capture_output=True, check=True,
-              )
-          finally:
-              os.remove(key_path)
-          jwt = f"{signing_input}.{b64(signed.stdout)}"
-
-          def api(url: str, method: str = "GET") -> object:
-              req = urllib.request.Request(url, method=method, headers={
-                  "Authorization": f"Bearer {jwt}",
-                  "Accept": "application/vnd.github+json",
-                  "X-GitHub-Api-Version": "2022-11-28",
-                  "User-Agent": "coderaxis-deploy-reusable",
-              })
-              try:
-                  with urllib.request.urlopen(req, timeout=30) as resp:
-                      return json.load(resp)
-              except urllib.error.HTTPError as exc:
-                  sys.exit(f"::error::GitHub App API {method} {url} failed: {exc.code} {exc.read()[:200]!r}")
-
-          installs = {str(i["account"]["login"]).lower(): i["id"]
-                      for i in api("https://api.github.com/app/installations")}
-          tokens = {}
-          for owner in owners:
-              install_id = installs.get(owner.lower())
-              if install_id is None:
-                  sys.exit(
-                      f"::error::declared build inputs: the platform App is not installed on {owner!r}. "
-                      f"Install it there (read-only contents) or move the input under an installed "
-                      f"owner. Installed: {sorted(installs)}"
-                  )
-              tok = api(f"https://api.github.com/app/installations/{install_id}/access_tokens", "POST")["token"]
-              print(f"::add-mask::{tok}")
-              tokens[owner] = tok
-              print(f"  minted an installation token for {owner}")
-
-          with open(token_file, "w", encoding="utf-8") as fh:
-              json.dump(tokens, fh)
-          PY
-          echo "token_file=${TOKEN_FILE}" >> "${GITHUB_OUTPUT}"
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ steps.declared.outputs.owner }}
+          extra-owners: ${{ steps.declared.outputs.extra_owners }}
 
       # Always runs: even a single-input build declares its input set, so provenance can state it
       # rather than leave it implied. `ref` is the input SPECIFICATION (a branch is fine); the
@@ -461,7 +384,7 @@ jobs:
         env:
           APP_TOKEN: ${{ steps.input_token.outputs.token }}
           PRIMARY_OWNER: ${{ steps.declared.outputs.owner }}
-          EXTRA_TOKEN_FILE: ${{ steps.extra_tokens.outputs.token_file }}
+          EXTRA_TOKEN_FILE: ${{ steps.extra_tokens.outputs.tokens-file }}
           PLAN: ${{ steps.declared.outputs.plan }}
         run: |
           set -euo pipefail

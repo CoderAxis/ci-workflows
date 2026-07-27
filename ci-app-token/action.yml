@@ -34,6 +34,15 @@ inputs:
     description: "Account whose installation the token is minted against."
     required: false
     default: coderaxis
+  extra-owners:
+    description: >-
+      Additional accounts to mint for, comma- or space-separated. A GitHub App is installed per
+      account, so each owner is a separate installation and therefore a separate token; a build
+      whose inputs span owners needs one per owner. Their tokens are written to the JSON file named
+      by the `tokens-file` output rather than to step outputs, since outputs travel through the
+      workflow-command stream.
+    required: false
+    default: ""
   repositories:
     description: >-
       Optional space- or newline-separated repository names (not full slugs) to
@@ -55,8 +64,13 @@ inputs:
 
 outputs:
   token:
-    description: "Short-lived installation token (~1h). Already masked in logs."
+    description: "Short-lived installation token (~1h) for `owner`. Already masked in logs."
     value: ${{ steps.mint.outputs.token }}
+  tokens-file:
+    description: >-
+      Path to a 0600 JSON file mapping owner -> token, written only when `extra-owners` is set.
+      Includes the primary owner, so a consumer can look up any owner uniformly.
+    value: ${{ steps.mint.outputs.tokens_file }}
 
 runs:
   using: composite
@@ -70,6 +84,7 @@ runs:
       env:
         SCOPE: ${{ inputs.scope }}
         OWNER: ${{ inputs.owner }}
+        EXTRA_OWNERS: ${{ inputs.extra-owners }}
         REPOSITORIES: ${{ inputs.repositories }}
         AWS_REGION: ${{ inputs.aws-region }}
         AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
@@ -185,33 +200,56 @@ runs:
             fail("could not sign the App JWT; the stored private key may be malformed or revoked")
         jwt = f"{header}.{payload}.{b64url(sign.stdout)}"
 
-        # 5. Resolve the installation. /app/installations covers users and orgs
-        #    alike, so this works for both accounts in the estate.
+        # 5. Resolve installations. /app/installations covers users and orgs alike,
+        #    so this works for both accounts in the estate.
         owner = os.environ["OWNER"]
-        installs = api("https://api.github.com/app/installations", token=jwt, bearer=True)
-        match = next((i for i in installs
-                      if i.get("account", {}).get("login", "").lower() == owner.lower()), None)
-        if match is None:
-            seen = ", ".join(sorted(i.get("account", {}).get("login", "?") for i in installs)) or "none"
-            fail(f"the App is not installed on '{owner}'. Installed on: {seen}")
+        extra = [o for o in os.environ.get("EXTRA_OWNERS", "").replace(",", " ").split()]
+        installs = {str(i.get("account", {}).get("login", "")).lower(): i["id"]
+                    for i in api("https://api.github.com/app/installations", token=jwt, bearer=True)}
 
-        # 6. Exchange for an installation token, narrowed to specific repos when
-        #    the caller named them.
+        # 6. Exchange for installation tokens, narrowed to specific repos when the
+        #    caller named them.
         body = {}
-        repos = os.environ.get("REPOSITORIES", "").replace(",", " ").split()
+        # Accepts bare names or full slugs; GitHub wants bare names, and callers
+        # naturally have the slug on hand (inputs like catalog-repo carry one).
+        repos = [r.split("/")[-1] for r in os.environ.get("REPOSITORIES", "").replace(",", " ").split()]
         if repos:
             body["repositories"] = repos
-        tok = api(f"https://api.github.com/app/installations/{match['id']}/access_tokens",
-                  token=jwt, method="POST", body=body or None, bearer=True)
-        token = tok["token"]
 
-        # Mask before it can reach any later log line.
-        print(f"::add-mask::{token}")
-        with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-            fh.write(f"token={token}\n")
+        def mint(for_owner):
+            install_id = installs.get(for_owner.lower())
+            if install_id is None:
+                fail(f"the App is not installed on '{for_owner}'. Installed on: "
+                     f"{', '.join(sorted(installs)) or 'none'}")
+            got = api(f"https://api.github.com/app/installations/{install_id}/access_tokens",
+                      token=jwt, method="POST", body=body or None, bearer=True)
+            # Mask before it can reach any later log line.
+            print(f"::add-mask::{got['token']}")
+            return got
+
+        primary = mint(owner)
+        out_lines = [f"token={primary['token']}"]
 
         scope_note = f"{len(repos)} repo(s)" if repos else "installation-wide"
-        print(f"Minted a {os.environ['SCOPE']} token for {owner} ({scope_note}), expires {tok.get('expires_at')}")
+        print(f"Minted a {os.environ['SCOPE']} token for {owner} ({scope_note}), "
+              f"expires {primary.get('expires_at')}")
+
+        if extra:
+            tokens = {owner: primary["token"]}
+            for o in extra:
+                if o.lower() == owner.lower():
+                    continue
+                tokens[o] = mint(o)["token"]
+                print(f"  also minted for {o}")
+            # A file, not an output: these are credentials and outputs travel via
+            # the workflow-command stream. 0600, and the job's temp is per-run.
+            path = os.path.join(os.environ.get("RUNNER_TEMP", work), "ci-app-tokens.json")
+            with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+                json.dump(tokens, fh)
+            out_lines.append(f"tokens_file={path}")
+
+        with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+            fh.write("\n".join(out_lines) + "\n")
         PY
 
     - name: Configure git for private module access

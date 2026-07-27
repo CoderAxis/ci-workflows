@@ -77,16 +77,19 @@ on:
         type: string
         default: ""
     secrets:
+      # DEPRECATED and unread: tokens are minted from the job's own OIDC identity via
+      # ci-app-token. Kept optional so callers still passing them keep starting; remove
+      # once no caller does.
       CODERAXIS_APP_ID:
-        required: true
+        required: false
       CODERAXIS_APP_PRIVATE_KEY:
-        required: true
+        required: false
       # Distinct from the module-reader App above: dispatching into a consumer repository needs
       # write, and minting that per target keeps a release from holding fleet-wide write.
       RELEASE_BOT_APP_ID:
-        required: true
+        required: false
       RELEASE_BOT_APP_PRIVATE_KEY:
-        required: true
+        required: false
       SLACK_BOT_TOKEN:
         required: false
 
@@ -103,6 +106,9 @@ jobs:
   # ── identity ──────────────────────────────────────────────────────────────────────────────
   resolve:
     name: Resolve module identity
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -120,8 +126,6 @@ jobs:
           catalog-owner: ${{ inputs.catalog_owner }}
           catalog-repo: ${{ inputs.catalog_repo }}
           catalog-ref: ${{ inputs.catalog_ref }}
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
 
       # A deployable is an image, not a module: it is published by service-ci.yml and pinned by
       # digest. If one reaches this workflow it has been wired to the wrong pipeline, and the
@@ -265,10 +269,10 @@ jobs:
       - name: Mint module-read token
         id: modauth
         if: steps.ver.outputs.releasable == 'true'
-        uses: coderaxis/github-actions/module-auth@v1
+        uses: coderaxis/github-actions/ci-app-token@v1
         with:
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          scope: read
+          configure-git: "true"
 
       - name: Configure private module access
         if: steps.ver.outputs.releasable == 'true'
@@ -456,6 +460,9 @@ jobs:
     name: Notify ${{ matrix.kind }} ${{ matrix.repository }}
     needs: [resolve, release]
     if: needs.release.outputs.releasable == 'true' && needs.resolve.outputs.consumers != '[]'
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     strategy:
@@ -478,10 +485,9 @@ jobs:
       # it is notifying and not on the fleet.
       - name: Mint release-bot token for this target
         id: bottoken
-        uses: actions/create-github-app-token@v1
+        uses: coderaxis/github-actions/ci-app-token@v1
         with:
-          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
-          private-key: ${{ secrets.RELEASE_BOT_APP_PRIVATE_KEY }}
+          scope: publish
           owner: ${{ steps.t.outputs.owner }}
           repositories: ${{ steps.t.outputs.repo }}
 
