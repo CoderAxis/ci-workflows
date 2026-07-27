@@ -1,0 +1,699 @@
+name: Service CI
+
+# The single CI pipeline for every service and core module in the fleet.
+#
+# A consumer repository contains ONE workflow, and it declares nothing about itself:
+#
+#   jobs:
+#     ci:
+#       uses: coderaxis/github-actions/.github/workflows/service-ci.yml@v1
+#       secrets: inherit
+#
+# WHY THE CALLER PASSES NOTHING. Anything a repo states about itself is a claim the platform
+# would have to trust — its name, its language, whether it owns a database, whether it seeds.
+# Those are exactly the facts that decide which gates run, so a repo that misstates them (or
+# quietly stops stating them) selects its own enforcement. Identity is therefore DERIVED: the
+# calling repository's name is set by GitHub and cannot be forged from inside the repo, and
+# everything else is read from the service catalog in core-docs, which the DevOps team owns.
+# `service_name` is resolved here and handed to the build; the service never asserts it.
+#
+# WHAT REPLACED WHAT. This absorbs the per-repo workflows that were copied across the fleet and
+# then drifted — most starkly scripts/validate_docs.py, which existed in 91 repositories as 91
+# byte-different files, each repo passing its own private definition of "valid". Shared logic
+# lives here; per-repo data lives in the catalog; nothing lives in the service repo.
+#
+# WHAT IS DELIBERATELY NOT HERE:
+#   - Deployment. CI ends when the immutable digest is written to the GitOps repo; Argo CD pulls
+#     from there (ADR-0049). No kubectl, no rollout, no environment logic in Actions.
+#   - Scheduled fleet operations (dependency bumps, periodic re-scans). Those are fleet-wide jobs
+#     and belong to a scheduled workflow in this repository, not to 90 copies of a cron.
+#
+# Policy SSOT: ADR-0051 (artifact promotion), ADR-0049 (GitOps delivery), ADR-0064 (archetypes),
+# ADR-0081 (central workflow + thin caller pattern), RFC-0020 (supply-chain integrity).
+
+on:
+  workflow_call:
+    inputs:
+      catalog_owner:
+        description: >-
+          Account owning the catalog repo. Kept separate from catalog_repo because GitHub
+          expressions have no string-split function and the App token is minted per owner.
+        required: false
+        type: string
+        default: coderaxis
+      catalog_repo:
+        description: "Repository holding the service catalog (the platform's SSOT for what a service is)."
+        required: false
+        type: string
+        default: coderaxis/core-docs
+      catalog_ref:
+        description: "Ref of the catalog repo to resolve against."
+        required: false
+        type: string
+        default: main
+      coverage_threshold:
+        description: >-
+          Escape hatch for a tier the standard does not yet cover. Left unset, the threshold is
+          derived from the service tier, so a repo cannot lower its own gate — the previous
+          per-repo CI set COVERAGE_THRESHOLD to 0 and passed unconditionally.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      # Declared explicitly rather than relying on `secrets: inherit`: the service repos live in
+      # the InboxxHQ-CoderAxis org while this workflow lives under the coderaxis account, and
+      # inherit does not cross an org boundary. The caller therefore passes secrets — but only
+      # secrets. It still states nothing about what the service IS, which is the property that
+      # matters: plumbing a credential cannot select which gates run.
+      CODERAXIS_APP_ID:
+        required: true
+      CODERAXIS_APP_PRIVATE_KEY:
+        required: true
+      SLACK_BOT_TOKEN:
+        required: false
+      SONAR_TOKEN:
+        required: false
+      SONAR_HOST_URL:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: service-ci-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── identity ────────────────────────────────────────────────────────────────────────────────
+  # Everything downstream is conditioned on this job's outputs. It fails closed: a repository the
+  # catalog does not describe gets no pipeline rather than a permissive default, because a silent
+  # pass is indistinguishable from a repo that opted itself out.
+  resolve:
+    name: Resolve service identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      service: ${{ steps.id.outputs.service }}
+      language: ${{ steps.id.outputs.language }}
+      archetype: ${{ steps.id.outputs.archetype }}
+      tier: ${{ steps.id.outputs.tier }}
+      owner: ${{ steps.id.outputs.owner }}
+      deployable: ${{ steps.id.outputs.deployable }}
+      repo_kind: ${{ steps.id.outputs.repo_kind }}
+      owns_database: ${{ steps.id.outputs.owns_database }}
+      seeds: ${{ steps.id.outputs.seeds }}
+      has_rest: ${{ steps.id.outputs.has_rest }}
+      has_events: ${{ steps.id.outputs.has_events }}
+      coverage_threshold: ${{ steps.id.outputs.coverage_threshold }}
+      role: ${{ steps.id.outputs.role }}
+      capabilities: ${{ steps.id.outputs.capabilities }}
+    steps:
+      # One shared implementation, used identically by deploy-reusable.yml. Two copies of
+      # security-critical resolution logic is the drift this whole change exists to remove.
+      - name: Derive identity from the immutable repository id
+        id: id
+        uses: coderaxis/github-actions/resolve-service-identity@v1
+        with:
+          catalog-owner: ${{ inputs.catalog_owner }}
+          catalog-repo: ${{ inputs.catalog_repo }}
+          catalog-ref: ${{ inputs.catalog_ref }}
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          coverage-override: ${{ inputs.coverage_threshold }}
+
+  # The language-specific jobs below are necessarily conditional, which means an unrecognised
+  # language would skip build, test, coverage and CodeQL and still report the pipeline green.
+  # Every repo in the fleet is Go today, so this guard costs nothing now and is the difference
+  # between "the first non-Go service is unbuilt and nobody notices" and "the first non-Go
+  # service fails loudly until this workflow learns its toolchain".
+  supported-language:
+    name: Language is supported
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Refuse a language this pipeline cannot build
+        shell: bash
+        env:
+          LANGUAGE: ${{ needs.resolve.outputs.language }}
+        run: |
+          set -euo pipefail
+          case "${LANGUAGE}" in
+            go) echo "language ${LANGUAGE}: build, test, coverage and CodeQL apply" ;;
+            *)
+              echo "::error::the catalog reports runtime.language=${LANGUAGE} for this repository,"
+              echo "::error::which service-ci.yml has no toolchain for. Build, test, coverage and"
+              echo "::error::CodeQL would all be skipped and this pipeline would still pass. Add"
+              echo "::error::the toolchain centrally before onboarding this repo."
+              exit 1 ;;
+          esac
+
+  # ── universal standards ─────────────────────────────────────────────────────────────────────
+  # Applies to every repository regardless of language or archetype. Nothing here reads a script
+  # from the repository being checked; that is the whole point.
+  standards:
+    name: Repository standards
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the service repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Lint workflow definitions
+        uses: docker://rhysd/actionlint:latest
+        with:
+          args: -color
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  # ── language pipeline ───────────────────────────────────────────────────────────────────────
+  build-test:
+    name: Build and test (${{ needs.resolve.outputs.language }})
+    needs: resolve
+    if: needs.resolve.outputs.language == 'go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+      GONOSUMDB: github.com/coderaxis/*
+    steps:
+      - name: Check out the service repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Mint module-read token
+        id: modauth
+        uses: coderaxis/github-actions/module-auth@v1
+        with:
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+
+      - name: Download private modules
+        shell: bash
+        env:
+          MOD_TOKEN: ${{ steps.modauth.outputs.token }}
+        run: |
+          set -euo pipefail
+          [[ -n "${MOD_TOKEN}" ]] || { echo "::error::module token required for private Go modules"; exit 1; }
+          git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
+          GOWORK=off go mod download
+
+      - name: Lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `make lint` is the fleet convention; fall back to vet so a repo without a Makefile
+          # target is still linted rather than silently skipped.
+          if grep -qE '^lint:' Makefile 2>/dev/null; then make lint; else GOWORK=off go vet ./...; fi
+
+      - name: Unit tests with coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          # mapfile rather than an unquoted command substitution: a package path containing a space
+          # would otherwise split into two arguments and go test would fail on a path that does not
+          # exist, reported as a test failure rather than a quoting bug.
+          mapfile -t pkgs < <(GOWORK=off go list ./... | grep -Ev '/tests/(contracts|integration)')
+          GOWORK=off go test "${pkgs[@]}" \
+            -coverprofile=coverage.out -covermode=atomic
+          go tool cover -func=coverage.out | tail -5
+
+      - name: Enforce the tier's coverage threshold
+        shell: bash
+        env:
+          THRESHOLD: ${{ needs.resolve.outputs.coverage_threshold }}
+        run: |
+          set -euo pipefail
+          # Missing coverage is a failure, not a warning: "no coverage file" was previously an
+          # automatic pass, which is the same outcome as having no tests at all.
+          [[ -s coverage.out ]] || { echo "::error::coverage.out missing — the gate cannot be evaluated"; exit 1; }
+          PCT="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); print $3}')"
+          [[ -n "${PCT}" ]] || { echo "::error::could not parse coverage total"; exit 1; }
+          echo "coverage ${PCT}% (tier ${{ needs.resolve.outputs.tier }} requires >= ${THRESHOLD}%)"
+          awk -v p="${PCT}" -v t="${THRESHOLD}" 'BEGIN { exit (p+0 < t+0) }' \
+            || { echo "::error::coverage ${PCT}% is below the ${THRESHOLD}% required for this tier"; exit 1; }
+
+      - name: Contract tests when present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d tests/contracts ]]; then GOWORK=off go test ./tests/contracts/... -count=1; \
+          else echo "no tests/contracts directory"; fi
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: coverage.out
+          retention-days: 14
+
+  codeql:
+    name: CodeQL
+    needs: resolve
+    if: needs.resolve.outputs.language == 'go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: go
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
+
+  # ── contract gates, selected by what the catalog says the service exposes ────────────────────
+  # These run for EVERY repository, deliberately unconditioned.
+  #
+  # Gating them on catalog facts looked tidy and was wrong: schema-compatibility runs in 91 repos
+  # today and event-handling-compliance in 60, so gating on `owns_database` / `has_events` would
+  # have silently switched them off for roughly half the fleet — the checks would have kept
+  # reporting green while enforcing nothing, which is worse than deleting them outright.
+  #
+  # Running them unconditionally also makes each check assert the NEGATIVE rather than assume it.
+  # role=E is derived for a service the catalog says has no events, and the compliance check then
+  # verifies that claim against the code, catching a service that grew a Kafka producer without
+  # ever declaring it. A skipped job can never catch that.
+  events:
+    name: Event handling compliance
+    needs: resolve
+    uses: coderaxis/github-actions/.github/workflows/event-handling-compliance.yml@v1
+    with:
+      role: ${{ needs.resolve.outputs.role }}
+
+  seeding:
+    name: Seeding contract
+    needs: resolve
+    uses: coderaxis/github-actions/.github/workflows/seed-contract-check.yml@v1
+
+  schema:
+    name: Schema compatibility
+    needs: resolve
+    uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yml@v1
+
+  dockerfile:
+    name: Dockerfile standard
+    needs: resolve
+    if: needs.resolve.outputs.deployable == 'true'
+    uses: coderaxis/github-actions/.github/workflows/dockerfile-standard.yml@v1
+    with:
+      capabilities: ${{ needs.resolve.outputs.capabilities }}
+
+  # ── repository structure ────────────────────────────────────────────────────────────────────
+  # Absorbed from the per-repo quality-check.yml. Entirely generic: it asserts the shape every
+  # Go service is required to have, so there was never a reason for each repo to carry its own.
+  structure:
+    name: Repository structure
+    needs: resolve
+    if: needs.resolve.outputs.language == 'go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Required files, directories and Make targets
+        shell: bash
+        env:
+          REPO_KIND: ${{ needs.resolve.outputs.repo_kind }}
+        run: |
+          set -euo pipefail
+          rc=0
+          # Three repo kinds, three shapes. The old per-repo quality-check.yml only ever encoded
+          # the deployable one, and applying that set to the modules fails 27 of them on absences
+          # that are CORRECT: auth-core has no internal/ because it exports its packages by
+          # design, no schema module has a Makefile or a cmd/ at all, and neither kind has
+          # build/run/ci targets because there is nothing to build or run. Each set below is the
+          # intersection of what that kind actually has across the fleet, so it asserts a real
+          # standard instead of being a permanently red gate people learn to ignore.
+          case "${REPO_KIND}" in
+            deployable)
+              files="README.md Makefile go.mod Dockerfile service.contract.yaml"
+              dirs="cmd internal scripts tests docs"
+              targets="build run clean test lint fmt ci" ;;
+            core)
+              # Absorbed from the per-repo core-guard.yml. Measured against the fleet before being
+              # required here: all 32 core modules carry a Makefile, an application/ directory and
+              # at least one of domain/ports/adapters, and 31 of 32 define all nine targets. So this
+              # asserts the hexagonal shape a core actually has rather than the deployable shape it
+              # does not.
+              files="README.md Makefile go.mod"
+              dirs="docs application"
+              targets="test test-pkg test-one test-race test-cover fmt vet lint tidy clean" ;;
+            schema)
+              # sqlc.yaml + schema/ + sql/ are what MAKE it a schema module, so requiring them is
+              # stronger than the generic set it used to be checked against.
+              files="README.md go.mod sqlc.yaml"
+              dirs="schema sql internal"
+              targets="" ;;
+            *)
+              echo "::error::repo_kind=${REPO_KIND} is not a shape this gate knows how to check"
+              exit 1 ;;
+          esac
+          for f in ${files}; do
+            [[ -f "${f}" ]] || { echo "::error::missing required file: ${f}"; rc=1; }
+          done
+          for d in ${dirs}; do
+            [[ -d "${d}" ]] || { echo "::error::missing required directory: ${d}"; rc=1; }
+          done
+          for t in ${targets}; do
+            make -n "${t}" >/dev/null 2>&1 || { echo "::error::missing required Make target: ${t}"; rc=1; }
+          done
+
+          # A core exports its behaviour through ports and adapters, so it must have at least one of
+          # them. Requiring all three would be wrong - a core with no inbound adapter is legitimate -
+          # which is why this is a one-of rather than another entry in the dirs list above.
+          if [[ "${REPO_KIND}" == "core" ]]; then
+            found=0
+            for d in domain ports adapters; do
+              [[ -d "${d}" ]] && found=$((found + 1))
+            done
+            if [[ "${found}" -eq 0 ]]; then
+              echo "::error::a core module must expose at least one of domain/, ports/ or adapters/"
+              rc=1
+            fi
+          fi
+          exit "${rc}"
+
+      - name: Go formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l . | grep -v '^vendor/' || true)"
+          if [[ -n "${unformatted}" ]]; then
+            echo "::error::gofmt would rewrite these files; run 'make fmt'"
+            echo "${unformatted}"
+            exit 1
+          fi
+
+  # ── workflow lanes (WFC-003) ────────────────────────────────────────────────────────────────
+  # Absorbed from the per-repo pipeline-policy.yml, which asserted that thirteen named workflow
+  # files EXISTED in the repository - quality-check.yml, security-scan.yml, codeql.yml,
+  # gitleaks.yml, actionlint.yml, deploy.yml, post-deploy.yml, preview-env.yml and others.
+  #
+  # That check encoded the decentralised model as a requirement, so it actively fought
+  # centralisation: deleting a workflow whose logic had moved here turned the gate red, and the
+  # only way to keep it green was to keep the copies. Governance was pinning the fleet to the
+  # shape it was supposed to be moving away from.
+  #
+  # Inverted here. The lane set required is the thin-caller set, derived from repo_kind, and the
+  # absorbed names are asserted ABSENT - because a repo that keeps a local copy alongside the
+  # central call runs both, and the local one silently decides the result.
+  lanes:
+    name: Required workflow lanes
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Required and forbidden workflow lanes
+        shell: bash
+        env:
+          REPO_KIND: ${{ needs.resolve.outputs.repo_kind }}
+          HAS_REST: ${{ needs.resolve.outputs.has_rest }}
+        run: |
+          set -euo pipefail
+          rc=0
+          wf=".github/workflows"
+
+          # Every repo calls central CI. A core or schema module also publishes a version, and
+          # anything that pins a platform module must be able to receive a bump dispatch - without
+          # a listener the cascade stops silently at that repo, which is how a consumer ends up a
+          # major version behind while every pipeline stays green.
+          required="${wf}/ci.yml"
+          case "${REPO_KIND}" in
+            core)       required="${required} ${wf}/release.yml" ;;
+            schema)     required="${required} ${wf}/release.yml" ;;
+            deployable) ;;
+            *) echo "::error::repo_kind=${REPO_KIND} has no defined lane set"; exit 1 ;;
+          esac
+
+          for f in ${required}; do
+            [[ -f "${f}" ]] || { echo "::error::missing required workflow lane: ${f}"; rc=1; }
+          done
+
+          # any_of, not `ls a b`: ls exits non-zero when ANY argument is missing, so using it for an
+          # either/or test fails every repo that has exactly one of the two - which is all of them.
+          any_of() {
+            for candidate in "$@"; do
+              [[ -e "${candidate}" ]] && return 0
+            done
+            return 1
+          }
+
+          if [[ "${REPO_KIND}" == "schema" || "${REPO_KIND}" == "deployable" ]]; then
+            if ! any_of "${wf}/bump-core-modules.yml" "${wf}/bump-engine-core.yml"; then
+              echo "::error::this repo pins a platform module but has no bump listener"
+              echo "(bump-core-modules.yml or bump-engine-core.yml). A release would notify it and"
+              echo "nothing would happen, so it would silently fall behind."
+              rc=1
+            fi
+          fi
+
+          # Absorbed into this pipeline. A surviving local copy is not redundant, it is a second
+          # implementation that drifts - the reason 91 repos each had their own validate_docs.py.
+          absorbed="actionlint gitleaks codeql quality-check security-scan dependency-review
+                    docs-lint stale-docs-check schema-compatibility event-handling-compliance
+                    seed-contract-check sqlc-guard core-guard sbom deploy post-deploy
+                    reusable-notify-consumers reusable-module-auth pipeline-policy"
+          for name in ${absorbed}; do
+            if [[ -f "${wf}/${name}.yml" ]]; then
+              echo "::error::${wf}/${name}.yml is absorbed by central CI but still present here."
+              echo "Delete it; running both means the local copy decides the result."
+              rc=1
+            fi
+          done
+
+          # Kept from pipeline-policy.yml, but conditioned on the catalog instead of assumed: only
+          # a service that actually declares a REST interface owes a committed contract.
+          if [[ "${HAS_REST}" == "true" && "${REPO_KIND}" == "deployable" ]]; then
+            if ! any_of docs/openapi.json docs/openapi.yaml docs/openapi.yml \
+                        api/openapi.json api/openapi.yaml api/openapi.yml; then
+              echo "::error::catalog declares a REST interface but no OpenAPI contract is committed"
+              rc=1
+            fi
+          fi
+          exit "${rc}"
+
+  # ── vulnerabilities ─────────────────────────────────────────────────────────────────────────
+  # Absorbed from the per-repo security-scan.yml, with one behavioural change: it blocks.
+  # That workflow read SECURITY_BLOCKING from a repo variable and DEFAULTED IT TO 'false', so
+  # across the fleet vulnerability findings were reported and then ignored, and a repo could
+  # keep it that way by doing nothing. Severity is a platform decision, not a repo setting.
+  vulnerabilities:
+    name: Vulnerabilities
+    needs: resolve
+    if: needs.resolve.outputs.language == 'go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+      GONOSUMDB: github.com/coderaxis/*
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: High-signal secret scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATTERN='(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|sk_live_[0-9A-Za-z]{16,}|xox[baprs]-[0-9A-Za-z-]+|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----)'
+          if git grep -nIE "${PATTERN}" -- ':!go.sum' ':!**/*.md' ':!docs/**' ':!testdata/**'; then
+            echo "::error::high-signal secret pattern detected"
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Mint module-read token
+        id: modauth
+        uses: coderaxis/github-actions/module-auth@v1
+        with:
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+
+      - name: Known vulnerabilities in dependencies
+        shell: bash
+        env:
+          MOD_TOKEN: ${{ steps.modauth.outputs.token }}
+        run: |
+          set -euo pipefail
+          git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOWORK=off "$(go env GOPATH)/bin/govulncheck" ./...
+
+      # Carried over from the per-repo core-guard.yml at its existing posture, deliberately.
+      # Making it blocking here would tighten the fleet inside the same change that centralises
+      # it, so a real regression and a pre-existing baseline would be indistinguishable. Promoting
+      # it to blocking is its own decision, taken once the baseline is known to be clean.
+      - name: Static analysis (advisory)
+        continue-on-error: true
+        shell: bash
+        env:
+          MOD_TOKEN: ${{ steps.modauth.outputs.token }}
+        run: |
+          set -euo pipefail
+          git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          GOWORK=off "$(go env GOPATH)/bin/staticcheck" ./... \
+            || echo "::warning::staticcheck findings are advisory until the fleet baseline is clean"
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+  # ── generated-code and query drift ──────────────────────────────────────────────────────────
+  sqlc:
+    name: SQLC drift and raw-SQL guard
+    needs: resolve
+    if: needs.resolve.outputs.language == 'go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+      GONOSUMDB: github.com/coderaxis/*
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Mint module-read token
+        id: modauth
+        uses: coderaxis/github-actions/module-auth@v1
+        with:
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+
+      - name: Verify sqlc generated code is current
+        shell: bash
+        env:
+          MOD_TOKEN: ${{ steps.modauth.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f sqlc.yaml && ! -f sqlc.yml ]]; then
+            echo "no sqlc.yaml in this repo; nothing to verify"
+            exit 0
+          fi
+          git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
+          go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0
+          "$(go env GOPATH)/bin/sqlc" generate
+          git diff --exit-code -- sqlc rootsqlc \
+            || { echo "::error::sqlc generated code drift; run 'sqlc generate' and commit"; exit 1; }
+
+      # The guard used to be scripts/check-no-raw-sql.py inside each repo. Two repos carried it
+      # and the copies had already diverged, so it now lives here as one implementation.
+      - name: Check out the central checkers
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/github-actions
+          ref: v1
+          path: .central
+          sparse-checkout: scripts
+
+      - name: Raw SQL guard
+        shell: bash
+        run: python3 .central/scripts/check_no_raw_sql.py
+
+  # ── documentation ───────────────────────────────────────────────────────────────────────────
+  # Replaces the per-repo docs-lint.yml and stale-docs-check.yml, which both ran
+  # scripts/validate_docs.py from the repository being checked. That file existed in 91
+  # repositories as 91 byte-different files - every repo validated its docs against its own
+  # private definition of valid, and passing meant nothing comparable. core-docs already owns
+  # check_service_docs.py, so the standard is read from the platform, not from the subject.
+  docs:
+    name: Service documentation
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: service
+
+      - name: Mint a catalog-read token
+        id: catalog_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          owner: ${{ inputs.catalog_owner }}
+
+      - name: Check out the documentation standard
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.catalog_repo }}
+          ref: ${{ inputs.catalog_ref }}
+          token: ${{ steps.catalog_token.outputs.token }}
+          path: core-docs
+
+      - name: Validate against the central standard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          python3 core-docs/scripts/check_service_docs.py --service-dir service
+
+  dependency-review:
+    name: Dependency review
+    needs: resolve
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  # ── artifact ────────────────────────────────────────────────────────────────────────────────
+  # Only on trunk, only for a deployable, and only once every gate above is green. The service
+  # name comes from the catalog, not from the repo. This job ends at the GitOps digest pin —
+  # Argo CD reconciles from there, so nothing below this line touches a cluster.
+  artifact:
+    name: Canonical build and GitOps pin
+    needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
+            dockerfile, structure, vulnerabilities, sqlc, docs]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.resolve.outputs.deployable == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yml@v1
+    with:
+      # Resolved from the immutable repository id, never from anything the service repo says.
+      # Previously each repo passed this literal in its own deploy.yml, so a one-line edit to
+      # `service_name:` was enough to publish one service's code under another's identity.
+      service_name: ${{ needs.resolve.outputs.service }}
+    secrets:
+      CODERAXIS_APP_ID: ${{ secrets.CODERAXIS_APP_ID }}
+      CODERAXIS_APP_PRIVATE_KEY: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
