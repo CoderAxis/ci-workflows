@@ -64,6 +64,19 @@ on:
         required: false
         type: string
         default: ubuntu-latest
+    # Declared explicitly rather than left to `secrets: inherit`. Inheritance does not cross an
+    # organization boundary, so when this workflow is called from central CI on behalf of a repo in
+    # another org the App credentials arrive empty and the token-minting step fails with "Input
+    # required and not supplied: app-id" - which reads as a broken action rather than a missing
+    # secret. Declaring them keeps `secrets: inherit` working for the repos that already call it
+    # that way, while letting a cross-org caller pass them through explicitly.
+    secrets:
+      CODERAXIS_APP_ID:
+        description: "GitHub App id used to mint a module-read token for private Go modules."
+        required: false
+      CODERAXIS_APP_PRIVATE_KEY:
+        description: "Private key for the module-read App."
+        required: false
 
 permissions:
   contents: read
