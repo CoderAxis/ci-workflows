@@ -1,0 +1,228 @@
+name: CI App token
+description: >-
+  Mint a short-lived GitHub App installation token without the calling repository
+  holding any App credential. The caller proves who it is with a GitHub OIDC
+  token; AWS decides whether that identity may read the App key.
+
+# WHY THIS EXISTS. A reusable workflow runs in its caller's context, so it sees
+# the caller's secrets and never the secrets of the repo that hosts it. That left
+# only one way to get the App key into central CI: every repository forwarded it.
+# The platform's most powerful credential — it can mint a token for any repo in
+# all three accounts — therefore lived in ~90 places, and adding a credential to
+# the pipeline meant editing every caller.
+#
+# Here the caller forwards nothing. GitHub mints an OIDC token describing the job,
+# including `job_workflow_ref` (the workflow the job is DEFINED in, pinned to its
+# release tag). AWS trusts that claim, hands back the App key, and the token is
+# assembled in-process. A service repo cannot obtain the key by editing its own
+# workflow, because a job it defines carries its own job_workflow_ref, not ours.
+#
+# See ADR-0110 for the trust model, including the two verified constraints that
+# shape it: job_workflow_ref names the DEFINING workflow (not the entry point),
+# and it cannot be the sole scoping condition on the AWS side.
+
+inputs:
+  scope:
+    description: >-
+      Which credential to mint. `read` is the module reader: private Go modules
+      and the service catalog. `publish` is the release bot: tags, releases and
+      pull requests — assumable only from the publishing workflows, so ordinary
+      CI cannot reach a credential that writes to other repositories.
+    required: false
+    default: read
+  owner:
+    description: "Account whose installation the token is minted against."
+    required: false
+    default: coderaxis
+  repositories:
+    description: >-
+      Optional space- or newline-separated repository names (not full slugs) to
+      scope the token to. Omit for an installation-wide token. Narrow this
+      wherever the consumer is known — an installation-wide token is as broad as
+      the App's install.
+    required: false
+    default: ""
+  configure-git:
+    description: >-
+      When true, rewrite github.com/<owner>/ URLs to carry the token so `go mod
+      download` and `git` can read private modules. Matches module-auth.
+    required: false
+    default: "false"
+  aws-region:
+    description: "Region holding the credential."
+    required: false
+    default: us-east-1
+
+outputs:
+  token:
+    description: "Short-lived installation token (~1h). Already masked in logs."
+    value: ${{ steps.mint.outputs.token }}
+
+runs:
+  using: composite
+  steps:
+    # No credentials are configured here. assume-role-with-web-identity is an
+    # unauthenticated call: the OIDC token IS the proof, so the runner needs no
+    # pre-existing AWS identity for this to work.
+    - name: Mint installation token
+      id: mint
+      shell: bash
+      env:
+        SCOPE: ${{ inputs.scope }}
+        OWNER: ${{ inputs.owner }}
+        REPOSITORIES: ${{ inputs.repositories }}
+        AWS_REGION: ${{ inputs.aws-region }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
+      run: |
+        set -uo pipefail
+
+        case "${SCOPE}" in
+          read)    ROLE="arn:aws:iam::063088900996:role/inboxxhq-ci-app-token-read"
+                   SECRET="inboxxhq/ci/github-app/module-reader" ;;
+          publish) ROLE="arn:aws:iam::063088900996:role/inboxxhq-ci-app-token-publish"
+                   SECRET="inboxxhq/ci/github-app/release-bot" ;;
+          *) echo "::error::unknown scope '${SCOPE}' (expected read or publish)"; exit 1 ;;
+        esac
+
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "::error::No OIDC token available. The calling job needs 'permissions: id-token: write'."
+          exit 1
+        fi
+
+        umask 077
+        WORK="$(mktemp -d)"
+        # Any exit path shreds the key: a bare `rm` on failure would leave it in
+        # the runner's temp for the rest of the job.
+        cleanup() { find "${WORK}" -type f -exec shred -u {} + 2>/dev/null || true; rm -rf "${WORK}"; }
+        trap cleanup EXIT
+
+        python3 - "$WORK" "$ROLE" "$SECRET" <<'PY'
+        import base64, json, os, subprocess, sys, time, urllib.error, urllib.request
+
+        work, role, secret_id = sys.argv[1], sys.argv[2], sys.argv[3]
+
+        def fail(msg):
+            print(f"::error::{msg}")
+            sys.exit(1)
+
+        def api(url, *, token=None, method="GET", body=None, bearer=False):
+            req = urllib.request.Request(url, method=method)
+            req.add_header("Accept", "application/vnd.github+json")
+            req.add_header("X-GitHub-Api-Version", "2022-11-28")
+            if token:
+                req.add_header("Authorization", f"{'Bearer' if bearer else 'token'} {token}")
+            data = json.dumps(body).encode() if body is not None else None
+            if data:
+                req.add_header("Content-Type", "application/json")
+            try:
+                with urllib.request.urlopen(req, data, timeout=30) as r:
+                    return json.load(r)
+            except urllib.error.HTTPError as e:
+                fail(f"{method} {url} -> {e.code} {e.read()[:200].decode(errors='replace')}")
+
+        # 1. Ask GitHub who this job is. The claims are minted by GitHub, so the
+        #    repository cannot alter them by editing a workflow.
+        oidc_url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=sts.amazonaws.com"
+        req = urllib.request.Request(oidc_url)
+        req.add_header("Authorization", f"bearer {os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']}")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                id_token = json.load(r)["value"]
+        except Exception as e:
+            fail(f"could not obtain an OIDC token: {e}")
+
+        # 2. Exchange it for AWS credentials. A deny here means the trust policy
+        #    rejected this identity, which is the control working, not a bug.
+        sts = subprocess.run(
+            ["aws", "sts", "assume-role-with-web-identity",
+             "--role-arn", role, "--role-session-name", "ci-app-token",
+             "--web-identity-token", id_token, "--duration-seconds", "900",
+             "--query", "Credentials", "--output", "json"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if sts.returncode != 0:
+            fail("this job is not authorised to mint an App token. Expected when a "
+                 "repository calls the central workflows from a fork or an "
+                 f"unlisted ref. Details: {sts.stderr.strip()[:300]}")
+        creds = json.loads(sts.stdout)
+        env = {**os.environ,
+               "AWS_ACCESS_KEY_ID": creds["AccessKeyId"],
+               "AWS_SECRET_ACCESS_KEY": creds["SecretAccessKey"],
+               "AWS_SESSION_TOKEN": creds["SessionToken"]}
+
+        # 3. Read the App credential.
+        sm = subprocess.run(
+            ["aws", "secretsmanager", "get-secret-value", "--secret-id", secret_id,
+             "--query", "SecretString", "--output", "text"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        if sm.returncode != 0:
+            fail(f"could not read {secret_id}: {sm.stderr.strip()[:300]}")
+        try:
+            cred = json.loads(sm.stdout.strip())
+            app_id, pem = cred["app_id"], cred["private_key"]
+        except Exception:
+            fail(f"{secret_id} is not the expected JSON with app_id and private_key")
+
+        # 4. Sign the App JWT. openssl is used rather than a Python crypto library
+        #    because it is guaranteed present on the runners; the PEM goes to a
+        #    0600 file in a directory the trap shreds.
+        pem_path = os.path.join(work, "app.pem")
+        with open(os.open(pem_path, os.O_WRONLY | os.O_CREAT, 0o600), "w") as fh:
+            fh.write(pem if pem.endswith("\n") else pem + "\n")
+
+        def b64url(raw):
+            return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+        now = int(time.time())
+        header = b64url(json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":")).encode())
+        payload = b64url(json.dumps({"iat": now - 60, "exp": now + 540, "iss": str(app_id)},
+                                    separators=(",", ":")).encode())
+        signing_input = f"{header}.{payload}".encode()
+        sign = subprocess.run(["openssl", "dgst", "-sha256", "-sign", pem_path],
+                              input=signing_input, capture_output=True, timeout=30)
+        if sign.returncode != 0:
+            fail("could not sign the App JWT; the stored private key may be malformed or revoked")
+        jwt = f"{header}.{payload}.{b64url(sign.stdout)}"
+
+        # 5. Resolve the installation. /app/installations covers users and orgs
+        #    alike, so this works for both accounts in the estate.
+        owner = os.environ["OWNER"]
+        installs = api("https://api.github.com/app/installations", token=jwt, bearer=True)
+        match = next((i for i in installs
+                      if i.get("account", {}).get("login", "").lower() == owner.lower()), None)
+        if match is None:
+            seen = ", ".join(sorted(i.get("account", {}).get("login", "?") for i in installs)) or "none"
+            fail(f"the App is not installed on '{owner}'. Installed on: {seen}")
+
+        # 6. Exchange for an installation token, narrowed to specific repos when
+        #    the caller named them.
+        body = {}
+        repos = os.environ.get("REPOSITORIES", "").replace(",", " ").split()
+        if repos:
+            body["repositories"] = repos
+        tok = api(f"https://api.github.com/app/installations/{match['id']}/access_tokens",
+                  token=jwt, method="POST", body=body or None, bearer=True)
+        token = tok["token"]
+
+        # Mask before it can reach any later log line.
+        print(f"::add-mask::{token}")
+        with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+            fh.write(f"token={token}\n")
+
+        scope_note = f"{len(repos)} repo(s)" if repos else "installation-wide"
+        print(f"Minted a {os.environ['SCOPE']} token for {owner} ({scope_note}), expires {tok.get('expires_at')}")
+        PY
+
+    - name: Configure git for private module access
+      if: inputs.configure-git == 'true'
+      shell: bash
+      env:
+        MOD_TOKEN: ${{ steps.mint.outputs.token }}
+        OWNER: ${{ inputs.owner }}
+      run: |
+        set -euo pipefail
+        git config --global \
+          url."https://x-access-token:${MOD_TOKEN}@github.com/${OWNER}/".insteadOf \
+          "https://github.com/${OWNER}/"
+        echo "Configured short-lived App token for github.com/${OWNER}/ (expires ~1h)"
