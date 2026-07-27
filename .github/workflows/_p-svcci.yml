@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   probe:
-    uses: coderaxis/github-actions/.github/workflows/service-ci.yml@v1
+    uses: coderaxis/github-actions/.github/workflows/_c-svcci.yml@v1
     permissions:
       contents: read
       security-events: write
