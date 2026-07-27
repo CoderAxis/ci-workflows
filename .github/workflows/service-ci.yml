@@ -517,30 +517,20 @@ jobs:
             [[ -f "${f}" ]] || { echo "::error::missing required workflow lane: ${f}"; rc=1; }
           done
 
-          # any_of, not `ls a b`: ls exits non-zero when ANY argument is missing, so using it for an
-          # either/or test fails every repo that has exactly one of the two - which is all of them.
-          any_of() {
-            for candidate in "$@"; do
-              [[ -e "${candidate}" ]] && return 0
-            done
-            return 1
-          }
+          # An ALLOWLIST, not a list of known-bad names. The previous version enumerated the
+          # workflows the platform had absorbed, which meant it could only ever catch a file someone
+          # had already thought to forbid: a repo could add build-extra.yml, run its own unpinned
+          # actions and its own thresholds, and pass. Every drift this migration removed - 91 copies
+          # of validate_docs.py, nine variants of one integration harness, one contract gate under
+          # two filenames - entered the fleet as a file nobody had listed yet.
+          #
+          # So the rule is inverted: two names are permitted and everything else fails. Adding a lane
+          # now means adding it here, in one place, with a reason.
+          allowed="ci.yml release.yml"
 
-          # This check used to run the other way round: a schema or deployable repo was REQUIRED to
-          # hold a bump listener. That was correct while the cascade woke consumers by
-          # repository_dispatch, and became backwards when module-release.yml started writing the
-          # pin directly with bump-module-pin. A listener now duplicates a bump the cascade has
-          # already made, so its presence is the defect - and leaving the rule inverted would have
-          # failed all 64 schema and deployable repos for lacking a file the platform deleted.
-          if any_of "${wf}/bump-core-modules.yml" "${wf}/bump-engine-core.yml"; then
-            echo "::error::this repo holds a bump listener, but the cascade no longer dispatches to"
-            echo "consumers - module-release.yml writes the pin directly. The listener would open a"
-            echo "second, competing PR for a bump that has already landed. Delete it."
-            rc=1
-          fi
-
-          # Absorbed into this pipeline. A surviving local copy is not redundant, it is a second
-          # implementation that drifts - the reason 91 repos each had their own validate_docs.py.
+          # Retained only to explain a failure, never to decide one. A file caught by the allowlist
+          # that also appears here gets told where its logic went, rather than just that it is
+          # unexpected.
           absorbed="actionlint gitleaks codeql quality-check security-scan dependency-review
                     docs-lint stale-docs-check schema-compatibility event-handling-compliance
                     seed-contract-check sqlc-guard core-guard sbom deploy post-deploy
@@ -548,13 +538,34 @@ jobs:
                     adr-validation openapi-validation dockerfile-standard docs-governance
                     integration-tests contract-check openapi-contract contract-tests
                     bump-shared-modules"
-          for name in ${absorbed}; do
-            if [[ -f "${wf}/${name}.yml" ]]; then
-              echo "::error::${wf}/${name}.yml is absorbed by central CI but still present here."
-              echo "Delete it; running both means the local copy decides the result."
-              rc=1
+          # The cascade stopped dispatching to consumers when module-release.yml began writing pins
+          # directly with bump-module-pin, so a surviving listener opens a second, competing PR for
+          # a bump that has already landed.
+          listeners="bump-core-modules bump-engine-core"
+
+          shopt -s nullglob
+          for path in "${wf}"/*.yml "${wf}"/*.yaml; do
+            f="$(basename "${path}")"
+            case " ${allowed} " in *" ${f} "*) continue ;; esac
+
+            stem="${f%.*}"
+            rc=1
+            if [[ " ${absorbed} " == *" ${stem} "* ]]; then
+              echo "::error file=${path}::${f} is absorbed by central CI but still present here."
+              echo "Running both means the local copy decides the result. Delete it."
+            elif [[ " ${listeners} " == *" ${stem} "* ]]; then
+              echo "::error file=${path}::${f} is a bump listener. The cascade no longer dispatches"
+              echo "to consumers - module-release.yml writes the pin directly - so this would open a"
+              echo "second, competing PR for a bump that has already landed. Delete it."
+            else
+              echo "::error file=${path}::${f} is not a permitted workflow lane."
+              echo "A repository may hold ci.yml and, if it publishes a version, release.yml."
+              echo "Everything else runs as a job in coderaxis/github-actions service-ci.yml, so a"
+              echo "local lane is a second implementation that will drift from it. If this genuinely"
+              echo "cannot be a central job, add it to the allowlist in service-ci.yml with a reason."
             fi
           done
+          shopt -u nullglob
 
           # Kept from pipeline-policy.yml, but conditioned on the catalog instead of assumed: only
           # a service that actually declares a REST interface owes a committed contract.
