@@ -694,6 +694,14 @@ jobs:
       && needs.resolve.outputs.deployable == 'true'
       && !contains(needs.*.result, 'failure')
       && !contains(needs.*.result, 'cancelled')
+    # Required, not optional hygiene. deploy-reusable.yml declares `id-token: write` at workflow
+    # level for the AWS OIDC role assumption, and a called workflow cannot hold a permission its
+    # caller did not grant. Omitting this block made the job inherit the `contents: read` declared
+    # at the top of this file, so GitHub rejected the whole workflow at load time - which surfaces
+    # as a startup_failure with no job, no log and no annotation to read.
+    permissions:
+      contents: read
+      id-token: write
     uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yml@v1
     with:
       # Resolved from the immutable repository id, never from anything the service repo says.
