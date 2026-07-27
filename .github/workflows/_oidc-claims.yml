@@ -1,0 +1,48 @@
+name: OIDC claims (nested)
+
+# Diagnostic only, deleted once the question it answers is closed.
+#
+# The token-broker trust model authorizes on `job_workflow_ref`, so that claim has to mean what we
+# think it means before an IAM policy or a broker depends on it. The specific unknown is nesting:
+# service-ci.yml calls deploy-reusable.yml, and if `job_workflow_ref` reports the OUTER workflow for
+# a job defined in the INNER one, an allowlist naming only the entry point would silently authorize
+# every nested callee - and if it reports the inner one, an allowlist naming only the entry point
+# would reject legitimate jobs. Guessing either way produces a security control that is wrong in a
+# direction nobody notices until it matters.
+#
+# This workflow is the INNER level. _oidc-outer.yml dumps the same claims at the outer level, so one
+# run shows both.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  claims:
+    name: Claims at nesting depth 2
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # The ID token is itself a credential - it can assume an AWS role - so only the decoded
+      # payload's selected fields are printed, never the token or its signature.
+      - name: Print selected OIDC claims
+        run: |
+          set -euo pipefail
+          tok="$(curl -sSf -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
+                 | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
+          printf '%s' "${tok}" | python3 -c '
+import base64, json, sys
+payload = sys.stdin.read().split(".")[1]
+payload += "=" * (-len(payload) % 4)
+c = json.loads(base64.urlsafe_b64decode(payload))
+print("DEPTH 2 (job defined in _oidc-claims.yml, called by _oidc-outer.yml)")
+for k in ("sub","aud","repository","repository_id","repository_owner","repository_owner_id",
+          "workflow_ref","job_workflow_ref","job_workflow_sha","event_name","ref","runner_environment"):
+    print(f"  {k} = {c.get(k)!r}")
+'
