@@ -72,14 +72,17 @@ on:
         type: string
         default: main
     secrets:
+      # DEPRECATED and unread: tokens are minted from the job's own OIDC identity via
+      # ci-app-token. Kept optional so callers still passing them keep starting; remove
+      # once no caller does.
       CODERAXIS_APP_ID:
-        required: true
+        required: false
       CODERAXIS_APP_PRIVATE_KEY:
-        required: true
+        required: false
       RELEASE_BOT_APP_ID:
-        required: true
+        required: false
       RELEASE_BOT_APP_PRIVATE_KEY:
-        required: true
+        required: false
       SLACK_BOT_TOKEN:
         required: false
 
@@ -93,6 +96,9 @@ concurrency:
 jobs:
   resolve:
     name: Resolve identity and validate the request
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -108,8 +114,6 @@ jobs:
           catalog-owner: ${{ inputs.catalog_owner }}
           catalog-repo: ${{ inputs.catalog_repo }}
           catalog-ref: ${{ inputs.catalog_ref }}
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
 
       - name: Reject a bump this repo is not modelled to accept
         id: check
@@ -150,6 +154,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      id-token: write
       contents: write
       pull-requests: write
     env:
@@ -207,10 +212,10 @@ jobs:
       - name: Mint module-read token
         id: modauth
         if: steps.guard.outputs.skip != 'true'
-        uses: coderaxis/github-actions/module-auth@v1
+        uses: coderaxis/github-actions/ci-app-token@v1
         with:
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          scope: read
+          configure-git: "true"
 
       - name: Configure private module access
         if: steps.guard.outputs.skip != 'true'
@@ -314,10 +319,9 @@ jobs:
       - name: Mint release-bot token
         id: bottoken
         if: steps.guard.outputs.skip != 'true'
-        uses: actions/create-github-app-token@v1
+        uses: coderaxis/github-actions/ci-app-token@v1
         with:
-          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
-          private-key: ${{ secrets.RELEASE_BOT_APP_PRIVATE_KEY }}
+          scope: publish
 
       - name: Open the bump PR
         id: cpr

@@ -60,15 +60,19 @@ on:
         type: string
         default: ""
     secrets:
-      # Declared explicitly rather than relying on `secrets: inherit`: the service repos live in
-      # the InboxxHQ-CoderAxis org while this workflow lives under the coderaxis account, and
-      # inherit does not cross an org boundary. The caller therefore passes secrets — but only
-      # secrets. It still states nothing about what the service IS, which is the property that
-      # matters: plumbing a credential cannot select which gates run.
+      # The App credentials are DEPRECATED and no longer read anywhere in this pipeline. Every
+      # token is now minted from the job's own OIDC identity via ci-app-token, so a repository
+      # forwards nothing: the platform decides what a caller may mint, rather than each caller
+      # holding the credential that decides it.
+      #
+      # Kept declared, and now optional, purely so the ~90 callers still passing them keep
+      # starting while they are cleaned up — a caller that passes a secret the callee does not
+      # declare is a hard startup error, so removing these before the callers would break the
+      # fleet. Delete once no caller passes them.
       CODERAXIS_APP_ID:
-        required: true
+        required: false
       CODERAXIS_APP_PRIVATE_KEY:
-        required: true
+        required: false
       SLACK_BOT_TOKEN:
         required: false
       SONAR_TOKEN:
@@ -90,6 +94,9 @@ jobs:
   # pass is indistinguishable from a repo that opted itself out.
   resolve:
     name: Resolve service identity
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -117,8 +124,6 @@ jobs:
           catalog-owner: ${{ inputs.catalog_owner }}
           catalog-repo: ${{ inputs.catalog_repo }}
           catalog-ref: ${{ inputs.catalog_ref }}
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
           coverage-override: ${{ inputs.coverage_threshold }}
 
   # The language-specific jobs below are necessarily conditional, which means an unrecognised
@@ -177,6 +182,9 @@ jobs:
     name: Build and test (${{ needs.resolve.outputs.language }})
     needs: resolve
     if: needs.resolve.outputs.language == 'go'
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -196,10 +204,10 @@ jobs:
 
       - name: Mint module-read token
         id: modauth
-        uses: coderaxis/github-actions/module-auth@v1
+        uses: coderaxis/github-actions/ci-app-token@v1
         with:
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          scope: read
+          configure-git: "true"
 
       - name: Download private modules
         shell: bash
@@ -267,6 +275,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      id-token: write
       contents: read
       security-events: write
       # analyze@v3 reads the workflow run via the REST API to attach results to the right commit.
@@ -289,10 +298,10 @@ jobs:
       # so this must fail loudly rather than degrade to scanning a subset.
       - name: Mint module-read token
         id: modauth
-        uses: coderaxis/github-actions/module-auth@v1
+        uses: coderaxis/github-actions/ci-app-token@v1
         with:
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          scope: read
+          configure-git: "true"
 
       - name: Configure private module access
         env:
@@ -338,10 +347,6 @@ jobs:
     uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yml@v1
     # Explicit, because `secrets: inherit` does not cross the org boundary between a service repo
     # and this workflow. Without them the App token step failed on "Input required and not
-    # supplied: app-id".
-    secrets:
-      CODERAXIS_APP_ID: ${{ secrets.CODERAXIS_APP_ID }}
-      CODERAXIS_APP_PRIVATE_KEY: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
 
   dockerfile:
     name: Dockerfile standard
@@ -541,6 +546,9 @@ jobs:
     name: Vulnerabilities
     needs: resolve
     if: needs.resolve.outputs.language == 'go'
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -566,10 +574,10 @@ jobs:
 
       - name: Mint module-read token
         id: modauth
-        uses: coderaxis/github-actions/module-auth@v1
+        uses: coderaxis/github-actions/ci-app-token@v1
         with:
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          scope: read
+          configure-git: "true"
 
       - name: Known vulnerabilities in dependencies
         shell: bash
@@ -621,6 +629,9 @@ jobs:
     name: SQLC drift and raw-SQL guard
     needs: resolve
     if: needs.resolve.outputs.language == 'go'
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -636,10 +647,10 @@ jobs:
 
       - name: Mint module-read token
         id: modauth
-        uses: coderaxis/github-actions/module-auth@v1
+        uses: coderaxis/github-actions/ci-app-token@v1
         with:
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          scope: read
+          configure-git: "true"
 
       - name: Verify sqlc generated code is current
         shell: bash
@@ -680,6 +691,9 @@ jobs:
   docs:
     name: Service documentation
     needs: resolve
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -689,11 +703,11 @@ jobs:
 
       - name: Mint a catalog-read token
         id: catalog_token
-        uses: actions/create-github-app-token@v1
+        uses: coderaxis/github-actions/ci-app-token@v1
         with:
-          app-id: ${{ secrets.CODERAXIS_APP_ID }}
-          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+          scope: read
           owner: ${{ inputs.catalog_owner }}
+          repositories: ${{ inputs.catalog_repo }}
 
       - name: Check out the documentation standard
         uses: actions/checkout@v4
@@ -751,6 +765,3 @@ jobs:
       # Previously each repo passed this literal in its own deploy.yml, so a one-line edit to
       # `service_name:` was enough to publish one service's code under another's identity.
       service_name: ${{ needs.resolve.outputs.service }}
-    secrets:
-      CODERAXIS_APP_ID: ${{ secrets.CODERAXIS_APP_ID }}
-      CODERAXIS_APP_PRIVATE_KEY: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
