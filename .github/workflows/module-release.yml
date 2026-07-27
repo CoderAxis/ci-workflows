@@ -166,6 +166,11 @@ jobs:
         env:
           EXPLICIT: ${{ inputs.version }}
           MODULE: ${{ needs.resolve.outputs.module_path }}
+          # Required: the recovery probe below asks whether a Release already exists, and an
+          # unauthenticated gh exits non-zero for that question too. Without a token the probe
+          # cannot distinguish "no release" from "could not ask", and it would answer "no release"
+          # every time - re-publishing and re-dispatching bumps on every run whose tag is at HEAD.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
@@ -196,15 +201,31 @@ jobs:
           if [[ -z "${latest}" ]]; then range="HEAD"; base="0.0.0"; else range="${latest}..HEAD"; base="${latest#v}"; fi
           msgs="$(git log --no-merges --format='%s%n%b' "${range}" 2>/dev/null || true)"
 
-          # Recovery: a prior run tagged HEAD but failed before creating the GitHub Release (the
-          # attestation API rejects user-owned private repos even with a valid App token). Re-run
-          # must finalize that tag, not compute a duplicate or skip as "nothing to publish".
+          # Recovery: a prior run pushed the tag but failed before creating the Release, which is
+          # the one state a re-run cannot reach any other way - the tag already exists, so the
+          # explicit-version path refuses it as immutable and the commit-scan path sees an empty
+          # range and reports "nothing to publish". The module is then fetchable by Go while no
+          # consumer was ever notified, which is precisely the silent skew this pipeline exists to
+          # prevent.
+          #
+          # The existence probe must be able to fail loudly. `gh release view` returns non-zero
+          # both for "no such release" and for "could not reach the API", and treating those the
+          # same means an API blip re-publishes a release and re-dispatches every consumer bump.
           if [[ -n "${latest}" ]] && [[ "$(git rev-parse "refs/tags/${latest}^{commit}" 2>/dev/null || true)" == "$(git rev-parse HEAD)" ]]; then
-            if ! gh release view "${latest}" >/dev/null 2>&1; then
-              echo "::notice::tag ${latest} exists at HEAD but has no GitHub Release; finalizing"
-              { echo "version=${latest}"; echo "releasable=true"; echo "createtag=false"; } >> "${GITHUB_OUTPUT}"
+            if gh release view "${latest}" >/dev/null 2>&1; then
+              echo "::notice::${latest} is already released at HEAD; nothing to publish"
+              echo "releasable=false" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
+            # Distinguish "absent" from "unreachable" before acting on it.
+            if ! gh api "repos/${GITHUB_REPOSITORY}" --jq '.id' >/dev/null 2>&1; then
+              echo "::error::cannot reach the GitHub API to determine whether ${latest} is released."
+              echo "Refusing to guess: re-publishing would re-dispatch a bump to every consumer."
+              exit 1
+            fi
+            echo "::notice::tag ${latest} exists at HEAD with no Release; finalizing that version"
+            { echo "version=${latest}"; echo "releasable=true"; echo "createtag=false"; } >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
 
           # Quoted: `patch` and `major` are also real commands, so an unquoted assignment reads as a
