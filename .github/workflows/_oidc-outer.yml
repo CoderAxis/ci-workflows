@@ -41,7 +41,34 @@ jobs:
                     "job_workflow_sha", "event_name", "ref", "runner_environment"):
               print(f"  {k} = {c.get(k)!r}")
           PY
-          rm -f /tmp/idtok.json
+
+      # Settles whether IAM honours a condition on job_workflow_ref at all. AWS documents `sub` and
+      # `aud` explicitly; whether arbitrary claims work as condition keys decides the entire design -
+      # if they do not, the alternative is customizing GitHub's subject claim template to fold
+      # job_workflow_ref into `sub`, which is a breaking change to every existing trust policy.
+      #
+      # Two throwaway roles with no permissions: one whose condition matches this job's
+      # job_workflow_ref and one whose condition cannot match. A real control must both admit the
+      # right caller AND reject the wrong one, so testing only the happy path would prove nothing -
+      # a condition key AWS silently ignores would let BOTH succeed.
+      - name: Does IAM honour a job_workflow_ref condition?
+        env:
+          ACCOUNT: "063088900996"
+        run: |
+          set -uo pipefail
+          tok="$(python3 -c 'import json; print(json.load(open("/tmp/idtok.json"))["value"])')"
+          for role in match mismatch; do
+            if aws sts assume-role-with-web-identity \
+                 --role-arn "arn:aws:iam::${ACCOUNT}:role/inboxxhq-oidc-probe-${role}" \
+                 --role-session-name "probe-${role}" \
+                 --web-identity-token "${tok}" \
+                 --query 'AssumedRoleUser.Arn' --output text >/dev/null 2>/tmp/err.txt; then
+              echo "RESULT ${role}: ASSUMED"
+            else
+              echo "RESULT ${role}: DENIED ($(head -c 200 /tmp/err.txt | tr '\n' ' '))"
+            fi
+          done
+          rm -f /tmp/idtok.json /tmp/err.txt
 
   nested:
     name: Delegate to the nested level
