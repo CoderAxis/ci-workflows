@@ -99,12 +99,36 @@ _DEFAULT_TOKEN = {"contents": "read", "metadata": "read", "packages": "read"}
 
 
 def _declared_permissions(text: str) -> dict[str, str] | str | None:
-    """The workflow-LEVEL permissions of a called workflow, which its caller must cover."""
+    """The most a called workflow can ask for: its workflow-level block UNIONED with every job's.
+
+    Checking only the workflow-level block is not enough. A called workflow's jobs are each capped
+    by what the CALLER granted, so a single job asking for one extra scope is enough to break the
+    call - and that is easy to introduce, because adding the scope to the job looks locally correct
+    and the file it breaks is in another repository. Taking the union over the workflow-level block
+    and every job-level block gives the upper bound the caller has to cover.
+    """
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError:
         return None
-    return (doc or {}).get("permissions") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict):
+        return None
+    blocks = [doc.get("permissions")]
+    for job in (doc.get("jobs") or {}).values():
+        if isinstance(job, dict):
+            blocks.append(job.get("permissions"))
+    # A blanket string anywhere dominates the union.
+    for b in blocks:
+        if isinstance(b, str) and b != "read-all":
+            return b
+    union: dict[str, str] = {}
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        for scope, level in b.items():
+            if _ACCESS_RANK.get(str(level), 0) > _ACCESS_RANK.get(str(union.get(scope, "none")), 0):
+                union[scope] = level
+    return union or None
 
 
 def permission_gaps(

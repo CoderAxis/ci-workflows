@@ -269,6 +269,10 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      # analyze@v3 reads the workflow run via the REST API to attach results to the right commit.
+      # Without this it fails on "Resource not accessible by integration" AFTER extraction and
+      # autobuild have already succeeded, so the cost of omitting it is a full CodeQL build.
+      actions: read
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
     steps:
@@ -595,11 +599,19 @@ jobs:
 
       # This repo tags releases as `vX.Y.Z`; `0.28.0` has no `v` and does not resolve, so the job
       # failed on "unable to find version" before scanning anything.
+      #
+      # `scanners: vuln` is deliberate. Current Trivy also runs a secret scanner by default, which
+      # does not read .gitleaks.toml and so re-reports what that file deliberately allowlists - its
+      # first finding here was the example GitHub token published in GitHub's own docs, which the
+      # allowlist exists to permit. Secret scanning is owned by gitleaks in the `standards` job,
+      # where the allowlist lives; two scanners for one concern, only one of which can be taught
+      # about a false positive, means the other can only be silenced wholesale.
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
+          scanners: vuln
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
