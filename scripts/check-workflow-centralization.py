@@ -271,6 +271,23 @@ def _is_local_bump(filename: str, doc: dict) -> bool:
     return any(isinstance(t, str) and _RELEASED_EVENT.match(t) for t in (types or []))
 
 
+def _is_reusable(text: str) -> bool:
+    """True when the workflow is itself published for others to call.
+
+    Such a file is exempt from the lane allowlist because GitHub resolves a reusable workflow only
+    at `<owner>/<repo>/.github/workflows/<file>@<ref>` - it has to live where it is published from.
+    A workflow that merely CALLS a reusable one is not exempt; that is an ordinary lane.
+    """
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return False
+    if not isinstance(doc, dict):
+        return False
+    on = doc.get("on") or doc.get(True)  # bare `on:` parses as the boolean True in YAML 1.1
+    return isinstance(on, dict) and "workflow_call" in on
+
+
 def check_repo(
     root: Path, published: dict[str, Path], controls: dict[str, dict], central: Path
 ) -> list[Finding]:
@@ -279,10 +296,12 @@ def check_repo(
     bad_refs: list[str] = []
     perm_gaps: list[str] = []
     local_bumps: list[str] = []
+    extra_lanes: list[str] = []
 
     # The publishing repo cannot shadow its own publications: those files ARE the central
     # workflows, and they do not call themselves.
     is_central = root == central
+    allowed_lanes = set(controls["WFC-006"].get("allowed_lanes") or ())
 
     for wf in consumer_workflows(root):
         try:
@@ -299,6 +318,12 @@ def check_repo(
         for name, ref in calls:
             if not MAJOR_TAG_RE.match(ref):
                 bad_refs.append(f"{wf.relative_to(root)} -> {name}@{ref}")
+
+        # WFC-006 — only the permitted lanes, plus workflows this repo publishes as reusable.
+        # The exemption is checked against the file's own `on:` rather than against a list of
+        # repository names, so it cannot be claimed by a repo that merely asserts it is special.
+        if wf.name not in allowed_lanes and not _is_reusable(text):
+            extra_lanes.append(str(wf.relative_to(root)))
 
         # WFC-004 — a caller grants what its callee declares. Requires the parsed document: the
         # relationship is between a job's effective permissions and another FILE's, so it is not
@@ -410,6 +435,21 @@ def check_repo(
                 else "no local bump implementation or release listener"
             ),
             c5["remediation"].strip(),
+        )
+    )
+
+    c6 = controls["WFC-006"]
+    findings.append(
+        Finding(
+            "WFC-006",
+            c6["severity"],
+            c6["title"],
+            "fail" if extra_lanes else "pass",
+            f"{len(extra_lanes)} workflow(s) outside the permitted lanes: " + ", ".join(extra_lanes)
+            if extra_lanes
+            else f"only the permitted lanes ({', '.join(sorted(allowed_lanes))}) and published "
+            "reusable workflows",
+            c6["remediation"].strip(),
         )
     )
     return findings

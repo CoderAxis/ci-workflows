@@ -171,3 +171,48 @@ controls:
       regenerate, rather than reinstating a local listener.
     detector: no_local_bump_workflows
     refs: [ADR-0051]
+
+  - id: WFC-006
+    title: A repository holds only the permitted workflow lanes
+    owner: platform-infrastructure
+    scope: caller-workflow
+    status: active
+    severity: major
+    applies_to_capabilities: []
+    allowed_lanes:
+      - ci.yml
+      - release.yml
+    policy: >-
+      A repository's `.github/workflows` directory MUST contain only `ci.yml`, `release.yml`, and
+      workflows that the repository itself PUBLISHES as reusable (`on.workflow_call`). Any other
+      workflow file is a finding, whether or not its behaviour duplicates something central.
+    rationale: >-
+      Every other control here, and the absorbed-workflow list this replaced in service-ci.yml,
+      is a denylist: it can only catch a filename somebody already thought to forbid. That is the
+      wrong shape for this problem, because every instance of drift the platform has had to unwind
+      entered the fleet as a file nobody had listed yet - 91 repositories each carrying their own
+      validate_docs.py, one integration harness copied into 35 repositories and drifted into nine
+      variants, a single contract gate running under two different filenames so that a search for
+      one would never find the other, and 34 copies of a preview-environment workflow gated on a
+      repository variable that was set nowhere and provisioning nothing. None of those were caught
+      by a rule, because a denylist is written after the fact by definition.
+
+      Inverting it makes the fleet's shape provable rather than surveyed. Two names are permitted;
+      anything else fails on the first run, before it has been copied to the ninety other
+      repositories that make it expensive to remove.
+
+      The reusable-workflow exemption is a GitHub constraint rather than a concession. A reusable
+      workflow is addressable only as `<owner>/<repo>/.github/workflows/<file>@<ref>`, so the file
+      must physically live in the repository that publishes it; there is no way to publish it from
+      somewhere else. That applies to the workflows this repository publishes, and to
+      reusable-openapi-contract.yml and reusable-sdk-publish.yml in the two contract repositories.
+      A guard, a deploy lane or a drift check is NOT covered by that exemption: those are ordinary
+      jobs that happen to live in their own file.
+    remediation: >-
+      Move the logic into a job in coderaxis/github-actions service-ci.yml, gated on the catalog
+      fact that decides whether it applies, and delete the local file. If the repository is not a
+      catalog service and genuinely has a different lifecycle - Terraform plan/apply, GitOps
+      promotion - it needs a defined lane set of its own, added to `allowed_lanes` here with a
+      reason. Adding it silently to the local repository is the drift this control exists to catch.
+    detector: only_permitted_workflow_lanes
+    refs: [ADR-0081, ADR-0051]
