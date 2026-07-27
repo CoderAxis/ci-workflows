@@ -315,7 +315,37 @@ jobs:
         with:
           languages: go
       - uses: github/codeql-action/autobuild@v3
-      - uses: github/codeql-action/analyze@v3
+
+      # Code scanning (the API analyze uploads to) is a GitHub Advanced Security feature. It is not
+      # available for user-owned private repositories, which is exactly where the core modules live
+      # today. Extraction and autobuild still prove the code compiles under analysis; failing the
+      # job for a platform entitlement the App cannot buy would make every core-module CI red for a
+      # reason nobody in the repo can fix. When the upload is refused for that reason we record it
+      # and move on; any other analyze failure still fails the job.
+      - name: Detect Code scanning availability
+        id: codescan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner_type="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.owner.type')"
+          is_private="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.private')"
+          if [[ "${owner_type}" == "User" && "${is_private}" == "true" ]]; then
+            echo "available=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Code scanning is unavailable for user-owned private repos; analysis runs but results are not uploaded."
+          else
+            echo "available=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Upload CodeQL results
+        if: steps.codescan.outputs.available == 'true'
+        uses: github/codeql-action/analyze@v3
+
+      - name: Analyze without upload (no Code scanning entitlement)
+        if: steps.codescan.outputs.available == 'false'
+        uses: github/codeql-action/analyze@v3
+        with:
+          upload: false
 
   # ── contract gates, selected by what the catalog says the service exposes ────────────────────
   # These run for EVERY repository, deliberately unconditioned.
