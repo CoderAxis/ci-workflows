@@ -3,7 +3,7 @@
 generic documentation-governance contract every governed docs repo shares.
 
 This is the single source of the documentation-governance LOGIC. It is consumed by the
-`docs-governance.yml` reusable workflow and run against a governed docs repository
+`docs-governance.yaml` reusable workflow and run against a governed docs repository
 (``--root``). It is the docs analogue of scripts/check-delivery-model.py /
 scripts/check-dockerfile-standard.py.
 

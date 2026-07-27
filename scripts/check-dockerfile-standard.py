@@ -21,7 +21,7 @@ registry - by design, so it cannot conflict with ADR-0051 DM-001 (CI never build
     publishes a container artifact; the central build `inboxxhq-build` is the sole
     builder/publisher).
   * NO DUPLICATE LOGIC: seeding's full contract (binary + data tree + placeholder-only
-    qualified envs) is hard-enforced by seed-contract-check.yml; DS-012 here is advisory-
+    qualified envs) is hard-enforced by seed-contract-check.yaml; DS-012 here is advisory-
     only cross-check, never a second hard gate for the same fact.
   * SELF-DOCUMENTING: --write-docs / --verify-docs, exactly like check-delivery-model.py.
 
@@ -33,7 +33,7 @@ Usage:
   check-dockerfile-standard.py --verify-docs README.md
 
 SSOT: this file lives in coderaxis/github-actions and is invoked by the central reusable
-workflow .github/workflows/dockerfile-standard.yml.
+workflow .github/workflows/dockerfile-standard.yaml.
 """
 from __future__ import annotations
 
@@ -346,8 +346,8 @@ def seed_ships_seed_binary(df: Dockerfile) -> Finding:
     text = df.all_text()
     if "cmd/seed" not in text:
         return Finding(False, "no `go build ... ./cmd/seed` found (informational only - "
-                                "seed-contract-check.yml is the authoritative gate)")
-    return Finding(True, "seed binary built (authoritative check: seed-contract-check.yml)")
+                                "seed-contract-check.yaml is the authoritative gate)")
+    return Finding(True, "seed binary built (authoritative check: seed-contract-check.yaml)")
 
 
 def capability_declaration_matches_reality(df: Dockerfile, capabilities: set[str]) -> Finding:

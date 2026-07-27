@@ -12,7 +12,7 @@ name: Release Cascade Guard
 # gate that blocks nothing. If either detector stops firing, this fails here rather than fleet-wide.
 #
 # Policy SSOT: SHARED_CORE_RELEASE_AND_PROMOTION.md, ADR-0081. Twin of
-# workflow-centralization-guard.yml.
+# workflow-centralization-guard.yaml.
 
 on:
   push:
@@ -22,10 +22,10 @@ on:
       - "scripts/test_release_cascade.py"
       - "scripts/testdata/module-pins/**"
       - "scripts/testdata/release-cascade-catalog/**"
-      - ".github/workflows/module-release.yml"
+      - ".github/workflows/module-release.yaml"
       - ".github/workflows/module-bump.yml"
-      - ".github/workflows/release-cascade-guard.yml"
-      - "resolve-service-identity/action.yml"
+      - ".github/workflows/release-cascade-guard.yaml"
+      - "resolve-service-identity/action.yaml"
   pull_request:
     paths:
       - "scripts/resolve_service_identity.py"
@@ -33,10 +33,10 @@ on:
       - "scripts/test_release_cascade.py"
       - "scripts/testdata/module-pins/**"
       - "scripts/testdata/release-cascade-catalog/**"
-      - ".github/workflows/module-release.yml"
+      - ".github/workflows/module-release.yaml"
       - ".github/workflows/module-bump.yml"
-      - ".github/workflows/release-cascade-guard.yml"
-      - "resolve-service-identity/action.yml"
+      - ".github/workflows/release-cascade-guard.yaml"
+      - "resolve-service-identity/action.yaml"
   workflow_dispatch: {}
 
 permissions:
@@ -71,8 +71,8 @@ jobs:
                      unorderable_consumers required_modules language archetype tier owner \
                      deployable owns_database seeds has_rest has_grpc has_events \
                      coverage_threshold role capabilities; do
-            if ! grep -qE "^  ${key}:" resolve-service-identity/action.yml; then
-              echo "::error::resolver emits '${key}' but resolve-service-identity/action.yml does not"
+            if ! grep -qE "^  ${key}:" resolve-service-identity/action.yaml; then
+              echo "::error::resolver emits '${key}' but resolve-service-identity/action.yaml does not"
               echo "expose it as an output, so callers would silently receive an empty value."
               missing=1
             fi

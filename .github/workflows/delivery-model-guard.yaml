@@ -2,7 +2,7 @@ name: Delivery Model Guard
 
 # Self-CI executable governance for the canonical reusable deploy workflow.
 #
-# Runs scripts/check-delivery-model.py against .github/workflows/deploy-reusable.yml
+# Runs scripts/check-delivery-model.py against .github/workflows/deploy-reusable.yaml
 # on every change, so the build-once / promote-by-digest delivery model cannot silently
 # regress - e.g. someone adding a local image build, a second/per-variant build (incl. a
 # swagger/docs image), pinning a staging/preprod/prod overlay, widening permissions,
@@ -21,15 +21,15 @@ name: Delivery Model Guard
 on:
   push:
     paths:
-      - ".github/workflows/deploy-reusable.yml"
-      - ".github/workflows/delivery-model-guard.yml"
+      - ".github/workflows/deploy-reusable.yaml"
+      - ".github/workflows/delivery-model-guard.yaml"
       - "scripts/check-delivery-model.py"
       - "controls/delivery-model.yaml"
       - "README.md"
   pull_request:
     paths:
-      - ".github/workflows/deploy-reusable.yml"
-      - ".github/workflows/delivery-model-guard.yml"
+      - ".github/workflows/deploy-reusable.yaml"
+      - ".github/workflows/delivery-model-guard.yaml"
       - "scripts/check-delivery-model.py"
       - "controls/delivery-model.yaml"
       - "README.md"
@@ -61,7 +61,7 @@ jobs:
       - name: Enforce delivery-model invariants (ADR-0051 / RFC-0020)
         run: |
           python3 scripts/check-delivery-model.py \
-            .github/workflows/deploy-reusable.yml \
+            .github/workflows/deploy-reusable.yaml \
             --report delivery-model-report.json
 
       - name: Upload delivery-model report (machine-readable)

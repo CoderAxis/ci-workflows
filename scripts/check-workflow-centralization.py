@@ -227,7 +227,7 @@ def verify_docs(doc: dict, path: Path) -> int:
 def published_reusable_workflows(repo: Path) -> dict[str, Path]:
     """Workflows in THIS repo that declare on.workflow_call — the authoritative central set."""
     found: dict[str, Path] = {}
-    for wf in sorted((repo / WORKFLOW_DIR).glob("*.yml")):
+    for wf in workflow_files(repo):
         try:
             if WORKFLOW_CALL_RE.search(wf.read_text(encoding="utf-8")):
                 found[wf.name] = wf
@@ -241,8 +241,19 @@ def published_reusable_workflows(repo: Path) -> dict[str, Path]:
     return found
 
 
+def workflow_files(root: Path) -> list[Path]:
+    """Every workflow, under either extension.
+
+    Both are collected deliberately even though only `.yaml` is permitted: a checker that globbed
+    `*.yaml` alone would not SEE a `.yml` file, so the extension rule would be unenforceable by the
+    thing meant to enforce it, and a repo could opt out of every control here by renaming.
+    """
+    d = root / WORKFLOW_DIR
+    return sorted([*d.glob("*.yaml"), *d.glob("*.yml")])
+
+
 def consumer_workflows(root: Path) -> list[Path]:
-    return sorted((root / WORKFLOW_DIR).glob("*.yml"))
+    return workflow_files(root)
 
 
 _RELEASED_EVENT = re.compile(r"^[a-z0-9][a-z0-9-]*-released$")
@@ -254,7 +265,7 @@ def _is_local_bump(filename: str, doc: dict) -> bool:
     Two independent signals, because either alone misses a real case. A listener is identified by
     its `repository_dispatch` type - that is the mechanism, and a rename does not change it. A
     bump driven only by `workflow_dispatch` has no such trigger, so the filename is checked as
-    well; `bump-shared-modules.yml`, the 315-line local implementation that existed in 70
+    well; `bump-shared-modules.yaml`, the 315-line local implementation that existed in 70
     repositories, is caught by both.
     """
     if filename.startswith("bump-"):
@@ -322,7 +333,13 @@ def check_repo(
         # WFC-006 — only the permitted lanes, plus workflows this repo publishes as reusable.
         # The exemption is checked against the file's own `on:` rather than against a list of
         # repository names, so it cannot be claimed by a repo that merely asserts it is special.
-        if wf.name not in allowed_lanes and not _is_reusable(text):
+        #
+        # The extension is part of the rule. Both spellings are valid YAML and valid to GitHub, so
+        # nothing fails when they are mixed - which is precisely why they drift, and why a search
+        # for `ci.yaml` silently misses the repositories that spell it `ci.yml`.
+        if wf.suffix != ".yaml":
+            extra_lanes.append(f"{wf.relative_to(root)} (must be .yaml, not {wf.suffix})")
+        elif wf.name not in allowed_lanes and not _is_reusable(text):
             extra_lanes.append(str(wf.relative_to(root)))
 
         # WFC-004 — a caller grants what its callee declares. Requires the parsed document: the

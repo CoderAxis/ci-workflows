@@ -6,15 +6,15 @@ name: Workflow Centralization Guard
 # violates both controls. If either control stops firing, this guard fails here rather than letting
 # the drift it was written to catch slip through fleet-wide.
 #
-# Policy SSOT: ADR-0081, ADR-0051. This is the centralization twin of delivery-model-guard.yml,
-# dockerfile-standard-guard.yml and docs-governance-guard.yml.
+# Policy SSOT: ADR-0081, ADR-0051. This is the centralization twin of delivery-model-guard.yaml,
+# dockerfile-standard-guard.yaml and docs-governance-guard.yaml.
 
 on:
   push:
     paths:
       - "scripts/check-workflow-centralization.py"
       - "controls/workflow-centralization.yaml"
-      - ".github/workflows/workflow-centralization-guard.yml"
+      - ".github/workflows/workflow-centralization-guard.yaml"
       - "scripts/testdata/workflow-centralization-fixture/**"
       - "scripts/testdata/workflow-centralization-violation-fixture/**"
       - "README.md"
@@ -22,7 +22,7 @@ on:
     paths:
       - "scripts/check-workflow-centralization.py"
       - "controls/workflow-centralization.yaml"
-      - ".github/workflows/workflow-centralization-guard.yml"
+      - ".github/workflows/workflow-centralization-guard.yaml"
       - "scripts/testdata/workflow-centralization-fixture/**"
       - "scripts/testdata/workflow-centralization-violation-fixture/**"
       - "README.md"

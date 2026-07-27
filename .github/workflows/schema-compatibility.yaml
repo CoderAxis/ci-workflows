@@ -6,7 +6,7 @@ name: Reusable Schema Compatibility
 #
 #   jobs:
 #     schema-compatibility:
-#       uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yml@v1
+#       uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yaml@v1
 #       with:
 #         table: auth_service_outbox      # omit to skip outbox conformance
 #       secrets: inherit                  # REQUIRED: passes the module-read App creds

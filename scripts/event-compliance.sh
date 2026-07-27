@@ -3,7 +3,7 @@
 # Central event-handling compliance gate (SSOT).
 #
 # Single source of truth consumed by
-#   .github/workflows/event-handling-compliance.yml
+#   .github/workflows/event-handling-compliance.yaml
 # and therefore, via a thin caller, by every service repo on the platform.
 # Change the gate HERE and roll it out by moving the @v1 tag — never by
 # editing ~40 service repos (mirrors scripts/schema-compat.sh and
@@ -37,7 +37,7 @@
 #                   (matches services/ENTERPRISE_NOTIFICATION_PATTERN.md §7's
 #                   "Role" column for this repo's family. Declared per-repo by
 #                   the thin caller — reviewable in that repo's own workflow
-#                   YAML, exactly like schema-compatibility.yml's `table:`).
+#                   YAML, exactly like schema-compatibility.yaml's `table:`).
 #   ALLOWED_TOPICS  (required when ROLE is DK or Hybrid; comma-separated) the
 #                   ONLY Kafka topic string literals this repo's direct
 #                   producer(s) may publish to, e.g. "inboxxhq.chat.messages".

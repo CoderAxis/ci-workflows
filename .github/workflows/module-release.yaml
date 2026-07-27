@@ -7,10 +7,10 @@ name: Module release
 #
 #   jobs:
 #     release:
-#       uses: coderaxis/github-actions/.github/workflows/module-release.yml@v1
+#       uses: coderaxis/github-actions/.github/workflows/module-release.yaml@v1
 #       secrets: inherit
 #
-# WHAT REPLACED WHAT. Each core repo carried three local workflows: release.yml (version,
+# WHAT REPLACED WHAT. Each core repo carried three local workflows: release.yaml (version,
 # build, tag, release), sbom.yml (a second, separate SBOM run), and
 # reusable-notify-consumers.yml (a hand-maintained fan-out matrix). Sixty-five repositories
 # held sixty-five copies, and they disagreed:
@@ -118,7 +118,7 @@ jobs:
           catalog-repo: ${{ inputs.catalog_repo }}
           catalog-ref: ${{ inputs.catalog_ref }}
 
-      # A deployable is an image, not a module: it is published by service-ci.yml and pinned by
+      # A deployable is an image, not a module: it is published by service-ci.yaml and pinned by
       # digest. If one reaches this workflow it has been wired to the wrong pipeline, and the
       # failure says so rather than tagging a repo that nothing can `go get`.
       - name: Reject a repo that is not a releasable module
@@ -129,7 +129,7 @@ jobs:
           set -euo pipefail
           if [[ "${KIND}" != "core" && "${KIND}" != "schema" ]]; then
             echo "::error::repo_kind=${KIND} is not a releasable Go module. Deployables publish an" \
-                 "image through service-ci.yml and are pinned by digest, not tagged as modules."
+                 "image through service-ci.yaml and are pinned by digest, not tagged as modules."
             exit 1
           fi
           [[ -n "${MODULE}" ]] || { echo "::error::catalog bound this repo but declares no module path"; exit 1; }
@@ -410,7 +410,7 @@ jobs:
             --arg version "${VERSION}" \
             --arg commit "${GITHUB_SHA}" \
             --arg repo "${GITHUB_REPOSITORY}" \
-            --arg builder "coderaxis/github-actions/.github/workflows/module-release.yml@v1" \
+            --arg builder "coderaxis/github-actions/.github/workflows/module-release.yaml@v1" \
             --arg run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --arg api "${ATTEST}" \
             --arg note "${note}" \

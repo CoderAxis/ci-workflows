@@ -20,7 +20,7 @@ credentials as inputs at call time.
 
 | Action | Purpose |
 | ------ | ------- |
-| [`module-auth`](module-auth/action.yml) | Mint a short-lived GitHub App installation token (`coderaxis-module-reader`) and configure git for private module reads. Replaces long-lived `CROSS_REPO_TOKEN` / `WORKFLOW_GH_PAT`. |
+| [`module-auth`](module-auth/action.yaml) | Mint a short-lived GitHub App installation token (`coderaxis-module-reader`) and configure git for private module reads. Replaces long-lived `CROSS_REPO_TOKEN` / `WORKFLOW_GH_PAT`. |
 
 Future actions (e.g. `docker-login`, `slack-notify`, `aws-login`) live as sibling folders.
 
@@ -31,17 +31,17 @@ live under `.github/workflows/` and are consumed via `uses:` at the **job** leve
 
 | Workflow | Purpose |
 | -------- | ------- |
-| [`deploy-reusable.yml`](.github/workflows/deploy-reusable.yml) | InboxxHQ GitOps delivery — CI orchestrates the central canonical build (`inboxxhq-build`), reads back the signed image **digest**, and pins it into the `dev` overlay (first consumer). staging/preprod/prod promote the same digest via the Promotion Controller. **Build once, deploy the digest.** |
-| [`seed-contract-check.yml`](.github/workflows/seed-contract-check.yml) | Language-agnostic seeding-contract gate (seeding standard §6b) — Dockerfile seed-binary marker + `seed/data` copy, canonical `system/dev/staging/preprod/prod` tree, placeholder-only qualified envs, no `SEED_COMMAND=""` override. Runs the pinned [`scripts/check-seed-contract.py`](scripts/check-seed-contract.py) (SSOT) against the caller; stateless services self-skip. |
-| [`schema-compatibility.yml`](.github/workflows/schema-compatibility.yml) | Schema-**path/layout** + schema-migration + canonical-outbox-conformance gate for every `*-core-postgres` repo. First, `check_schema_layout` fails fast (before touching any DB) if the repo carries a `.sql` file anywhere other than `schema/migrations/` (the migration chain), `sql/queries/` (sqlc query source), `schema/seed*.sql` (dev/role seed data), `seed/` (the platform seeding-standard tree), or `testdata/` (Go test fixtures) — or if `schema/migrations/` is missing the required `000001_init.up.sql` + `000001_init.down.sql` baseline pair (additional forward migrations, e.g. `000002_...`, are always welcome and never capped). It then spins an ephemeral `postgres:18`, applies the repo's migrations to HEAD via an auto-detecting ladder (goose round-trip test → `schema.GooseUpDSN` → embedded `schema.Migrate` → static lint; fixes the old "goose gap" where pure-goose repos never actually migrated), then runs the centrally-pinned canonical **outbox verifier** (RFC-0032 / ADR-0069) and fails closed on ANY semantic drift (columns/types/defaults/domain/PK/unique/checks/partitioning). Runs the SSOT [`scripts/schema-compat.sh`](scripts/schema-compat.sh) against the caller. The same layout rule is enforced locally/offline, fleet-wide at once, by `inboxxhq-infra`'s `scripts/check-migration-filename-consistency.py --only-core-postgres-init`. |
-| [`dockerfile-standard.yml`](.github/workflows/dockerfile-standard.yml) | Enterprise Dockerfile Standard gate (ADR-0072) — static analysis only, never runs `docker build`/pushes an image (keeps ADR-0051 DM-001 intact). Every caller declares its `capabilities` (comma list from `dockerfile-capability-matrix.yaml`: `http-api`, `db-owner`, `seed`, `backfill`, `canary`, `kafka-producer-dk`, `worker`, `gateway`, `stateless`). Checks the canonical two-stage layout, centrally pinned base-image versions, a numeric non-root `USER`, required OCI labels, exec-form `CMD`, `STOPSIGNAL`, a `db-owner` repo shipping a `dbtool` binary, capability-declaration-matches-repo-reality, no build-time codegen, no `ADD`, no freeform version ARGs, the BuildKit secret-mount pattern for private-module credentials, and an `apk add` package allow-list. Deliberately does not duplicate `seed-contract-check.yml`'s hard enforcement (its seed check here is advisory-only). Runs the SSOT [`scripts/check-dockerfile-standard.py`](scripts/check-dockerfile-standard.py) against the caller's own Dockerfile + repo structure. |
-| [`event-handling-compliance.yml`](.github/workflows/event-handling-compliance.yml) | Event-handling compliance gate — the executable form of `services/ENTERPRISE_NOTIFICATION_PATTERN.md` §7/§8. Every caller declares its family `role` (`P`\|`H`\|`DK`\|`Hybrid`\|`E`\|`Bridge`, per the §7 matrix): `P`/`H` (owns Postgres) may **never** construct a raw Kafka producer — domain events must flow exclusively through the transactional outbox (`platform-shared-go/outbox`) + Debezium CDC; `DK`/`Hybrid` may produce directly but only via the canonical `platform-shared-go/messaging/kafka` envelope, and every topic string found must be in the declared `allowed_topics`; `E`/`Bridge` are unrestricted (true exception / the sanctioned CDC-polling canonicalizer). Also reports (advisory, non-blocking) any raw `sarama.NewConsumerGroup` not wrapped by the shared `events.EnterpriseConsumer` (retry/DLQ/tracing/health). Pure static analysis via the SSOT [`scripts/event-compliance.sh`](scripts/event-compliance.sh) — no DB/broker needed. |
-| [`docs-governance.yml`](.github/workflows/docs-governance.yml) | Documentation-governance gate (ADR-0081) — the generic contract every governed docs repo shares: well-formed/complete frontmatter, `OWNER_DIRECTORY.md`-registered ownership, controlled vocabulary, `related_*` block-list style + Related-Docs links, ADR/RFC supersession reciprocity, a freshness SLA, and single-client scope isolation (only where `governance/CLIENT_SCOPE.md` is present). Machine-readable catalog schema + generated-artifact drift (DOC-010) is **delegated** to the repo's own `scripts/build_catalog.py --check` (domain logic stays local), never duplicated centrally. Shared logic, per-repo data; auto-detects catalog/client-scope capabilities. Runs the SSOT [`scripts/check-docs-governance.py`](scripts/check-docs-governance.py) against the caller (`--root`). |
+| [`deploy-reusable.yaml`](.github/workflows/deploy-reusable.yaml) | InboxxHQ GitOps delivery — CI orchestrates the central canonical build (`inboxxhq-build`), reads back the signed image **digest**, and pins it into the `dev` overlay (first consumer). staging/preprod/prod promote the same digest via the Promotion Controller. **Build once, deploy the digest.** |
+| [`seed-contract-check.yaml`](.github/workflows/seed-contract-check.yaml) | Language-agnostic seeding-contract gate (seeding standard §6b) — Dockerfile seed-binary marker + `seed/data` copy, canonical `system/dev/staging/preprod/prod` tree, placeholder-only qualified envs, no `SEED_COMMAND=""` override. Runs the pinned [`scripts/check-seed-contract.py`](scripts/check-seed-contract.py) (SSOT) against the caller; stateless services self-skip. |
+| [`schema-compatibility.yaml`](.github/workflows/schema-compatibility.yaml) | Schema-**path/layout** + schema-migration + canonical-outbox-conformance gate for every `*-core-postgres` repo. First, `check_schema_layout` fails fast (before touching any DB) if the repo carries a `.sql` file anywhere other than `schema/migrations/` (the migration chain), `sql/queries/` (sqlc query source), `schema/seed*.sql` (dev/role seed data), `seed/` (the platform seeding-standard tree), or `testdata/` (Go test fixtures) — or if `schema/migrations/` is missing the required `000001_init.up.sql` + `000001_init.down.sql` baseline pair (additional forward migrations, e.g. `000002_...`, are always welcome and never capped). It then spins an ephemeral `postgres:18`, applies the repo's migrations to HEAD via an auto-detecting ladder (goose round-trip test → `schema.GooseUpDSN` → embedded `schema.Migrate` → static lint; fixes the old "goose gap" where pure-goose repos never actually migrated), then runs the centrally-pinned canonical **outbox verifier** (RFC-0032 / ADR-0069) and fails closed on ANY semantic drift (columns/types/defaults/domain/PK/unique/checks/partitioning). Runs the SSOT [`scripts/schema-compat.sh`](scripts/schema-compat.sh) against the caller. The same layout rule is enforced locally/offline, fleet-wide at once, by `inboxxhq-infra`'s `scripts/check-migration-filename-consistency.py --only-core-postgres-init`. |
+| [`dockerfile-standard.yaml`](.github/workflows/dockerfile-standard.yaml) | Enterprise Dockerfile Standard gate (ADR-0072) — static analysis only, never runs `docker build`/pushes an image (keeps ADR-0051 DM-001 intact). Every caller declares its `capabilities` (comma list from `dockerfile-capability-matrix.yaml`: `http-api`, `db-owner`, `seed`, `backfill`, `canary`, `kafka-producer-dk`, `worker`, `gateway`, `stateless`). Checks the canonical two-stage layout, centrally pinned base-image versions, a numeric non-root `USER`, required OCI labels, exec-form `CMD`, `STOPSIGNAL`, a `db-owner` repo shipping a `dbtool` binary, capability-declaration-matches-repo-reality, no build-time codegen, no `ADD`, no freeform version ARGs, the BuildKit secret-mount pattern for private-module credentials, and an `apk add` package allow-list. Deliberately does not duplicate `seed-contract-check.yaml`'s hard enforcement (its seed check here is advisory-only). Runs the SSOT [`scripts/check-dockerfile-standard.py`](scripts/check-dockerfile-standard.py) against the caller's own Dockerfile + repo structure. |
+| [`event-handling-compliance.yaml`](.github/workflows/event-handling-compliance.yaml) | Event-handling compliance gate — the executable form of `services/ENTERPRISE_NOTIFICATION_PATTERN.md` §7/§8. Every caller declares its family `role` (`P`\|`H`\|`DK`\|`Hybrid`\|`E`\|`Bridge`, per the §7 matrix): `P`/`H` (owns Postgres) may **never** construct a raw Kafka producer — domain events must flow exclusively through the transactional outbox (`platform-shared-go/outbox`) + Debezium CDC; `DK`/`Hybrid` may produce directly but only via the canonical `platform-shared-go/messaging/kafka` envelope, and every topic string found must be in the declared `allowed_topics`; `E`/`Bridge` are unrestricted (true exception / the sanctioned CDC-polling canonicalizer). Also reports (advisory, non-blocking) any raw `sarama.NewConsumerGroup` not wrapped by the shared `events.EnterpriseConsumer` (retry/DLQ/tracing/health). Pure static analysis via the SSOT [`scripts/event-compliance.sh`](scripts/event-compliance.sh) — no DB/broker needed. |
+| [`docs-governance.yaml`](.github/workflows/docs-governance.yaml) | Documentation-governance gate (ADR-0081) — the generic contract every governed docs repo shares: well-formed/complete frontmatter, `OWNER_DIRECTORY.md`-registered ownership, controlled vocabulary, `related_*` block-list style + Related-Docs links, ADR/RFC supersession reciprocity, a freshness SLA, and single-client scope isolation (only where `governance/CLIENT_SCOPE.md` is present). Machine-readable catalog schema + generated-artifact drift (DOC-010) is **delegated** to the repo's own `scripts/build_catalog.py --check` (domain logic stays local), never duplicated centrally. Shared logic, per-repo data; auto-detects catalog/client-scope capabilities. Runs the SSOT [`scripts/check-docs-governance.py`](scripts/check-docs-governance.py) against the caller (`--root`). |
 
 Each service repo carries only a thin caller:
 
 ```yaml
-# .github/workflows/deploy.yml
+# .github/workflows/deploy.yaml
 on:
  push: { branches: [main] }
  workflow_dispatch: {}
@@ -50,7 +50,7 @@ permissions:
  id-token: write
 jobs:
  deploy:
- uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yml@v1
+ uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yaml@v1
  with:
  service_name: auth-service
  secrets: inherit
@@ -98,33 +98,33 @@ build. That is a deliberate limit; it fails loudly rather than half-working.
 Stateful service repos also carry a thin seed-contract caller:
 
 ```yaml
-# .github/workflows/seed-contract-check.yml
+# .github/workflows/seed-contract-check.yaml
 on:
  push: { branches: ["**"] }
  pull_request:
- paths: ["Dockerfile", "cmd/seed/**", "internal/**/seed/**", ".github/workflows/seed-contract-check.yml"]
+ paths: ["Dockerfile", "cmd/seed/**", "internal/**/seed/**", ".github/workflows/seed-contract-check.yaml"]
 permissions:
  contents: read
 jobs:
  seed-contract:
- uses: coderaxis/github-actions/.github/workflows/seed-contract-check.yml@v1
+ uses: coderaxis/github-actions/.github/workflows/seed-contract-check.yaml@v1
 ```
 
 Every `*-core-postgres` repo carries a thin schema-compatibility caller (the only
 per-repo input is the outbox table name; omit it for a repo without an outbox):
 
 ```yaml
-# .github/workflows/schema-compatibility.yml
+# .github/workflows/schema-compatibility.yaml
 on:
  pull_request:
- paths: ["schema/**", "sql/**", "sqlc.yaml", "go.mod", "go.sum", ".github/workflows/schema-compatibility.yml"]
+ paths: ["schema/**", "sql/**", "sqlc.yaml", "go.mod", "go.sum", ".github/workflows/schema-compatibility.yaml"]
  push: { branches: ["**"] }
  workflow_dispatch: {}
 permissions:
  contents: read
 jobs:
  schema-compatibility:
- uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yml@v1
+ uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yaml@v1
  with:
  table: auth_service_outbox # the repo's outbox table; omit to skip outbox conformance
  secrets: inherit # REQUIRED: inherits the module-read App creds for private go deps
@@ -140,17 +140,17 @@ only per-repo input is its `role` from the `ENTERPRISE_NOTIFICATION_PATTERN.md` 
 matrix; `allowed_topics` is required only for `DK`/`Hybrid`):
 
 ```yaml
-# .github/workflows/event-handling-compliance.yml
+# .github/workflows/event-handling-compliance.yaml
 on:
  pull_request:
- paths: ["**/*.go", "go.mod", "go.sum", ".github/workflows/event-handling-compliance.yml"]
+ paths: ["**/*.go", "go.mod", "go.sum", ".github/workflows/event-handling-compliance.yaml"]
  push: { branches: ["**"] }
  workflow_dispatch: {}
 permissions:
  contents: read
 jobs:
  event-handling-compliance:
- uses: coderaxis/github-actions/.github/workflows/event-handling-compliance.yml@v1
+ uses: coderaxis/github-actions/.github/workflows/event-handling-compliance.yaml@v1
  with:
  role: P # P | H | DK | Hybrid | E | Bridge
  # allowed_topics: "inboxxhq.chat.messages" # required for DK/Hybrid only
@@ -162,17 +162,17 @@ dockerfile-standard caller (the only per-repo input is its `capabilities`, from
 in `coderaxis/microservices`):
 
 ```yaml
-# .github/workflows/dockerfile-standard.yml
+# .github/workflows/dockerfile-standard.yaml
 on:
  pull_request:
- paths: ["Dockerfile", ".github/workflows/dockerfile-standard.yml"]
+ paths: ["Dockerfile", ".github/workflows/dockerfile-standard.yaml"]
  push: { branches: ["**"] }
  workflow_dispatch: {}
 permissions:
  contents: read
 jobs:
  dockerfile-standard:
- uses: coderaxis/github-actions/.github/workflows/dockerfile-standard.yml@v1
+ uses: coderaxis/github-actions/.github/workflows/dockerfile-standard.yaml@v1
  with:
  capabilities: "http-api,db-owner,seed" # from dockerfile-capability-matrix.yaml
  # fail_on: minor # default is major; tighten once a repo's
@@ -199,9 +199,9 @@ guard **enforces** it:
 - Architecture SSOT (in the `core-docs` repo): `ADR-0051` (Artifact Promotion,
  Digest-Pinned Deployment, and Registry Segregation) and `RFC-0020` (Supply-Chain
  Integrity and Artifact Promotion).
-- Implementation: [`deploy-reusable.yml`](.github/workflows/deploy-reusable.yml).
+- Implementation: [`deploy-reusable.yaml`](.github/workflows/deploy-reusable.yaml).
 - Enforcement: [`scripts/check-delivery-model.py`](scripts/check-delivery-model.py) run
- by the [`delivery-model-guard`](.github/workflows/delivery-model-guard.yml) self-CI
+ by the [`delivery-model-guard`](.github/workflows/delivery-model-guard.yaml) self-CI
  workflow on every change to the reusable workflow or the checker.
 
 This closes the gap where the model existed only as header comments that could drift
@@ -250,7 +250,7 @@ dashboards / compliance, and regenerates its own docs:
 
 ```bash
 # evaluate + JSON report (uploaded as a CI artifact by the guard workflow)
-python3 scripts/check-delivery-model.py .github/workflows/deploy-reusable.yml \
+python3 scripts/check-delivery-model.py .github/workflows/deploy-reusable.yaml \
  --format json --report delivery-model-report.json
 
 # regenerate the control table in this README from the catalog
@@ -262,7 +262,7 @@ Consumers can assert the behavioral contract via the workflow outputs:
 ```yaml
 jobs:
  deploy:
- uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yml@v1
+ uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yaml@v1
  with: { service_name: auth-service }
  secrets: inherit
  verify:
@@ -301,9 +301,9 @@ Policy SSOT (in `coderaxis/microservices`): `ADR-0072` (Enterprise Dockerfile St
 the [Enterprise Dockerfile Standard](https://github.com/coderaxis/microservices/blob/main/docs/core-docs/standards/infrastructure/dockerfile-standard.md).
 Implementation: [`templates/Dockerfile.service`](templates/Dockerfile.service).
 Enforcement: [`scripts/check-dockerfile-standard.py`](scripts/check-dockerfile-standard.py)
-run by [`dockerfile-standard.yml`](.github/workflows/dockerfile-standard.yml) against every
+run by [`dockerfile-standard.yaml`](.github/workflows/dockerfile-standard.yaml) against every
 caller, and self-checked by
-[`dockerfile-standard-guard.yml`](.github/workflows/dockerfile-standard-guard.yml) on every
+[`dockerfile-standard-guard.yaml`](.github/workflows/dockerfile-standard-guard.yaml) on every
 change to the catalog/checker/template. Static analysis only — never runs `docker build`,
 so it cannot conflict with DM-001 above.
 
@@ -334,7 +334,7 @@ _Generated from `controls/dockerfile-standard.yaml` by `scripts/check-dockerfile
 | DS-009 | CMD (or ENTRYPOINT) MUST be JSON exec form (`["./binary"]`), never a shell string. No ENTRYPOINT shell-script wrapper (`entrypoint.sh`) is permitted - the compiled binary IS the entrypoint. | critical | all | platform-infrastructure | active |
 | DS-010 | `STOPSIGNAL SIGTERM` MUST be declared explicitly, even though it is Docker's default. | minor | all | platform-infrastructure | active |
 | DS-011 | A caller that declares (or structurally has - see DS-013) the `db-owner` capability MUST build `./cmd/dbtool` into an image binary, COPY it into the runtime stage, and carry the marker comment `# dbtool binary path: /app/<binary>`. | critical | db-owner | platform-architecture | active |
-| DS-012 | A caller that declares the `seed` capability SHOULD build/ship a seed binary with the standard marker. This is intentionally ADVISORY, not a hard gate: seed-contract- check.yml is the authoritative, hard-enforcing check for the full seeding contract (binary + data tree + placeholder-only qualified envs). This control exists only so the two checks' findings can be compared, never to duplicate seed-contract-check.yml's enforcement. | minor | seed | platform-infrastructure | active |
+| DS-012 | A caller that declares the `seed` capability SHOULD build/ship a seed binary with the standard marker. This is intentionally ADVISORY, not a hard gate: seed-contract- check.yml is the authoritative, hard-enforcing check for the full seeding contract (binary + data tree + placeholder-only qualified envs). This control exists only so the two checks' findings can be compared, never to duplicate seed-contract-check.yaml's enforcement. | minor | seed | platform-infrastructure | active |
 | DS-013 | The `--capabilities` the caller declares MUST match what the repo structurally contains: `db-owner` iff go.mod requires a `*-core-postgres` module; `seed` iff `cmd/seed` exists; `backfill` iff `cmd/backfill` exists; `canary` iff `cmd/canary` exists. | critical | all | platform-architecture | active |
 | DS-014 | No `sqlc generate`, `protoc`/`buf generate`, `swag init`, or `openapi-generator` may run inside the Dockerfile. Generated code is committed; the image only compiles it. | critical | all | platform-architecture | active |
 | DS-015 | Use `COPY`, never `ADD` (ADD's implicit remote-URL-fetch and auto-extract behavior is unpinned, unaudited functionality this standard does not permit). | minor | all | platform-security | active |
@@ -349,25 +349,25 @@ _Generated from `controls/dockerfile-standard.yaml` by `scripts/check-dockerfile
 Policy SSOT (in `coderaxis/core-docs`): `ADR-0081` (Centralized, reusable
 documentation-governance CI).
 Implementation: [`scripts/check-docs-governance.py`](scripts/check-docs-governance.py) run by
-[`docs-governance.yml`](.github/workflows/docs-governance.yml) against every governed docs repo,
-and self-checked by [`docs-governance-guard.yml`](.github/workflows/docs-governance-guard.yml) on
+[`docs-governance.yaml`](.github/workflows/docs-governance.yaml) against every governed docs repo,
+and self-checked by [`docs-governance-guard.yaml`](.github/workflows/docs-governance-guard.yaml) on
 every change to the catalog / checker / fixture. Static analysis only — no repo code is executed.
 
 Every governed documentation repository (the shared-engine `core-docs`, and each client
 `*-platform-docs`) carries only a thin caller:
 
 ```yaml
-# .github/workflows/docs-governance.yml
+# .github/workflows/docs-governance.yaml
 on:
  pull_request:
- paths: ["**/*.md", "catalog/**", "generated/**", "governance/**", ".github/workflows/docs-governance.yml"]
+ paths: ["**/*.md", "catalog/**", "generated/**", "governance/**", ".github/workflows/docs-governance.yaml"]
  push: { branches: ["**"] }
  workflow_dispatch: {}
 permissions:
  contents: read
 jobs:
  docs-governance:
- uses: coderaxis/github-actions/.github/workflows/docs-governance.yml@v1
+ uses: coderaxis/github-actions/.github/workflows/docs-governance.yaml@v1
  with:
  docs_root: . # a docs-in-monorepo repo passes its subdir, e.g. docs/core-docs
  # fail_on: major # default; tighten to `minor` once a repo is clean

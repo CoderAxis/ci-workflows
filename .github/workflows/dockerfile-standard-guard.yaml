@@ -6,22 +6,22 @@ name: Dockerfile Standard Guard
 # is caught here, not fleet-wide.
 #
 # Policy SSOT: ADR-0072 (Enterprise Dockerfile Standard). This is the Dockerfile-standard
-# twin of delivery-model-guard.yml.
+# twin of delivery-model-guard.yaml.
 
 on:
   push:
     paths:
       - "templates/Dockerfile.service"
-      - ".github/workflows/dockerfile-standard.yml"
-      - ".github/workflows/dockerfile-standard-guard.yml"
+      - ".github/workflows/dockerfile-standard.yaml"
+      - ".github/workflows/dockerfile-standard-guard.yaml"
       - "scripts/check-dockerfile-standard.py"
       - "controls/dockerfile-standard.yaml"
       - "README.md"
   pull_request:
     paths:
       - "templates/Dockerfile.service"
-      - ".github/workflows/dockerfile-standard.yml"
-      - ".github/workflows/dockerfile-standard-guard.yml"
+      - ".github/workflows/dockerfile-standard.yaml"
+      - ".github/workflows/dockerfile-standard-guard.yaml"
       - "scripts/check-dockerfile-standard.py"
       - "controls/dockerfile-standard.yaml"
       - "README.md"

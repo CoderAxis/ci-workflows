@@ -6,7 +6,7 @@ name: Service CI
 #
 #   jobs:
 #     ci:
-#       uses: coderaxis/github-actions/.github/workflows/service-ci.yml@v1
+#       uses: coderaxis/github-actions/.github/workflows/service-ci.yaml@v1
 #       secrets: inherit
 #
 # WHY THE CALLER PASSES NOTHING. Anything a repo states about itself is a claim the platform
@@ -103,7 +103,7 @@ jobs:
       role: ${{ steps.id.outputs.role }}
       capabilities: ${{ steps.id.outputs.capabilities }}
     steps:
-      # One shared implementation, used identically by deploy-reusable.yml. Two copies of
+      # One shared implementation, used identically by deploy-reusable.yaml. Two copies of
       # security-critical resolution logic is the drift this whole change exists to remove.
       - name: Derive identity from the immutable repository id
         id: id
@@ -135,7 +135,7 @@ jobs:
             go) echo "language ${LANGUAGE}: build, test, coverage and CodeQL apply" ;;
             *)
               echo "::error::the catalog reports runtime.language=${LANGUAGE} for this repository,"
-              echo "::error::which service-ci.yml has no toolchain for. Build, test, coverage and"
+              echo "::error::which service-ci.yaml has no toolchain for. Build, test, coverage and"
               echo "::error::CodeQL would all be skipped and this pipeline would still pass. Add"
               echo "::error::the toolchain centrally before onboarding this repo."
               exit 1 ;;
@@ -350,14 +350,14 @@ jobs:
   events:
     name: Event handling compliance
     needs: resolve
-    uses: coderaxis/github-actions/.github/workflows/event-handling-compliance.yml@v1
+    uses: coderaxis/github-actions/.github/workflows/event-handling-compliance.yaml@v1
     with:
       role: ${{ needs.resolve.outputs.role }}
 
   seeding:
     name: Seeding contract
     needs: resolve
-    uses: coderaxis/github-actions/.github/workflows/seed-contract-check.yml@v1
+    uses: coderaxis/github-actions/.github/workflows/seed-contract-check.yaml@v1
 
   schema:
     name: Schema compatibility
@@ -368,7 +368,7 @@ jobs:
       # job is capped by what the caller grants. Enforced by WFC-004, which caught the omission
       # here as a startup_failure with no logs.
       id-token: write
-    uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yml@v1
+    uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yaml@v1
     # Explicit, because `secrets: inherit` does not cross the org boundary between a service repo
     # and this workflow. Without them the App token step failed on "Input required and not
 
@@ -376,7 +376,7 @@ jobs:
     name: Dockerfile standard
     needs: resolve
     if: needs.resolve.outputs.deployable == 'true'
-    uses: coderaxis/github-actions/.github/workflows/dockerfile-standard.yml@v1
+    uses: coderaxis/github-actions/.github/workflows/dockerfile-standard.yaml@v1
     with:
       capabilities: ${{ needs.resolve.outputs.capabilities }}
 
@@ -474,7 +474,7 @@ jobs:
   # ── workflow lanes (WFC-003) ────────────────────────────────────────────────────────────────
   # Absorbed from the per-repo pipeline-policy.yml, which asserted that thirteen named workflow
   # files EXISTED in the repository - quality-check.yml, security-scan.yml, codeql.yml,
-  # gitleaks.yml, actionlint.yml, deploy.yml, post-deploy.yml, preview-env.yml and others.
+  # gitleaks.yml, actionlint.yaml, deploy.yaml, post-deploy.yaml, preview-env.yml and others.
   #
   # That check encoded the decentralised model as a requirement, so it actively fought
   # centralisation: deleting a workflow whose logic had moved here turned the gate red, and the
@@ -504,11 +504,11 @@ jobs:
 
           # Every repo calls central CI. A core or schema module also publishes a version, so it
           # owns a release lane. A deployable publishes nothing and receives its pins from the
-          # cascade, so ci.yml is the whole of its surface.
-          required="${wf}/ci.yml"
+          # cascade, so ci.yaml is the whole of its surface.
+          required="${wf}/ci.yaml"
           case "${REPO_KIND}" in
-            core)       required="${required} ${wf}/release.yml" ;;
-            schema)     required="${required} ${wf}/release.yml" ;;
+            core)       required="${required} ${wf}/release.yaml" ;;
+            schema)     required="${required} ${wf}/release.yaml" ;;
             deployable) ;;
             *) echo "::error::repo_kind=${REPO_KIND} has no defined lane set"; exit 1 ;;
           esac
@@ -526,7 +526,7 @@ jobs:
           #
           # So the rule is inverted: two names are permitted and everything else fails. Adding a lane
           # now means adding it here, in one place, with a reason.
-          allowed="ci.yml release.yml"
+          allowed="ci.yaml release.yaml"
 
           # Retained only to explain a failure, never to decide one. A file caught by the allowlist
           # that also appears here gets told where its logic went, rather than just that it is
@@ -538,7 +538,7 @@ jobs:
                     adr-validation openapi-validation dockerfile-standard docs-governance
                     integration-tests contract-check openapi-contract contract-tests
                     bump-shared-modules"
-          # The cascade stopped dispatching to consumers when module-release.yml began writing pins
+          # The cascade stopped dispatching to consumers when module-release.yaml began writing pins
           # directly with bump-module-pin, so a surviving listener opens a second, competing PR for
           # a bump that has already landed.
           listeners="bump-core-modules bump-engine-core"
@@ -546,6 +546,19 @@ jobs:
           shopt -s nullglob
           for path in "${wf}"/*.yml "${wf}"/*.yaml; do
             f="$(basename "${path}")"
+
+            # Globbed under both spellings on purpose: matching only *.yaml would mean the check
+            # cannot SEE a .yml file, so the extension rule would be unenforceable by the thing
+            # meant to enforce it.
+            if [[ "${f}" == *.yml ]]; then
+              echo "::error file=${path}::${f} must use the .yaml extension."
+              echo "Both spellings are valid YAML and valid to GitHub, so a mixed fleet fails"
+              echo "nothing and stays mixed - and a glob or CODEOWNERS pattern written for one"
+              echo "spelling silently skips every file using the other."
+              rc=1
+              continue
+            fi
+
             case " ${allowed} " in *" ${f} "*) continue ;; esac
 
             stem="${f%.*}"
@@ -555,14 +568,14 @@ jobs:
               echo "Running both means the local copy decides the result. Delete it."
             elif [[ " ${listeners} " == *" ${stem} "* ]]; then
               echo "::error file=${path}::${f} is a bump listener. The cascade no longer dispatches"
-              echo "to consumers - module-release.yml writes the pin directly - so this would open a"
+              echo "to consumers - module-release.yaml writes the pin directly - so this would open a"
               echo "second, competing PR for a bump that has already landed. Delete it."
             else
               echo "::error file=${path}::${f} is not a permitted workflow lane."
-              echo "A repository may hold ci.yml and, if it publishes a version, release.yml."
-              echo "Everything else runs as a job in coderaxis/github-actions service-ci.yml, so a"
+              echo "A repository may hold ci.yaml and, if it publishes a version, release.yaml."
+              echo "Everything else runs as a job in coderaxis/github-actions service-ci.yaml, so a"
               echo "local lane is a second implementation that will drift from it. If this genuinely"
-              echo "cannot be a central job, add it to the allowlist in service-ci.yml with a reason."
+              echo "cannot be a central job, add it to the allowlist in service-ci.yaml with a reason."
             fi
           done
           shopt -u nullglob
@@ -1026,7 +1039,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: InboxxHQ-CoderAxis/inboxxhq-api-contracts/.github/workflows/reusable-openapi-contract.yml@v1
+    uses: InboxxHQ-CoderAxis/inboxxhq-api-contracts/.github/workflows/reusable-openapi-contract.yaml@v1
     with:
       service-name: ${{ needs.resolve.outputs.service }}
       spec-file: docs/openapi.json
@@ -1101,7 +1114,7 @@ jobs:
       && needs.resolve.outputs.deployable == 'true'
       && !contains(needs.*.result, 'failure')
       && !contains(needs.*.result, 'cancelled')
-    # Required, not optional hygiene. deploy-reusable.yml declares `id-token: write` at workflow
+    # Required, not optional hygiene. deploy-reusable.yaml declares `id-token: write` at workflow
     # level for the AWS OIDC role assumption, and a called workflow cannot hold a permission its
     # caller did not grant. Omitting this block made the job inherit the `contents: read` declared
     # at the top of this file, so GitHub rejected the whole workflow at load time - which surfaces
@@ -1109,15 +1122,15 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yml@v1
+    uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yaml@v1
     with:
       # Resolved from the immutable repository id, never from anything the service repo says.
-      # Previously each repo passed this literal in its own deploy.yml, so a one-line edit to
+      # Previously each repo passed this literal in its own deploy.yaml, so a one-line edit to
       # `service_name:` was enough to publish one service's code under another's identity.
       service_name: ${{ needs.resolve.outputs.service }}
 
   # ── notification ────────────────────────────────────────────────────────────────────────────
-  # Centralised here, and this job is a REPLACEMENT rather than an addition. Each per-repo ci.yml
+  # Centralised here, and this job is a REPLACEMENT rather than an addition. Each per-repo ci.yaml
   # carried its own Slack step; absorbing them into this pipeline dropped it, so the migration was
   # quietly making failures less visible, not more. The old steps were guarded by
   # `if: env.SLACK_BOT_TOKEN != ''`, which meant a repository that never configured the secret had

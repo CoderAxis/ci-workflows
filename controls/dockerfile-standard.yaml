@@ -10,7 +10,7 @@
 # `applies_to_capabilities`: [] means the control applies to EVERY caller regardless of
 # declared capability (e.g. "no root execution" is universal). A non-empty list means the
 # control is only evaluated for callers that declare at least one of those capabilities
-# (evaluated via --capabilities, mirroring event-handling-compliance.yml's `role` input).
+# (evaluated via --capabilities, mirroring event-handling-compliance.yaml's `role` input).
 #
 # Control IDs (DS-NNN) are STABLE and permanent — see controls/delivery-model.yaml header
 # for the full ID/lifecycle discipline; it applies identically here.
@@ -22,7 +22,7 @@
 #   Capability matrix - docs/core-docs/standards/infrastructure/dockerfile-capability-matrix.yaml
 #
 # Deliberate non-duplication: seeding invariants (binary marker, data-tree COPY, placeholder-
-# only qualified envs) are ALREADY hard-enforced by seed-contract-check.yml. DS-012 here is
+# only qualified envs) are ALREADY hard-enforced by seed-contract-check.yaml. DS-012 here is
 # an ADVISORY cross-check only (so the two checks cannot silently diverge), never a second
 # hard gate for the same fact - "no duplicate logic" is a design requirement, not a slogan.
 
@@ -268,13 +268,13 @@ controls:
       standard marker. This is intentionally ADVISORY, not a hard gate: seed-contract-
       check.yml is the authoritative, hard-enforcing check for the full seeding contract
       (binary + data tree + placeholder-only qualified envs). This control exists only so
-      the two checks' findings can be compared, never to duplicate seed-contract-check.yml's
+      the two checks' findings can be compared, never to duplicate seed-contract-check.yaml's
       enforcement.
     rationale: >-
       "No duplicate logic" - a second hard gate for the same fact doubles the maintenance
       burden and risks the two checks drifting to different conclusions.
     remediation: >-
-      Run seed-contract-check.yml for the authoritative fix; this control's finding is
+      Run seed-contract-check.yaml for the authoritative fix; this control's finding is
       informational.
     detector: seed_ships_seed_binary
     refs: [ADR-0072]
@@ -296,7 +296,7 @@ controls:
       exists to prevent - the declaration is a claim CI must verify, not an override CI
       trusts blindly.
     remediation: >-
-      Update the `capabilities:` input in .github/workflows/dockerfile-standard.yml (this
+      Update the `capabilities:` input in .github/workflows/dockerfile-standard.yaml (this
       repo) AND dockerfile-capability-matrix.yaml (coderaxis/microservices) in the same PR.
     detector: capability_declaration_matches_reality
     refs: [ADR-0072]
