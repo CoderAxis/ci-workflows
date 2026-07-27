@@ -78,10 +78,68 @@ def load_catalog(path: Path) -> tuple[dict, dict[str, dict]]:
         if not cid or c.get("severity") not in SEVERITY_ORDER:
             raise SystemExit(f"::error::{path}: control {cid!r} missing a valid id/severity")
         by_id[cid] = c
-    for required in ("WFC-001", "WFC-002"):
+    for required in ("WFC-001", "WFC-002", "WFC-004"):
         if required not in by_id:
             raise SystemExit(f"::error::{path}: catalog is missing {required}, which has a detector")
     return doc, by_id
+
+
+# `write` satisfies a declared `read`; the reverse is not true. `none` grants nothing.
+_ACCESS_RANK = {"none": 0, "read": 1, "write": 2}
+
+# Absence of a `permissions:` key is NOT the empty set. With no block anywhere, the job receives the
+# repository's default token, which under `default_workflow_permissions: read` still carries
+# contents/metadata/packages read. Declaring a block is what drops every unlisted scope to `none`.
+# Modelling absence as "grants nothing" reports every permissionless caller of a `contents: read`
+# workflow as broken, including ones that demonstrably pass today.
+#
+# `id-token` is deliberately absent: it is never granted implicitly at any default setting, which is
+# exactly why the OIDC-based calls are the ones that break.
+_DEFAULT_TOKEN = {"contents": "read", "metadata": "read", "packages": "read"}
+
+
+def _declared_permissions(text: str) -> dict[str, str] | str | None:
+    """The workflow-LEVEL permissions of a called workflow, which its caller must cover."""
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+    return (doc or {}).get("permissions") if isinstance(doc, dict) else None
+
+
+def permission_gaps(
+    granted: dict[str, str] | str | None,
+    declared: dict[str, str] | str | None,
+    declared_present: bool = True,
+) -> list[str]:
+    """Permissions the callee declares that the caller's effective set does not cover.
+
+    `granted` is the caller's effective set: the job's block, else the workflow's. `declared_present`
+    says whether either block actually existed, which distinguishes "granted nothing" from "granted
+    the repository default" — see _DEFAULT_TOKEN.
+    """
+    if not declared or isinstance(declared, str):
+        # A callee with no block of its own asks for nothing in particular, and a blanket string
+        # (`read-all`/`write-all`) is never the narrower side of this comparison.
+        return []
+    if granted == "write-all":
+        return []
+    if isinstance(granted, dict):
+        effective = granted
+    elif granted == "read-all":
+        effective = {k: "read" for k in declared}
+    elif not declared_present:
+        effective = _DEFAULT_TOKEN
+    else:
+        effective = {}
+    gaps = []
+    for scope, want in declared.items():
+        if _ACCESS_RANK.get(str(want), 0) == 0:
+            continue
+        have = _ACCESS_RANK.get(str(effective.get(scope, "none")), 0)
+        if have < _ACCESS_RANK.get(str(want), 0):
+            gaps.append(f"{scope}: {want}")
+    return gaps
 
 
 def render_docs(doc: dict) -> str:
@@ -169,6 +227,7 @@ def check_repo(
     findings: list[Finding] = []
     shadows: list[str] = []
     bad_refs: list[str] = []
+    perm_gaps: list[str] = []
 
     # The publishing repo cannot shadow its own publications: those files ARE the central
     # workflows, and they do not call themselves.
@@ -189,6 +248,45 @@ def check_repo(
         for name, ref in calls:
             if not MAJOR_TAG_RE.match(ref):
                 bad_refs.append(f"{wf.relative_to(root)} -> {name}@{ref}")
+
+        # WFC-004 — a caller grants what its callee declares. Requires the parsed document: the
+        # relationship is between a job's effective permissions and another FILE's, so it is not
+        # expressible as a pattern over this file's text.
+        try:
+            doc = yaml.safe_load(text)
+        except yaml.YAMLError:
+            doc = None
+        if not isinstance(doc, dict):
+            continue
+        wf_level = doc.get("permissions")
+        for job_id, job in (doc.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            uses = job.get("uses")
+            if not isinstance(uses, str):
+                continue
+            callee: Path | None = None
+            if uses.startswith("./"):
+                callee = root / uses.split("@")[0].lstrip("./")
+            else:
+                m = CENTRAL_CALL_RE.search(f"uses: {uses}")
+                if m:
+                    callee = published.get(m.group(1))
+            if callee is None or not callee.is_file():
+                continue
+            try:
+                declared = _declared_permissions(callee.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            # A job with no permissions: block inherits the workflow-level set; if neither exists
+            # the run falls back to the repository default token, which is not the empty set.
+            declared_present = "permissions" in job or "permissions" in doc
+            granted = job.get("permissions", wf_level)
+            gaps = permission_gaps(granted, declared, declared_present)
+            if gaps:
+                perm_gaps.append(
+                    f"{wf.relative_to(root)}:{job_id} -> {callee.name} needs {', '.join(gaps)}"
+                )
 
     c1 = controls["WFC-001"]
     findings.append(
@@ -222,6 +320,20 @@ def check_repo(
             if bad_refs
             else "every central reusable-workflow call pins a major tag",
             c2["remediation"].strip(),
+        )
+    )
+
+    c4 = controls["WFC-004"]
+    findings.append(
+        Finding(
+            "WFC-004",
+            c4["severity"],
+            c4["title"],
+            "fail" if perm_gaps else "pass",
+            f"{len(perm_gaps)} call(s) would be rejected at load time: " + "; ".join(perm_gaps)
+            if perm_gaps
+            else "every reusable-workflow call grants the permissions its callee declares",
+            c4["remediation"].strip(),
         )
     )
     return findings

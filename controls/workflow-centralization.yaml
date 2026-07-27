@@ -102,3 +102,33 @@ controls:
       fix or revert the regression centrally instead and let the major tag move.
     detector: central_call_pins_major_tag
     refs: [ADR-0051]
+
+  - id: WFC-004
+    title: A job calling a reusable workflow grants every permission that workflow declares
+    owner: platform-infrastructure
+    scope: caller-workflow
+    status: active
+    severity: critical
+    applies_to_capabilities: []
+    policy: >-
+      A job whose `uses:` targets a reusable workflow MUST grant, at job level, every permission
+      that the called workflow declares at its own workflow level, at or above the declared access
+      (`write` satisfies `read`; `read` does not satisfy `write`). A job that declares no
+      `permissions:` block inherits the calling workflow's, and that inherited set is what is
+      checked.
+    rationale: >-
+      A called workflow cannot hold a permission its caller did not grant, and GitHub enforces this
+      when it LOADS the workflow rather than when it runs. The result is the least debuggable
+      failure the platform can produce: `startup_failure`, with no job created, no log, no
+      annotation and no API field naming the cause. It is invisible to actionlint, to a YAML schema
+      check and to every other control here, because nothing is syntactically wrong - the fault is
+      a relationship between two files. This cost the platform a full bisect across six probe
+      workflows to find one missing `id-token: write` on service-ci.yml's artifact job, which
+      silently disabled the canonical build and GitOps pin for every service routed through central
+      CI. The check is cheap, exact and static; the failure it prevents is none of those.
+    remediation: >-
+      Add a `permissions:` block to the calling job listing at least what the called workflow
+      declares. Do not fix it by widening the CALLING workflow's workflow-level permissions: that
+      grants the elevated scope to every job in the file, including ones that only read code.
+    detector: caller_grants_declared_permissions
+    refs: [ADR-0051, ADR-0081]

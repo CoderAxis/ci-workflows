@@ -68,7 +68,7 @@ jobs:
       # A control catalog is only worth its detectors. Assert the violating fixture actually fails,
       # and that each control is named in the output, so a detector that silently stops matching
       # cannot masquerade as a clean fleet.
-      - name: Mutation test - violating fixture must fail both controls
+      - name: Mutation test - violating fixture must fail every control
         run: |
           set +e
           out="$(python3 scripts/check-workflow-centralization.py \
@@ -81,10 +81,46 @@ jobs:
             echo "::error::violating fixture passed; the centralization detectors are not firing"
             exit 1
           fi
-          for control in WFC-001 WFC-002; do
+          for control in WFC-001 WFC-002 WFC-004; do
             if ! echo "$out" | grep -q "::error::\[$control\]"; then
               echo "::error::$control did not fire against the violating fixture"
               exit 1
             fi
           done
-          echo "both controls fired as expected (exit $rc)"
+          echo "all controls fired as expected (exit $rc)"
+
+      # WFC-004 compares two files, so its detector has a failure mode the fixtures cannot show:
+      # treating an absent `permissions:` block as "grants nothing" rather than as the repository
+      # default token. That reads every permissionless caller of a `contents: read` workflow as
+      # broken - 4 of the 5 findings on its first fleet run were this false positive, against
+      # callers that pass in CI today. A control that cries wolf gets switched off, so the
+      # distinction is pinned here rather than left to the reviewer.
+      - name: Unit test - WFC-004 models the default token, not the empty set
+        run: |
+          python3 - <<'PY'
+          import importlib.util, pathlib, sys
+          spec = importlib.util.spec_from_file_location(
+              "wfc", pathlib.Path("scripts/check-workflow-centralization.py"))
+          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          gaps = m.permission_gaps
+          cases = [
+              # (granted, declared, declared_present, expected_gap_count, why)
+              (None, {"contents": "read"}, False, 0, "no block anywhere still carries contents: read"),
+              (None, {"contents": "read", "id-token": "write"}, False, 1, "id-token is never implicit"),
+              ({"contents": "read"}, {"contents": "read", "id-token": "write"}, True, 1,
+               "declaring a block drops unlisted scopes to none - the service-ci artifact bug"),
+              ({"contents": "read", "id-token": "write"}, {"contents": "read", "id-token": "write"},
+               True, 0, "exact grant covers the callee"),
+              ({"contents": "write"}, {"contents": "read"}, True, 0, "write satisfies read"),
+              ({"contents": "read"}, {"contents": "write"}, True, 1, "read does not satisfy write"),
+              ("write-all", {"id-token": "write"}, True, 0, "blanket grant covers everything"),
+              ({"contents": "read"}, None, True, 0, "callee declaring nothing asks for nothing"),
+          ]
+          bad = 0
+          for granted, declared, present, want, why in cases:
+              got = len(gaps(granted, declared, present))
+              if got != want:
+                  print(f"::error::expected {want} gap(s), got {got}: {why}"); bad += 1
+          if bad: sys.exit(1)
+          print(f"{len(cases)} permission-model cases hold")
+          PY
