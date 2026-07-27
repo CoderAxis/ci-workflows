@@ -1,0 +1,35 @@
+name: Probe service-ci callability
+
+# Diagnostic only, dispatch-only, deleted once the question it answers is closed.
+#
+# auth-core's thin ci.yml fails with startup_failure: GitHub rejects the run before any job is
+# created, and a startup failure produces no logs and no annotations, so there is nothing to read.
+# Static validation says the graph is sound - every called workflow exists at v1, every required
+# input and secret is supplied, the job graph and all needs/outputs references resolve, there are
+# no duplicate keys, and actionlint with the calls rewritten to local paths (which makes it check
+# the call interfaces it skips for remote refs) is clean.
+#
+# The one thing static analysis cannot answer is whether GitHub itself will accept the call, so
+# this asks it directly. release.yml calling module-release.yml@v1 from the same repository works,
+# and the only structural difference is that service-ci.yml nests five further reusable workflows.
+# If this probe also fails at startup the fault is in the callee and can be bisected here without
+# touching a service repo; if it starts, the fault is in auth-core's caller.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    uses: coderaxis/github-actions/.github/workflows/service-ci.yml@v1
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    secrets:
+      CODERAXIS_APP_ID: ${{ secrets.CODERAXIS_APP_ID }}
+      CODERAXIS_APP_PRIVATE_KEY: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
