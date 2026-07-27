@@ -1,0 +1,69 @@
+name: Central Scripts Guard
+
+# service-ci.yml runs several checkers from scripts/ against every repository in the fleet, which
+# makes a bug in one of them a fleet-wide event in both directions: a false negative turns a gate
+# into decoration, and a false positive fails builds for a reason the owning team cannot act on.
+# Neither shows up in the checker's own repository, because nothing here is what it runs against.
+#
+# The scripts already covered elsewhere are deliberately not repeated:
+#   resolve_service_identity.py, check_module_pins.py -> release-cascade-guard.yml
+#   check-delivery-model.py                           -> delivery-model-guard.yml
+#   check-workflow-centralization.py                  -> workflow-centralization-guard.yml
+# This guard covers the rest, and new central checkers should arrive with a self-test here.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/check_no_raw_sql.py"
+      - "scripts/test_raw_sql_guard.py"
+      - "scripts/testdata/raw-sql/**"
+      - ".github/workflows/central-scripts-guard.yml"
+  pull_request:
+    paths:
+      - "scripts/check_no_raw_sql.py"
+      - "scripts/test_raw_sql_guard.py"
+      - "scripts/testdata/raw-sql/**"
+      - ".github/workflows/central-scripts-guard.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: central-scripts-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  raw-sql:
+    name: Raw-SQL guard precision and recall
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Asserts both directions. Precision alone is not enough: the quickest way to stop the
+      # false positives would be to require uppercase keywords, which would quietly stop detecting
+      # real lowercase SQL, so the fixture pins a lowercase statement as well.
+      - name: Fixture pins both false positives and detection
+        run: python3 scripts/test_raw_sql_guard.py
+
+      # A checker that crashes or finds nothing must not read as a pass. The fixture directory is
+      # known to contain violations, so a zero exit here means the detector stopped matching.
+      - name: Mutation test - the checker still fails a dirty tree
+        run: |
+          set +e
+          (cd scripts/testdata/raw-sql && python3 "${GITHUB_WORKSPACE}/scripts/check_no_raw_sql.py")
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the raw-sql fixture contains real SQL but the checker passed it"
+            exit 1
+          fi
+          echo "checker fails the dirty fixture as expected (exit $rc)"

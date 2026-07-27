@@ -31,6 +31,34 @@ SQL_OPEN = re.compile(
     re.IGNORECASE,
 )
 
+# A bare opening keyword is not evidence of SQL. `UPDATE` and `WITH` in particular are ordinary
+# English, and case-insensitively they match the first word of any number of error strings -
+# fmt.Errorf("update backup codes: %w", err) was reported as raw SQL against auth-core, which is
+# the kind of finding that teaches a team to stop reading this check's output.
+#
+# So each opener must be corroborated by the clause that necessarily follows it in real SQL. The
+# two-word openers (INSERT INTO, DELETE FROM) are already specific enough to stand alone. SELECT
+# requires FROM, which does mean a bare `SELECT 1` liveness probe is not reported - deliberately,
+# since it reads no data and is not what this control exists to catch.
+CORROBORATION = {
+    "SELECT": re.compile(r"\bFROM\b", re.IGNORECASE),
+    "UPDATE": re.compile(r"\bSET\b", re.IGNORECASE),
+    "WITH": re.compile(r"\bAS\s*\(", re.IGNORECASE),
+}
+
+
+def is_sql(text: str, match: "re.Match[str]") -> bool:
+    """Whether a keyword match is corroborated by the rest of the statement it opens."""
+    keyword = re.sub(r"\s+", " ", match.group(2)).upper()
+    needed = CORROBORATION.get(keyword)
+    if needed is None:
+        return True
+    # Scan to the end of the literal the keyword opened, so corroboration cannot be borrowed from
+    # unrelated code further down the file.
+    quote = match.group(1)
+    end = text.find(quote, match.end())
+    return bool(needed.search(text[match.end(): end if end != -1 else match.end() + 400]))
+
 DYNAMIC_SIGNALS = (
     "fmt.Sprintf",
     "strings.Builder",
@@ -73,6 +101,8 @@ def main() -> int:
             except OSError:
                 continue
             for m in SQL_OPEN.finditer(text):
+                if not is_sql(text, m):
+                    continue
                 start = m.start()
                 line_start = text.rfind("\n", 0, start) + 1
                 line_end = text.find("\n", start)

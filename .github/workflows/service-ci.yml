@@ -269,12 +269,35 @@ jobs:
     permissions:
       contents: read
       security-events: write
+    env:
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: false
+
+      # Autobuild compiles the module, so it needs the same private-module access the test job has.
+      # The workflow this job absorbed did mint a token; centralizing dropped it, and autobuild then
+      # failed with "could not read Username for https://github.com" - a git credential error that
+      # says nothing about CodeQL. Analysis cannot run on a repo whose dependencies will not resolve,
+      # so this must fail loudly rather than degrade to scanning a subset.
+      - name: Mint module-read token
+        id: modauth
+        uses: coderaxis/github-actions/module-auth@v1
+        with:
+          app-id: ${{ secrets.CODERAXIS_APP_ID }}
+          private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
+
+      - name: Configure private module access
+        env:
+          MOD_TOKEN: ${{ steps.modauth.outputs.token }}
+        run: |
+          set -euo pipefail
+          [[ -n "${MOD_TOKEN}" ]] || { echo "::error::module token required for private Go modules"; exit 1; }
+          git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
+
       - uses: github/codeql-action/init@v3
         with:
           languages: go
@@ -309,6 +332,12 @@ jobs:
     name: Schema compatibility
     needs: resolve
     uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yml@v1
+    # Explicit, because `secrets: inherit` does not cross the org boundary between a service repo
+    # and this workflow. Without them the App token step failed on "Input required and not
+    # supplied: app-id".
+    secrets:
+      CODERAXIS_APP_ID: ${{ secrets.CODERAXIS_APP_ID }}
+      CODERAXIS_APP_PRIVATE_KEY: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
 
   dockerfile:
     name: Dockerfile standard
@@ -564,8 +593,10 @@ jobs:
           GOWORK=off "$(go env GOPATH)/bin/staticcheck" ./... \
             || echo "::warning::staticcheck findings are advisory until the fleet baseline is clean"
 
+      # This repo tags releases as `vX.Y.Z`; `0.28.0` has no `v` and does not resolve, so the job
+      # failed on "unable to find version" before scanning anything.
       - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
