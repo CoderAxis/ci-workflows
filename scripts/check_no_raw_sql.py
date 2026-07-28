@@ -14,7 +14,7 @@ Allowlist mechanisms (an occurrence is permitted if any apply):
   * the statement is built dynamically (fmt.Sprintf / strings.Builder /
     string concatenation / arg append) -- sqlc cannot express it
 
-Generated packages (sqlc/, rootsqlc/) and *_test.go are never scanned.
+Generated code and *_test.go are never scanned.
 """
 from __future__ import annotations
 
@@ -25,6 +25,18 @@ import sys
 SKIP_DIRS = {".git", "vendor", "node_modules"}
 GENERATED_DIR_SEGMENTS = {"sqlc", "rootsqlc"}
 EXCEPTION_PATH_SEGMENTS = ("seed", "migrations", "schema", "testdata")
+
+# The directory names above were the whole definition of "generated", and no repository in the
+# fleet uses them: all 27 *-core-postgres repos point sqlc's `out:` at internal/db. So the guard
+# scanned sqlc's own output and reported every query it had just generated, telling the repo to
+# "move static queries into sql/queries and run sqlc generate" about files that are the result of
+# doing exactly that.
+#
+# Go's own convention is the reliable signal, because the tool writes it rather than the layout
+# implying it: gofmt-adjacent tooling recognises this exact line, and sqlc emits it. Matching it
+# means a repo can put generated code wherever it likes, and a hand-written package that happens
+# to be called db is still scanned.
+GENERATED_MARKER = re.compile(r"^// Code generated .* DO NOT EDIT\.$", re.MULTILINE)
 
 SQL_OPEN = re.compile(
     r"""(["`])\s*(?:--[^\n]*\n\s*)?(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|WITH)\b""",
@@ -77,6 +89,16 @@ def is_generated(rel_file: str) -> bool:
     return any(seg in GENERATED_DIR_SEGMENTS for seg in rel_file.split(os.sep))
 
 
+def is_generated_source(text: str) -> bool:
+    """Whether the file declares itself generated.
+
+    The marker is only honoured ahead of the package clause, where the convention puts it, so a
+    string literal quoting the line further down does not exempt the file that contains it.
+    """
+    header_end = text.find("\npackage ")
+    return bool(GENERATED_MARKER.search(text if header_end == -1 else text[:header_end]))
+
+
 def is_exception_path(rel_file: str) -> bool:
     parts = [p.lower() for p in rel_file.split(os.sep)]
     return any(seg in parts for seg in EXCEPTION_PATH_SEGMENTS)
@@ -99,6 +121,8 @@ def main() -> int:
                 with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
                     text = fh.read()
             except OSError:
+                continue
+            if is_generated_source(text):
                 continue
             for m in SQL_OPEN.finditer(text):
                 if not is_sql(text, m):
