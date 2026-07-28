@@ -812,6 +812,16 @@ jobs:
           scope: read
           configure-git: "true"
 
+      # The guard used to be scripts/check-no-raw-sql.py inside each repo. Two repos carried it
+      # and the copies had already diverged, so it now lives here as one implementation.
+      - name: Check out the central checkers
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/github-actions
+          ref: v1
+          path: .central
+          sparse-checkout: scripts
+
       - name: Verify sqlc generated code is current
         shell: bash
         env:
@@ -825,18 +835,20 @@ jobs:
           git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
           go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0
           "$(go env GOPATH)/bin/sqlc" generate
-          git diff --exit-code -- sqlc rootsqlc \
-            || { echo "::error::sqlc generated code drift; run 'sqlc generate' and commit"; exit 1; }
 
-      # The guard used to be scripts/check-no-raw-sql.py inside each repo. Two repos carried it
-      # and the copies had already diverged, so it now lives here as one implementation.
-      - name: Check out the central checkers
-        uses: actions/checkout@v4
-        with:
-          repository: coderaxis/github-actions
-          ref: v1
-          path: .central
-          sparse-checkout: scripts
+          # Diffed against the directories sqlc was configured to write, not two names guessed in
+          # advance. The check used to compare `sqlc` and `rootsqlc`, which no repository in the
+          # fleet uses — every one of them sets out: internal/db. git diff tolerates a pathspec
+          # matching nothing, so the comparison succeeded without reading a single generated file
+          # and the gate passed on every repo whatever its output contained.
+          mapfile -t outs < <(python3 .central/scripts/sqlc_output_dirs.py)
+          if [[ ${#outs[@]} -eq 0 ]]; then
+            echo "::error::sqlc.yaml declares no Go output directory; the drift check has nothing to compare"
+            exit 1
+          fi
+          echo "comparing generated output in: ${outs[*]}"
+          git diff --exit-code -- "${outs[@]}" \
+            || { echo "::error::sqlc generated code drift; run 'sqlc generate' and commit"; exit 1; }
 
       - name: Raw SQL guard
         shell: bash
