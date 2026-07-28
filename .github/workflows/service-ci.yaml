@@ -219,10 +219,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # WHAT IS MEASURED, AND WHY IT IS NOT `./...`.
+          #
+          # The threshold is only meaningful if the denominator is code that this repo's own
+          # tests could plausibly execute. Two kinds of package are in `./...` and can never be,
+          # so leaving them in charges a repo for coverage it has no way to earn:
+          #
+          #   package main   — entrypoints and dependency wiring. Exercised by running the
+          #                    binary, not by unit tests.
+          #   imports testing — a package that imports `testing` outside a _test.go file IS a
+          #                    test suite, published as a library so OTHER modules can run it
+          #                    against their adapters. auth-core/contracttest/* is the example:
+          #                    381 statements that execute in auth-core-postgres's test run and
+          #                    are therefore, by construction, 0% covered where they are defined.
+          #
+          # Detected rather than named. A path allowlist here would be a second place to edit
+          # every time a repo adds a suite, and the fleet has already shown what happens to
+          # per-repo lists that must be kept in step. Both properties come from `go list`, which
+          # reads the source, so a package cannot opt itself out by being renamed.
+          #
+          # These only ever REMOVE near-zero-coverage packages, so no repo that passes today
+          # starts failing. On auth-core it moves a true 52.1% to a true 57.8%; the gap to the
+          # tier threshold is real and stays real.
+          #
           # mapfile rather than an unquoted command substitution: a package path containing a space
           # would otherwise split into two arguments and go test would fail on a path that does not
           # exist, reported as a test failure rather than a quoting bug.
-          mapfile -t pkgs < <(GOWORK=off go list ./... | grep -Ev '/tests/(contracts|integration)')
+          mapfile -t pkgs < <(
+            GOWORK=off go list -f '{{.ImportPath}} {{.Name}} {{range .Imports}}{{if eq . "testing"}}T{{end}}{{end}}' ./... \
+              | grep -Ev '/tests/(contracts|integration)' \
+              | awk '$2 != "main" && $3 != "T" { print $1 }'
+          )
+          [[ ${#pkgs[@]} -gt 0 ]] || { echo "::error::no packages left to measure — the filter is wrong, not the repo"; exit 1; }
           GOWORK=off go test "${pkgs[@]}" \
             -coverprofile=coverage.out -covermode=atomic
           go tool cover -func=coverage.out | tail -5
