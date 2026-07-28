@@ -310,6 +310,14 @@ jobs:
             -coverprofile=coverage.out -covermode=atomic
           go tool cover -func=coverage.out | tail -5
 
+      - name: Check out the central checkers
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/github-actions
+          ref: v1
+          path: .central
+          sparse-checkout: scripts
+
       - name: Enforce the tier's coverage threshold
         shell: bash
         env:
@@ -322,8 +330,12 @@ jobs:
           PCT="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); print $3}')"
           [[ -n "${PCT}" ]] || { echo "::error::could not parse coverage total"; exit 1; }
           echo "coverage ${PCT}% (tier ${{ needs.resolve.outputs.tier }} requires >= ${THRESHOLD}%)"
-          awk -v p="${PCT}" -v t="${THRESHOLD}" 'BEGIN { exit (p+0 < t+0) }' \
-            || { echo "::error::coverage ${PCT}% is below the ${THRESHOLD}% required for this tier"; exit 1; }
+
+          # Compared against the threshold AND against the repo's own recorded floor. Comparing
+          # only against the target constrains nothing in a repo that is far below it: the number
+          # was already failing, so it is free to keep falling. The ratchet makes the current
+          # position the thing that cannot be lost, while the target stays the thing being aimed at.
+          python3 .central/scripts/check_coverage_ratchet.py --pct "${PCT}" --threshold "${THRESHOLD}"
 
       - name: Contract tests when present
         shell: bash
