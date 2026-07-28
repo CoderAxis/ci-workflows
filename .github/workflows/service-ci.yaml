@@ -677,11 +677,22 @@ jobs:
 
           # Kept from pipeline-policy.yml, but conditioned on the catalog instead of assumed: only
           # a service that actually declares a REST interface owes a committed contract.
+          #
+          # The helper this used to call was never defined, so the check ran as `command not found`
+          # inside `if !`, which is indistinguishable from "no contract found". Every REST-declaring
+          # deployable failed the lane, auth-service among them while docs/openapi.json sat committed
+          # in the tree. Spelled out here so the condition is the file test it claims to be.
           if [[ "${HAS_REST}" == "true" && "${REPO_KIND}" == "deployable" ]]; then
-            if ! any_of docs/openapi.json docs/openapi.yaml docs/openapi.yml \
-                        api/openapi.json api/openapi.yaml api/openapi.yml; then
+            found=""
+            for candidate in docs/openapi.json docs/openapi.yaml docs/openapi.yml \
+                             api/openapi.json api/openapi.yaml api/openapi.yml; do
+              if [[ -f "${candidate}" ]]; then found="${candidate}"; break; fi
+            done
+            if [[ -z "${found}" ]]; then
               echo "::error::catalog declares a REST interface but no OpenAPI contract is committed"
               rc=1
+            else
+              echo "OpenAPI contract present at ${found}"
             fi
           fi
           exit "${rc}"
