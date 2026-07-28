@@ -175,6 +175,25 @@ jobs:
       id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Started for every Go repo, not only the ones that need it, because `services:` is resolved
+    # before `needs` is available and so cannot be made conditional. The alternative — a second
+    # coverage job for adapter repos, with the threshold evaluated in whichever ran — puts the gate
+    # in two places. An idle Postgres costs a container start; a gate in two places costs a repo
+    # that passes in one and was never checked by the other.
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: service_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
       GONOSUMDB: github.com/coderaxis/*
@@ -215,10 +234,37 @@ jobs:
           # target is still linted rather than silently skipped.
           if grep -qE '^lint:' Makefile 2>/dev/null; then make lint; else GOWORK=off go vet ./...; fi
 
-      - name: Unit tests with coverage
+      - name: Point the tests at the throwaway database
+        shell: bash
+        env:
+          PG_PORT: ${{ job.services.postgres.ports['5432'] }}
+        run: |
+          set -euo pipefail
+          # One name, because all 41 integration test files in the fleet read this one. The tests
+          # apply their own migrations through schema.GooseUpDSN, so the database only has to exist.
+          echo "TEST_DATABASE_URL=postgres://postgres:postgres@localhost:${PG_PORT}/service_test?sslmode=disable" \
+            >> "${GITHUB_ENV}"
+
+      - name: Tests with coverage
         shell: bash
         run: |
           set -euo pipefail
+          # WHY THE INTEGRATION TAG IS ALWAYS ON.
+          #
+          # The 27 *-core-postgres repos keep every test behind `//go:build integration`, because a
+          # repository whose entire job is talking to Postgres has almost nothing to assert without
+          # one. Measuring them untagged compiled no tests at all and reported 0.0%, so the tier-0
+          # threshold failed on repos that are, in fact, tested — and the only lane that ran those
+          # tests was the integration job, which is gated on repo_kind == 'deployable' and therefore
+          # never ran for an adapter. The tag was doing the opposite of its purpose: hiding the
+          # tests from the gate rather than the gate from a missing database.
+          #
+          # Unconditional, because a conditional would have to be told which repos qualify, and the
+          # fleet has already shown what happens to lists that must be kept in step. For a repo with
+          # no tagged files the tag selects nothing extra and the run is unchanged; every repo that
+          # does have them needs only Postgres, which is now present. tests/integration stays out of
+          # the package list below and remains the integration job's, so nothing runs twice.
+          #
           # WHAT IS MEASURED, AND WHY IT IS NOT `./...`.
           #
           # The threshold is only meaningful if the denominator is code that this repo's own
@@ -246,12 +292,21 @@ jobs:
           # would otherwise split into two arguments and go test would fail on a path that does not
           # exist, reported as a test failure rather than a quoting bug.
           mapfile -t pkgs < <(
-            GOWORK=off go list -f '{{.ImportPath}} {{.Name}} {{range .Imports}}{{if eq . "testing"}}T{{end}}{{end}}' ./... \
+            GOWORK=off go list -tags=integration \
+              -f '{{.ImportPath}} {{.Name}} {{range .Imports}}{{if eq . "testing"}}T{{end}}{{end}}' ./... \
               | grep -Ev '/tests/(contracts|integration)' \
               | awk '$2 != "main" && $3 != "T" { print $1 }'
           )
           [[ ${#pkgs[@]} -gt 0 ]] || { echo "::error::no packages left to measure — the filter is wrong, not the repo"; exit 1; }
-          GOWORK=off go test "${pkgs[@]}" \
+
+          # -coverpkg over the same list, because by default Go credits a test only for statements
+          # in its own package. An adapter repo's tests live in the root package and drive
+          # internal/db, so that work was invisible: internal/db counted 270 statements toward the
+          # denominator and was reported at 0.0% while being executed on every run. Attribution
+          # across the set can only add covered statements to a denominator that was already this
+          # list, so no repo's number falls.
+          list="$(IFS=,; echo "${pkgs[*]}")"
+          GOWORK=off go test -tags=integration -coverpkg="${list}" "${pkgs[@]}" \
             -coverprofile=coverage.out -covermode=atomic
           go tool cover -func=coverage.out | tail -5
 
