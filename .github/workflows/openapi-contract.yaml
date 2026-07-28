@@ -1,0 +1,150 @@
+name: OpenAPI contract
+
+# Structural validation of a service's committed OpenAPI document, plus that service's own
+# contract tests. Moved here from InboxxHQ-CoderAxis/inboxxhq-api-contracts.
+#
+# WHY IT MOVED. service-ci.yaml called the contracts-repo copy directly, and that call could not
+# resolve from any repository:
+#   - the reference named `reusable-openapi-contract.yaml`, but the file there is `.yml` - the
+#     extension sweep reached the caller and not the callee.
+#   - it pinned `@v1` to satisfy WFC-002, and that repository carries no tags at all.
+#   - it is private and owned by a different organisation, which GitHub does not accept as a
+#     reusable-workflow source whatever the extension and tag say.
+# GitHub resolves the entire reusable-workflow graph when it LOADS a workflow, before any `if:` is
+# evaluated. So this one unreachable job rejected central CI for every repository in the fleet,
+# including library repos whose `contract` job would have been skipped anyway. It presented as a
+# run with no job, no log and no annotation - the shape WFC-004's rationale already describes.
+#
+# WHAT DID NOT MOVE. Each omission is deliberate:
+#   generate-drift    regenerated the spec with `swag` from Go annotations. Superseded: the
+#                     platform generates OpenAPI from the Go reflection engine with authored
+#                     operationIds, so porting the annotation scanner would reinstate the approach
+#                     that replaced it.
+#   breaking-change   oasdiff against the published registry baseline.
+#   publish-contract  publication of latest.json / vX.Y.Z.json back into the registry.
+#   publish-sdk       a stub whose only step printed "not implemented".
+# The three registry stages read and write a private repository in another organisation, which the
+# OIDC credential model does not currently reach, and every caller left all four off - so none has
+# ever run for any service. Porting them with an invented credential path would produce a gate
+# that cannot authenticate, which is worse than an absent one: it reports green on a skip. They
+# stay unported until the cross-organisation registry credential exists.
+#
+# CREDENTIALS. The original took coderaxis-app-id / coderaxis-app-private-key as forwarded
+# secrets, which the OIDC migration had already deleted - so every caller was passing a secret
+# that no longer existed. The token is minted here from the job's own OIDC identity, and callers
+# forward nothing.
+
+on:
+  workflow_call:
+    inputs:
+      spec-file:
+        description: Path to the OpenAPI document in the calling repository.
+        required: true
+        type: string
+      pre-test-command:
+        description: Optional shell command that prepares the caller repo before contract tests.
+        required: false
+        type: string
+        default: ""
+      contract-test-command:
+        description: >-
+          Optional shell command running the caller's contract tests. The route-coverage gate
+          belongs here rather than centrally, because only the service knows which routes it
+          mounts.
+        required: false
+        type: string
+        default: ""
+      runner:
+        description: JSON-encoded runs-on value.
+        required: false
+        type: string
+        default: '["ubuntu-latest"]'
+
+permissions:
+  contents: read
+
+jobs:
+  validate-contract:
+    name: Validate and test contract
+    # id-token because ci-app-token below exchanges this job's OIDC token for the App key. A
+    # caller that does not grant it fails at load time with no log (WFC-004).
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ${{ fromJson(inputs.runner) }}
+    timeout-minutes: 20
+    env:
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+      GONOSUMDB: github.com/coderaxis/*
+    steps:
+      - name: Check out the service repo
+        uses: actions/checkout@v4
+
+      - name: Ensure the spec exists
+        shell: bash
+        env:
+          SPEC_FILE: ${{ inputs['spec-file'] }}
+        run: |
+          set -euo pipefail
+          # Explicit, because swagger-cli reports a missing document as a load error naming a
+          # resolved temp path rather than the input, which reads as a tooling fault.
+          if [[ ! -f "${SPEC_FILE}" ]]; then
+            echo "::error::Spec file not found: ${SPEC_FILE}"
+            exit 1
+          fi
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install OpenAPI validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g @stoplight/spectral-cli@6.11.1 swagger-cli@4.0.4
+
+      - name: Validate the OpenAPI document
+        shell: bash
+        env:
+          SPEC_FILE: ${{ inputs['spec-file'] }}
+        run: |
+          set -euo pipefail
+          swagger-cli validate "${SPEC_FILE}"
+          # The lint half is conditional on the repo shipping a ruleset. Announce the difference:
+          # silently running structural validation only, under a step named "validate", is how a
+          # repository ends up believing it is linted when it is not.
+          if [[ -f .spectral.yaml ]]; then
+            spectral lint "${SPEC_FILE}" --ruleset .spectral.yaml --fail-severity error
+          else
+            echo "::notice::No .spectral.yaml in this repository; structural validation only."
+          fi
+
+      - name: Set up Go
+        if: inputs['pre-test-command'] != '' || inputs['contract-test-command'] != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Mint module-read token
+        id: modauth
+        if: inputs['pre-test-command'] != '' || inputs['contract-test-command'] != ''
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          configure-git: "true"
+
+      - name: Prepare the contract test environment
+        if: inputs['pre-test-command'] != ''
+        shell: bash
+        env:
+          CROSS_REPO_TOKEN: ${{ steps.modauth.outputs.token }}
+        run: ${{ inputs['pre-test-command'] }}
+
+      - name: Run contract tests
+        if: inputs['contract-test-command'] != ''
+        shell: bash
+        env:
+          CROSS_REPO_TOKEN: ${{ steps.modauth.outputs.token }}
+        run: ${{ inputs['contract-test-command'] }}
