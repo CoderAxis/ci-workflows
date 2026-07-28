@@ -303,6 +303,13 @@ jobs:
         if: steps.ver.outputs.releasable == 'true' && needs.resolve.outputs.upstream_module != ''
         env:
           UPSTREAM: ${{ needs.resolve.outputs.upstream_module }}
+          # Named rather than inherited. This step reads a DIFFERENT private repository, and the
+          # ambient git credential is not the one that can: actions/checkout writes a repo-scoped
+          # extraheader into .git/config, git prefers it over the insteadOf rewrite configured
+          # above, and GitHub answers "no such repository" to a token scoped elsewhere. The
+          # previous `git ls-remote` read that denial as a missing tag and told every adapter in
+          # the fleet to release a core that was already released hours earlier.
+          GH_TOKEN: ${{ steps.modauth.outputs.token }}
         run: |
           set -euo pipefail
           # This adapter pins its core directly and the deployable pins BOTH, so the two must agree
@@ -315,12 +322,28 @@ jobs:
             exit 1
           fi
           echo "pinned ${UPSTREAM} at ${pin}"
-          if ! git ls-remote --exit-code --tags "https://${UPSTREAM}.git" "refs/tags/${pin}" >/dev/null 2>&1; then
-            echo "::error::${UPSTREAM} ${pin} is not a published tag. Release the upstream module first;"
-            echo "releases flow bottom-up (SHARED_CORE_RELEASE_AND_PROMOTION.md §1)."
-            exit 1
-          fi
-          echo "upstream ${UPSTREAM} ${pin} is published"
+
+          # A missing tag and an unreachable API must not look alike: one means "release the core
+          # first", the other means "try again", and publishing is irreversible either way. 404 is
+          # the only answer that is allowed to fail this gate.
+          repo="${UPSTREAM#github.com/}"
+          status="$(gh api "repos/${repo}/git/ref/tags/${pin}" --silent --include 2>/dev/null \
+            | awk 'NR==1 { print $2 }')"
+          case "${status}" in
+            200)
+              echo "upstream ${UPSTREAM} ${pin} is published"
+              ;;
+            404)
+              echo "::error::${UPSTREAM} ${pin} is not a published tag. Release the upstream module first;"
+              echo "releases flow bottom-up (SHARED_CORE_RELEASE_AND_PROMOTION.md §1)."
+              exit 1
+              ;;
+            *)
+              echo "::error::cannot reach the GitHub API to determine whether ${UPSTREAM} ${pin} is"
+              echo "published (HTTP '${status:-none}'). Refusing to publish on an unverified pin."
+              exit 1
+              ;;
+          esac
 
       - name: Verify module tidy
         if: steps.ver.outputs.releasable == 'true'
