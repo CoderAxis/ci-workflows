@@ -11,6 +11,12 @@ The fixture annotates each line as `wantSQL` or `wantProse`, and this asserts bo
 false positive on prose, and no loss of detection on the five statement forms plus lowercase SQL.
 Recall matters as much as precision here, because the obvious way to kill the false positives is to
 demand uppercase keywords, which would silently stop detecting real lowercase SQL.
+
+The internal/db fixture covers the same tension for generated code. The guard used to treat only
+directories named sqlc/ or rootsqlc/ as generated, and no repository uses those names, so it
+reported sqlc's own output back at the repo. Fixing that by exempting internal/db would have gone
+too far the other way, so the exemption follows Go's generated-code marker and the fixture holds
+both halves: the marked file is silent, its unmarked neighbour is still reported.
 """
 
 from __future__ import annotations
@@ -59,13 +65,37 @@ def main() -> int:
     for ln in unexpected:
         print(f"::error::line {ln} reported but not annotated either way: {lines[ln - 1].strip()}")
 
-    if missed or false_positives or unexpected:
+    generated_failures = check_generated(proc.stdout)
+
+    if missed or false_positives or unexpected or generated_failures:
         return 1
     print(
         f"raw-sql guard: {len(expected_sql)} statement form(s) detected, "
-        f"{len(expected_prose)} prose case(s) correctly ignored"
+        f"{len(expected_prose)} prose case(s) correctly ignored, "
+        "generated code exempt and its hand-written neighbour still caught"
     )
     return 0
+
+
+def check_generated(stdout: str) -> bool:
+    """Assert the exemption is driven by the marker rather than by the directory."""
+    failed = False
+
+    if "queries.sql.go" in stdout:
+        print(
+            "::error::internal/db/queries.sql.go carries the generated-code marker and was "
+            "reported; the guard is telling a repo to fix sqlc's own output"
+        )
+        failed = True
+
+    if "handwritten.go" not in stdout:
+        print(
+            "::error::internal/db/handwritten.go has no generated-code marker and was NOT "
+            "reported; the exemption has widened to the whole directory"
+        )
+        failed = True
+
+    return failed
 
 
 if __name__ == "__main__":
