@@ -243,6 +243,26 @@ runs:
               --comment "Superseded by ${NEW_BRANCH}." || true
           done
 
+    - name: Decide which paths the bump may commit
+      id: paths
+      if: steps.guard.outputs.skip != 'true'
+      shell: bash
+      working-directory: ${{ inputs.target-path }}
+      run: |
+        set -euo pipefail
+        # docs/openapi.json is named only when the consumer actually has one. add-paths reaches
+        # `git add`, which fails on a pathspec matching nothing, so listing it unconditionally
+        # aborted the bump for every consumer that publishes no spec — schema and library repos,
+        # which is most of the graph. The regeneration step above already tests for the file;
+        # this makes the commit agree with it instead of assuming the deployable case.
+        {
+          echo "list<<PATHS_EOF"
+          echo "go.mod"
+          echo "go.sum"
+          if [[ -f docs/openapi.json ]]; then echo "docs/openapi.json"; fi
+          echo "PATHS_EOF"
+        } >> "${GITHUB_OUTPUT}"
+
     - name: Open the bump PR
       id: cpr
       if: steps.guard.outputs.skip != 'true'
@@ -256,10 +276,7 @@ runs:
         # Explicit, because the default commits every change in the workspace. A bump may only
         # move the pin and the spec regenerated from it; anything else appearing in the diff
         # means a build step wrote into the tree and belongs in its own reviewed change.
-        add-paths: |
-          go.mod
-          go.sum
-          docs/openapi.json
+        add-paths: ${{ steps.paths.outputs.list }}
         labels: |
           dependencies
           core-modules
