@@ -1,0 +1,194 @@
+name: Platform Governance (multi-repo)
+
+# Reusable workflow for the governance gates that read MORE THAN ONE repository.
+#
+# WHY THIS IS SEPARATE FROM docs-governance.yaml. That workflow enforces generic markdown
+# policy against a single caller and deliberately needs nothing else checked out. These gates
+# are the opposite: the claims manifest cites code in github-actions and infra, the capability
+# certification gate reads core-docs' catalog, the client capability registry in platform-docs
+# and the fleet source at once. Mixing them would give every governed docs repo a multi-repo
+# checkout it has no use for.
+#
+# WHY IT IS CENTRAL RATHER THAN IN THE CALLER. Two of the repositories are private, so
+# assembling them needs an App token, and ci-app-token can only be reached by a job DEFINED in
+# a central workflow at the released tag (ADR-0110: the trust policy conditions on
+# job_workflow_ref, precisely so a repository cannot mint by editing its own workflow). A job
+# in core-docs' own ci.yaml is therefore denied by design. The alternative - core-docs holding
+# a forwarded App key - is the arrangement ADR-0033 exists to remove.
+#
+# WHAT IT REPLACES. The caller previously ran these gates behind `if [ -d ../platform-docs ]`,
+# with an `else echo` that passed. Nothing was ever checked out beside core-docs, so the ADR
+# hygiene check and all seven certification gates had never once executed in CI while reporting
+# green. Absence read as compliance, which is the failure the gates themselves are written to
+# refuse.
+
+on:
+  workflow_call:
+    inputs:
+      docs_path:
+        description: >-
+          Where to place the calling docs repo inside the assembled workspace. The scripts
+          resolve their siblings from their own location, so this is the layout contract, not a
+          preference: core-docs must land at docs/core-docs for platform-docs to be beside it.
+        required: false
+        type: string
+        default: docs/core-docs
+      platform_docs_repo:
+        description: "Client capability registry and its capability-tagged documents."
+        required: false
+        type: string
+        default: InboxxHQ-CoderAxis/inboxxhq-platform-docs
+      infra_repo:
+        description: "Infrastructure repo, for claims that cite the CI identity stack."
+        required: false
+        type: string
+        default: InboxxHQ-CoderAxis/inboxxhq-infra
+      infra_sparse_path:
+        description: >-
+          Sparse-checkout cone for the infra repo. Claims cite one directory in a large
+          Terraform tree, so the whole tree is not worth cloning to confirm a path exists.
+        required: false
+        type: string
+        default: environments/management/ci-identity
+      actions_ref:
+        description: "Ref of coderaxis/github-actions to assemble (defaults to the moving major tag)."
+        required: false
+        type: string
+        default: v1
+
+permissions:
+  contents: read
+
+jobs:
+  platform-governance:
+    name: Platform governance (assembled workspace)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Required by ci-app-token: the OIDC token IS the proof of identity, and without this the
+      # action fails with a clear message rather than a confusing AWS denial.
+      id-token: write
+    env:
+      # The resolver reads this instead of inferring the workspace from a script's own path.
+      # Inference is what broke: core-docs sits two levels below the workspace locally and at
+      # the root in a plain checkout, so a path relative to the script can only be right in one
+      # of them, and the manifest oscillated between the two spellings for exactly that reason.
+      PLATFORM_WORKSPACE: ${{ github.workspace }}
+
+    steps:
+      # Assembled layout, which the scripts' sibling resolution depends on:
+      #   $GITHUB_WORKSPACE/
+      #     docs/core-docs/                 <- the caller
+      #     docs/inboxxhq-platform-docs/
+      #     github-actions/
+      #     infra/inboxxhq-infra/
+      - name: Check out the calling docs repository
+        uses: actions/checkout@v4
+        with:
+          path: ${{ inputs.docs_path }}
+
+      # Public, so this one needs no credential. Worth stating: it is the reason the claims
+      # manifest's github-actions references can be resolved before any token exists.
+      - name: Check out github-actions (public)
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/github-actions
+          ref: ${{ inputs.actions_ref }}
+          path: github-actions
+
+      - name: Resolve private repository owners
+        id: owners
+        shell: bash
+        env:
+          PLATFORM_DOCS_REPO: ${{ inputs.platform_docs_repo }}
+          INFRA_REPO: ${{ inputs.infra_repo }}
+        run: |
+          set -euo pipefail
+          docs_owner="${PLATFORM_DOCS_REPO%%/*}"
+          infra_owner="${INFRA_REPO%%/*}"
+          if [ "${docs_owner}" != "${infra_owner}" ]; then
+            echo "::error::platform_docs_repo and infra_repo are under different accounts" \
+                 "(${docs_owner} vs ${infra_owner}); a GitHub App is installed per account, so" \
+                 "this job would need one token each. Add the second mint before splitting them."
+            exit 1
+          fi
+          {
+            echo "owner=${docs_owner}"
+            echo "docs_name=${PLATFORM_DOCS_REPO##*/}"
+            echo "infra_name=${INFRA_REPO##*/}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Mint a read token for the private repositories
+        id: token
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ steps.owners.outputs.owner }}
+          repositories: ${{ steps.owners.outputs.docs_name }} ${{ steps.owners.outputs.infra_name }}
+
+      - name: Check out platform-docs
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.platform_docs_repo }}
+          token: ${{ steps.token.outputs.token }}
+          path: docs/${{ steps.owners.outputs.docs_name }}
+
+      - name: Check out the infra CI-identity stack
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.infra_repo }}
+          token: ${{ steps.token.outputs.token }}
+          path: infra/${{ steps.owners.outputs.infra_name }}
+          sparse-checkout: ${{ inputs.infra_sparse_path }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip PyYAML jsonschema
+
+      - name: Confirm the workspace assembled
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for d in "${{ inputs.docs_path }}" github-actions \
+                   "docs/${{ steps.owners.outputs.docs_name }}" \
+                   "infra/${{ steps.owners.outputs.infra_name }}"; do
+            if [ -d "${GITHUB_WORKSPACE}/${d}" ]; then
+              echo "  present  ${d}"
+            else
+              echo "  MISSING  ${d}"; missing=1
+            fi
+          done
+          # A gate that runs against a half-assembled workspace reports findings about absence
+          # rather than about the platform, and those read identically to real ones.
+          [ "${missing}" -eq 0 ] || { echo "::error::workspace incomplete; gates not run"; exit 1; }
+
+      # Every reference in the manifest is now resolvable, so an unresolved one is a real defect
+      # rather than a missing checkout. --allow-unverifiable is deliberately NOT passed: this job
+      # exists so that flag is never needed in CI.
+      - name: Platform claims manifest structure
+        working-directory: ${{ inputs.docs_path }}
+        run: python scripts/verify_claims.py --validate
+
+      - name: ADR hygiene in platform-docs (status values + supersession chains)
+        working-directory: ${{ inputs.docs_path }}
+        run: |
+          python scripts/check_adr_hygiene.py \
+            --root "${GITHUB_WORKSPACE}/docs/${{ steps.owners.outputs.docs_name }}" \
+            --index adrs/README.md
+
+      # Reports every capability and fails only on one the registry marks certified, so it
+      # measures before it gates. With all three trees present it can now reach a verdict; it
+      # exits 2 if the registry is unreadable, which is a loud failure rather than a skip.
+      - name: Product capability certification gates
+        working-directory: ${{ inputs.docs_path }}
+        run: |
+          python scripts/check_capability_certification.py \
+            --platform-docs "${GITHUB_WORKSPACE}/docs/${{ steps.owners.outputs.docs_name }}" \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --chain
