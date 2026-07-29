@@ -1,0 +1,125 @@
+# Enforce controls/ci-identity.yaml against a repository's Terraform (CID-0001..CID-0004).
+#
+# The controls guard the GitHub-OIDC `sub` patterns in the trust policies that let CI assume AWS
+# roles. GitHub's immutable claim embeds numeric owner and repository ids, and a repository adopts
+# that format when it is created, renamed or transferred, so a policy matching only the older
+# name-based spelling stops admitting a repository the moment somebody renames it — with no change to
+# the policy and no signal until a deploy fails in a different repository entirely. That has cost four
+# outages on this platform; see controls/ci-identity.yaml for the list.
+#
+# Published as a reusable workflow rather than copied into inboxxhq-infra so the catalog stays a
+# single source of truth: a control added here reaches the repository on its next run without anything
+# in that repository changing. It is deliberately generic — nothing about it is infra-specific — so any
+# repository that grows GitHub-OIDC trust policies can call it.
+#
+# WHAT A GREEN RESULT MEANS, PRECISELY. The checker reads Terraform SOURCE. It says the configuration
+# is right; it does NOT say the account is, and those have diverged here before — one earlier fix was
+# applied with `aws iam update-assume-role-policy` before its Terraform landed, so for a period the
+# live policy was correct and the source was not. Closing that gap needs a job with AWS read access
+# diffing each live `AssumeRolePolicyDocument` against the rendered configuration, which is a separate
+# control and is not claimed here. This workflow needs no cloud credentials at all, which is why it
+# can run on every pull request including forks.
+name: Terraform CI identity
+
+on:
+  workflow_call:
+    inputs:
+      roots:
+        description: >-
+          Newline-separated directories to check, relative to the caller's checkout. Each is walked
+          recursively for `*.tf`. Defaults to the whole repository.
+        required: false
+        type: string
+        default: "."
+      fail_on:
+        description: >-
+          Lowest severity that fails the job: critical, major or minor. Defaults to major, which
+          blocks on every control in the catalog today.
+        required: false
+        type: string
+        default: major
+      actions_ref:
+        description: "Ref of coderaxis/github-actions providing the checker (defaults to the moving major tag)."
+        required: false
+        type: string
+        default: v1
+
+permissions:
+  contents: read
+
+jobs:
+  ci-identity:
+    name: OIDC sub patterns
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout caller
+        uses: actions/checkout@v4
+
+      - name: Checkout central checker (SSOT)
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/github-actions
+          ref: ${{ inputs.actions_ref }}
+          path: .ci-identity-tools
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Enforce CI identity controls (ADR-0051, ADR-0110)
+        env:
+          ROOTS: ${{ inputs.roots }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r root; do
+            [[ -n "$root" ]] && args+=("$root")
+          done <<< "$ROOTS"
+          python3 .ci-identity-tools/scripts/check-ci-identity.py \
+            "${args[@]}" \
+            --controls .ci-identity-tools/controls/ci-identity.yaml \
+            --fail-on "${{ inputs.fail_on }}" \
+            | tee ci-identity.log
+
+      - name: Machine-readable report
+        if: always()
+        env:
+          ROOTS: ${{ inputs.roots }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r root; do
+            [[ -n "$root" ]] && args+=("$root")
+          done <<< "$ROOTS"
+          python3 .ci-identity-tools/scripts/check-ci-identity.py \
+            "${args[@]}" \
+            --controls .ci-identity-tools/controls/ci-identity.yaml \
+            --fail-on "${{ inputs.fail_on }}" \
+            --format json > ci-identity-report.json || true
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo '## CI identity — GitHub-OIDC `sub` patterns'
+            echo ''
+            echo 'Source-level check (CID-0001..CID-0004). A pass means the Terraform is right, not'
+            echo 'that the live AWS policy matches it.'
+            echo ''
+            echo '```'
+            cat ci-identity.log 2>/dev/null || echo '(no output — the check did not run)'
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-identity-report
+          path: ci-identity-report.json
+          if-no-files-found: ignore
