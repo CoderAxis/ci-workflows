@@ -1,0 +1,132 @@
+# App-token broker self-check (ADR-0110), published as a reusable workflow.
+#
+# WHY THIS IS ITS OWN FILE, AND NOT TWO JOBS IN ci.yaml.
+#
+# The broker's read role is scoped with an OIDC `job_workflow_ref` condition, and the allowlist entry
+# is `coderaxis/github-actions/.github/workflows/*@refs/tags/v1`. The wildcard sits BEFORE the `@`,
+# so a matching claim must end in the literal `@refs/tags/v1`. `job_workflow_ref` names the workflow
+# a job is DEFINED in, together with the ref that definition was loaded from.
+#
+# That is fine for a consumer repository: it calls a central workflow at `@v1`, so the claim carries
+# the tag. It is NOT fine for a job defined in THIS repository's own ci.yaml, because this
+# repository's CI runs on a branch or a pull request. Such a job presents `ci.yaml@refs/heads/main`,
+# which the pattern cannot match. When these two guards lived in ci.yaml the positive one was
+# therefore denied on every single run from the day it was written — being inside the allowlisted
+# directory is necessary, not sufficient, because the ref is half the pattern.
+#
+# Moving them into a reusable workflow that ci.yaml calls at `@v1` fixes that without touching the
+# trust policy at all. The claim becomes `app-token-selftest.yaml@refs/tags/v1` and matches the
+# existing entry. This is not a workaround: it is the same mechanism the platform already depends on
+# for `module-release.yaml@refs/tags/v1` on the publish role, so the guard now exercises the broker
+# by exactly the route a real consumer takes.
+#
+# WHAT VERSION OF THE ACTION THIS TESTS. `uses: ./ci-app-token` resolves against the runner
+# workspace, which the checkout below fills with the CALLER's repository at the caller's commit —
+# and the caller here is this same repository, so a pull request tests the action as that pull
+# request would ship it. GitHub's documentation on local action references inside a called workflow
+# is not unambiguous on this point, and third-party reports disagree. It does not matter for
+# correctness: caller and callee are the same repository, so every reading resolves to a real
+# `ci-app-token`, and the only thing that varies is which commit's copy runs. If GitHub ever
+# resolves it against the called workflow's ref instead, this guard keeps working and simply tests
+# the released v1 copy. It fails loudly (action not found) rather than silently passing, which is
+# the acceptable direction for a credential guard to be wrong in.
+#
+# BOTH DIRECTIONS ARE ASSERTED, DELIBERATELY. Either failure mode of a credential broker is silent
+# in one direction. If the trust policy stopped admitting central workflows, CI would go red and
+# someone would fix it. But if it started admitting ANYTHING — a wildcard widened, the
+# job_workflow_ref condition dropped, the tag requirement removed — nothing would fail, and the
+# platform's most powerful credential would be reachable from any workflow in the estate.
+#
+# Note how the two relate, because it is easy to over-read a green negative case: while the positive
+# job was denied, EVERY request from that file was refused, so the negative job passed for the wrong
+# reason and would have kept passing even if the publish allowlist had been wrongly widened. A
+# negative assertion is only worth what the corresponding positive one proves.
+name: App token self-check
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  # ── positive case ───────────────────────────────────────────────────────────────────────────────
+  admits-central:
+    name: App token - admits a job defined in a central workflow
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The broker mints from an AWS role via OIDC; without this the composite action exits with
+      # "No OIDC token available" rather than testing anything.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mint a read-scoped token
+        id: tok
+        uses: ./ci-app-token
+        with:
+          scope: read
+          owner: coderaxis
+          repositories: auth-core
+
+      - name: The token must actually work
+        env:
+          GH_TOKEN: ${{ steps.tok.outputs.token }}
+        run: |
+          set -euo pipefail
+          # Proves the credential is real and correctly scoped, rather than just
+          # non-empty: a token minted for the wrong installation would still be a
+          # plausible-looking string.
+          slug=$(gh api /repos/coderaxis/auth-core --jq '.full_name')
+          [ "$slug" = "coderaxis/auth-core" ] || { echo "::error::unexpected repo: $slug"; exit 1; }
+          echo "read token works and resolves coderaxis/auth-core"
+
+      - name: A read token must NOT be able to write
+        env:
+          GH_TOKEN: ${{ steps.tok.outputs.token }}
+        run: |
+          set -uo pipefail
+          # The read App has no write scope. If this ever succeeds, the two Apps
+          # have been conflated and the read/publish split is no longer real.
+          if gh api -X POST /repos/coderaxis/auth-core/git/refs \
+               -f ref=refs/heads/ci-app-token-guard-should-fail \
+               -f sha=0000000000000000000000000000000000000000 >/dev/null 2>&1; then
+            echo "::error::a read-scoped token was able to create a ref"
+            exit 1
+          fi
+          echo "read token correctly cannot write"
+
+  # ── negative case ───────────────────────────────────────────────────────────────────────────────
+  # This job requests the PUBLISH scope from a workflow that is deliberately NOT on the publishing
+  # allowlist, which holds module-release alone. module-bump is absent on purpose: no such workflow
+  # exists at v1, and an entry matched by nothing is a standing invitation to create the file later
+  # and inherit publish rights unreviewed. AWS must refuse this.
+  refuses-unlisted-workflow:
+    name: App token - refuses publish scope from a non-publishing workflow
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # continue-on-error is the mechanism of the assertion, not a relaxation of it: the step is
+      # REQUIRED to fail, and the step after it fails the job if it did not.
+      - name: Requesting publish from here must be denied
+        id: attempt
+        continue-on-error: true
+        uses: ./ci-app-token
+        with:
+          scope: publish
+          owner: coderaxis
+
+      - name: Assert it was denied
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::this workflow is not on the publishing allowlist yet it obtained a publish token."
+            echo "::error::job_workflow_ref scoping on inboxxhq-ci-app-token-publish is not being enforced."
+            exit 1
+          fi
+          echo "publish scope correctly denied to a non-publishing workflow"
