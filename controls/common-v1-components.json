@@ -117,7 +117,7 @@
         },
         "totalItems": {
           "format": "int64",
-          "type": "string"
+          "type": "integer"
         },
         "totalPages": {
           "format": "int32",
