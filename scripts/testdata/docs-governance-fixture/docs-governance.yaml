@@ -1,0 +1,16 @@
+# Per-repository configuration for the docs-governance checker, as a compliant repo declares it.
+#
+# This fixture exists so a catalog or checker change that breaks execution is caught in this repo
+# rather than fleet-wide, which means it has to carry whatever the controls require of a real
+# governed docs repository - not the minimum that happened to pass when it was written.
+#
+# `namespace` is what DOC-0015 and DOC-0016 need in order to mean anything: a bare `ADR-0006` names
+# a real document in more than one namespace, so resolving a citation is impossible until a
+# repository says which namespace it is. A repository that declares none is failed rather than
+# skipped, deliberately - omitting one line would otherwise be a silent opt-out of citation
+# checking, and an unconfigured control that reports success is worse than no control.
+#
+# The value is a registered namespace (see controls/doc-namespaces.yaml) rather than an invented
+# one, so peer resolution runs against real registry data. This fixture cites nothing
+# cross-namespace, so which registered namespace it claims does not affect what is exercised.
+namespace: core-docs
