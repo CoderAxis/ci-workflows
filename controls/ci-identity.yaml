@@ -70,8 +70,10 @@ controls:
       down.
     remediation: >-
       Add the immutable pattern next to the classic one, keeping the trailing subject identical:
-      `repo:${owner}@${owner_id}/...`. Pin the owner id from `gh api orgs/<login> -q .id` (or
-      `users/<login>` for a user account) and hold it in a variable, never inline it twice.
+      `repo:${owner}@${owner_id}/...`. Read the owner id with `gh api users/<login> -q .id`, which
+      resolves BOTH organizations and user accounts and returns the same id `orgs/<login>` would —
+      whereas `orgs/` 404s on a user, and this platform has a user-owned owner in these very trust
+      policies. Hold it in a variable rather than inlining it twice.
     detector: sub_offers_immutable_spelling
     refs: [ADR-0051]
 
