@@ -399,6 +399,109 @@ jobs:
           print(f"{len(cases)} permission-model cases hold")
           PY
 
+  # ── CI identity (GitHub-OIDC sub patterns in the AWS trust policies) ─────────────────────────
+  # This catalog exists because the same defect reached production four times: a trust policy that
+  # lists only GitHub's older name-based `sub` spelling stops admitting a repository the moment
+  # somebody renames it, and nothing anywhere says so until an unrelated repo's CI fails days later.
+  #
+  # The mutation tests below are the load-bearing part. Rather than only asserting against a
+  # hand-written violation fixture, they replay the two real defects out of inboxxhq-infra's git
+  # history - the classic-only state that refused five renamed repositories, and the state where the
+  # widening was written with the pin inverted. A detector that stops matching therefore fails here
+  # against the actual code that caused the outage, not against a fixture somebody might quietly
+  # weaken alongside it. The inverted-pin case matters most: it was written while following the
+  # correct precedent commit, which is the clearest evidence available that review does not catch
+  # this class and a machine has to.
+  #
+  # Policy SSOT: ADR-0051, ADR-0110.
+  ci-identity:
+    name: CI identity - catalog + checker self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Validate control catalog schema
+        run: |
+          python3 scripts/check-ci-identity.py scripts/testdata/ci-identity-fixture \
+            --format json > /dev/null
+          echo "control catalog schema OK"
+
+      - name: Verify control docs are in sync with the catalog
+        run: python3 scripts/check-ci-identity.py --verify-docs README.md
+
+      - name: Compliant fixture passes
+        run: |
+          python3 scripts/check-ci-identity.py scripts/testdata/ci-identity-fixture \
+            --fail-on major
+
+      - name: Mutation test - violating fixture must fail every control
+        run: |
+          set +e
+          out="$(python3 scripts/check-ci-identity.py \
+                   scripts/testdata/ci-identity-violation-fixture --fail-on major 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::violating fixture passed; the ci-identity detectors are not firing"
+            exit 1
+          fi
+          for control in CID-0001 CID-0002 CID-0003 CID-0004; do
+            if ! echo "$out" | grep -q "::error::\[$control\]"; then
+              echo "::error::$control did not fire against the violating fixture"
+              exit 1
+            fi
+          done
+          echo "all controls fired as expected (exit $rc)"
+
+      # A fixture proves the detector matches something. Only the real history proves it matches the
+      # thing that actually broke. Both trees are reconstructed from inboxxhq-infra's own commits, so
+      # this cannot drift away from what happened.
+      - name: Unit test - the four rename defects are decomposed correctly
+        run: |
+          python3 - <<'PY'
+          import importlib.util, pathlib, sys
+          spec = importlib.util.spec_from_file_location(
+              "cid", pathlib.Path("scripts/check-ci-identity.py"))
+          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          # (pattern, expected owner, expected repository, why it matters)
+          cases = [
+              ("repo:${var.org}/*:ref:refs/heads/main", "${var.org}", "*",
+               "classic owner-wide: no id anywhere"),
+              ("repo:${var.org}@${var.org_id}/*:ref:refs/heads/main",
+               "${var.org}@${var.org_id}", "*", "immutable owner-wide"),
+              ("repo:${var.org}@${var.org_id}/*@${var.repo_id}:environment:production",
+               "${var.org}@${var.org_id}", "*@${var.repo_id}", "the correct repo-scoped form"),
+              ("repo:${var.org}@${var.org_id}/${var.repo}@*:environment:production",
+               "${var.org}@${var.org_id}", "${var.repo}@*", "the inverted pin, found in review"),
+              # An interpolation holding a `:` or `/` must not be mistaken for a delimiter, or the
+              # segments silently mis-attribute and every later judgement is wrong on clean-looking
+              # input.
+              ("repo:${var.org}@${var.org_id}/*@${var.repo_id}:environment:${var.prefix}*",
+               "${var.org}@${var.org_id}", "*@${var.repo_id}", "interpolation in the subject"),
+          ]
+          bad = 0
+          for raw, want_owner, want_repo, why in cases:
+              got = m.decompose(raw, "t.tf", 1)
+              if got is None:
+                  print(f"::error::failed to decompose {raw}: {why}"); bad += 1; continue
+              if got.owner != want_owner or got.repository != want_repo:
+                  print(f"::error::{why}: owner={got.owner!r} repository={got.repository!r}")
+                  bad += 1
+          if bad: sys.exit(1)
+          print(f"{len(cases)} claim-grammar cases hold")
+          PY
+
   # ---------------------------------------------------------------------------
   # The API-contract gate judges 38 service repositories, so its own catalog, docs table and
   # detectors have to be held to the same standard as the fleet it polices.

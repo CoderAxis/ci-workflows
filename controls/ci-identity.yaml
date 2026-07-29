@@ -1,0 +1,154 @@
+# CI identity control catalog (declarative policy-as-code).
+#
+# Governs the GitHub-OIDC `sub` claim patterns in the trust policies that let CI assume AWS roles.
+# As in controls/delivery-model.yaml and controls/workflow-centralization.yaml, this catalog defines
+# POLICY ONLY: each control's `detector` key binds it to an implementation in
+# scripts/check-ci-identity.py, which may evolve WITHOUT any change to this catalog.
+#
+# WHY THIS CATALOG EXISTS. GitHub changed the default `sub` claim to embed immutable numeric owner and
+# repository ids — `repo:OWNER@OWNER-ID/REPO@REPO-ID:ref:...` instead of `repo:OWNER/REPO:ref:...`.
+# From 2026-07-15 a repository adopts that format when it is created, renamed or transferred. A trust
+# policy matching only the old spelling therefore stops admitting a repository at the moment somebody
+# renames it, with no change to the policy, no change to the workflow, and no signal anywhere until a
+# deploy fails.
+#
+# That has now happened FOUR times on this platform, each time discovered by an outage rather than a
+# check:
+#   1. voice-gateway was renamed and broke `inboxxhq-ci-build`. Fixed in inboxxhq-infra ece69ccb,
+#      by hand against the live policy first, Terraform afterwards.
+#   2. event-publisher was renamed and broke the repo-secrets Terraform state.
+#   3. `local.ci_caller_subs` never received ece69ccb's fix, so three roles — app-token read,
+#      app-token publish and slack-notify — refused five renamed repositories.
+#   4. `<env>-contract-mirror-publish` carried the same defect, live in three environments, and was
+#      found only because somebody went looking after (3).
+#
+# The first fix was applied to ONE role while three others with identical exposure sat in the same
+# directory. That is the shape of the problem: the defect is invisible in review because a policy that
+# admits every repository you currently have looks correct, and it only becomes wrong later, on an
+# event nobody associates with IAM.
+#
+# WHAT THIS CANNOT DO. These controls read Terraform SOURCE. They cannot tell you what is deployed,
+# and there is direct precedent for those differing — ece69ccb was applied with
+# `aws iam update-assume-role-policy` before its Terraform landed, so for a period the live policy was
+# correct and the source was not. Detecting that needs a job with AWS read access diffing each live
+# `AssumeRolePolicyDocument` against the rendered configuration, which is a separate control and is
+# deliberately not claimed here. A green result means the configuration is right, not that the account
+# is.
+#
+# Control IDs (CID-NNNN) are STABLE and permanent — see controls/delivery-model.yaml header for the
+# full ID/lifecycle discipline; it applies identically here.
+#
+# Policy SSOT:
+#   ADR-0051 - Artifact promotion; owns the CI-to-AWS trust boundary these roles implement.
+#   ADR-0110 - App-token broker; the read/publish split whose trust policies these controls read.
+
+version: 1
+domain: ci-identity
+policy_ssot:
+  - ADR-0051
+  - ADR-0110
+
+controls:
+  - id: CID-0001
+    title: Every GitHub-OIDC sub condition offers an immutable-identifier spelling
+    owner: platform-infrastructure
+    status: active
+    scope: terraform
+    severity: major
+    applies_when: always
+    policy: >-
+      Every `token.actions.githubusercontent.com:sub` condition MUST offer at least one pattern in
+      the immutable-identifier spelling — an owner segment carrying `@<owner-id>`. The classic
+      name-only spelling MAY remain alongside it, and generally should, because repositories created
+      before 2026-07-15 keep emitting it until they are renamed, transferred or opted in.
+    rationale: >-
+      A condition that lists only the classic spelling is correct until the exact moment a repository
+      is renamed, and then it silently refuses that repository. Nothing about the rename touches the
+      policy, so nothing suggests looking at it; the symptom is an AccessDenied in an unrelated repo's
+      CI, days later. This is the single assertion that would have caught all four recurrences on this
+      platform, including the two that were fixed by hand in the console before anyone wrote them
+      down.
+    remediation: >-
+      Add the immutable pattern next to the classic one, keeping the trailing subject identical:
+      `repo:${owner}@${owner_id}/...`. Pin the owner id from `gh api orgs/<login> -q .id` (or
+      `users/<login>` for a user account) and hold it in a variable, never inline it twice.
+    detector: sub_offers_immutable_spelling
+    refs: [ADR-0051]
+
+  - id: CID-0002
+    title: Classic and immutable spellings cover the same subjects
+    owner: platform-infrastructure
+    status: active
+    scope: terraform
+    severity: major
+    applies_when: always
+    policy: >-
+      Within one `sub` condition, the set of subject suffixes (everything after the repository
+      segment — `ref:refs/heads/main`, `pull_request`, `environment:production`) reachable under the
+      classic spelling MUST equal the set reachable under the immutable spelling.
+    rationale: >-
+      Two spellings of the same identity are two places to edit, and the second is easy to forget
+      because the first keeps working. A ref added to the classic list alone grants access today and
+      revokes it on the next rename; a ref added to the immutable list alone does the reverse. Either
+      way the policy means something different depending on a repository's rename history, which is
+      indefensible in a credential boundary and impossible to reason about during an incident.
+    remediation: >-
+      Generate both spellings from one list of subjects rather than writing the patterns out twice —
+      a `for` over the two owner forms is the shape used in `local.ci_caller_subs`. If they must be
+      written separately, add the subject to both in the same edit.
+    detector: spellings_cover_same_subjects
+    refs: [ADR-0051]
+
+  - id: CID-0003
+    title: The owner id is pinned, never wildcarded
+    owner: platform-infrastructure
+    status: active
+    scope: terraform
+    severity: critical
+    applies_when: always
+    policy: >-
+      In an immutable-spelling pattern the owner id MUST be a pinned value — literal digits, or an
+      interpolation of a variable holding them. `@*` in the owner segment is a finding.
+    rationale: >-
+      The numeric id is the entire security property of the immutable format. Organization and user
+      names are recyclable: delete one and somebody else may claim it, create matching repositories
+      and mint tokens whose subject satisfies a name-based policy. Ids cannot be reclaimed, so
+      pinning one means only that account can ever match. Wildcarding it keeps the new syntax and
+      throws away the reason for it, which is worse than the classic spelling because it reads as
+      hardened.
+    remediation: >-
+      Replace `@*` in the owner segment with the pinned id. Index the owner-id map rather than using
+      a lookup default, so an owner missing from the map fails the plan instead of silently emitting
+      a narrower policy than intended.
+    detector: owner_id_is_pinned
+    refs: [ADR-0051]
+
+  - id: CID-0004
+    title: A repository-scoped immutable pattern pins the id and wildcards the name
+    owner: platform-infrastructure
+    status: active
+    scope: terraform
+    severity: critical
+    applies_when: always
+    policy: >-
+      The repository segment of an immutable-spelling pattern MUST be either `*` (the role trusts the
+      owner's repositories collectively) or `*@<pinned-repo-id>` (the role trusts exactly one
+      repository). A literal repository name in that segment is a finding, whether the id beside it
+      is pinned, wildcarded or absent.
+    rationale: >-
+      This is the inversion that is easy to get backwards, and it has been got backwards here by
+      somebody working from the correct precedent commit. `<name>@*` looks like the immutable form and
+      defeats it twice over. A rename changes the name and keeps the id — that is the format's whole
+      purpose — so pinning the name breaks the role on precisely the event the immutable spelling
+      exists to survive, leaving a policy that is strictly more fragile than the classic one it was
+      added to protect. And wildcarding the id readmits the recycled-name attack described in
+      CID-0003. `<name>@<id>` is less bad, having no recycling hole, but still breaks on rename, and
+      the pinned id already identifies the repository uniquely, so the name adds nothing but a
+      failure mode. A pattern with a name and no id at all can never match an immutable claim, since
+      the ids are always present in that format and cannot be removed.
+    remediation: >-
+      Rewrite the repository segment as `*@${repo_id}` and hold the id in a variable sourced from
+      `gh api repos/<org>/<repo> -q .id`. Where the role genuinely trusts every repository the owner
+      has, use a bare `*` and let CID-0003's pinned owner id carry the boundary.
+    detector: repo_segment_pins_id_not_name
+    refs: [ADR-0051]

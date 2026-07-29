@@ -559,6 +559,45 @@ _Generated from `controls/workflow-centralization.yaml` by `scripts/check-workfl
 
 <!-- END workflow-centralization-controls -->
 
+## CI identity (`controls/ci-identity.yaml`)
+
+Guards the GitHub-OIDC `sub` patterns in the Terraform trust policies that let CI assume AWS roles.
+
+GitHub's immutable `sub` claim embeds numeric owner and repository ids —
+`repo:OWNER@OWNER-ID/REPO@REPO-ID:ref:...` — and a repository adopts that format when it is created,
+renamed or transferred. A policy matching only the older name-based spelling therefore stops admitting
+a repository at the moment somebody renames it, with no change to the policy and no signal until a
+deploy fails somewhere else. That has cost four separate outages here, each found by the outage rather
+than by a check, and the first fix was applied to one role while three others with identical exposure
+sat in the same directory.
+
+Two things these controls deliberately do not claim. They read Terraform **source**, so a green result
+says the configuration is right, not that the account is — and those have differed here, since one
+earlier fix was applied with `aws iam update-assume-role-policy` before its Terraform landed.
+Detecting that needs AWS read access and is a separate control. They also parse text rather than
+evaluating HCL, so a construct the checker cannot decompose is reported rather than skipped: a
+credential boundary it cannot read is not evidence that the boundary is sound.
+
+```bash
+./scripts/check-ci-identity.py path/to/inboxxhq-infra
+./scripts/check-ci-identity.py path/to/repo --format json
+```
+
+### Control catalog (policy-as-code)
+
+<!-- BEGIN ci-identity-controls (generated: scripts/check-ci-identity.py --write-docs) -->
+
+_Generated from `controls/ci-identity.yaml` by `scripts/check-ci-identity.py --write-docs` — do not edit by hand._
+
+| Control | Policy | Severity | Scope | Owner | Status |
+| ------- | ------ | -------- | ----- | ----- | ------ |
+| CID-0001 | Every `token.actions.githubusercontent.com:sub` condition MUST offer at least one pattern in the immutable-identifier spelling — an owner segment carrying `@<owner-id>`. The classic name-only spelling MAY remain alongside it, and generally should, because repositories created before 2026-07-15 keep emitting it until they are renamed, transferred or opted in. | major | terraform | platform-infrastructure | active |
+| CID-0002 | Within one `sub` condition, the set of subject suffixes (everything after the repository segment — `ref:refs/heads/main`, `pull_request`, `environment:production`) reachable under the classic spelling MUST equal the set reachable under the immutable spelling. | major | terraform | platform-infrastructure | active |
+| CID-0003 | In an immutable-spelling pattern the owner id MUST be a pinned value — literal digits, or an interpolation of a variable holding them. `@*` in the owner segment is a finding. | critical | terraform | platform-infrastructure | active |
+| CID-0004 | The repository segment of an immutable-spelling pattern MUST be either `*` (the role trusts the owner's repositories collectively) or `*@<pinned-repo-id>` (the role trusts exactly one repository). A literal repository name in that segment is a finding, whether the id beside it is pinned, wildcarded or absent. | critical | terraform | platform-infrastructure | active |
+
+<!-- END ci-identity-controls -->
+
 ## Versioning
 
 - Consumers pin the **major** tag `@v1`, which is a moving tag updated to the latest `v1.x.y`.
