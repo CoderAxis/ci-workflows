@@ -23,6 +23,11 @@ name: CI
 on:
   push: {}
   pull_request: {}
+  # Daily, for the release-drift job below. Drift here is caused by something NOT happening, so it
+  # is invisible to an event-driven trigger: no push means no run means nobody is told that the
+  # fleet has been running week-old central logic.
+  schedule:
+    - cron: "23 5 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -593,3 +598,63 @@ jobs:
           if bad: sys.exit(1)
           print(f"{len(cases)} floor-comparison cases hold")
           PY
+
+  # ── release drift (the major tag against main) ───────────────────────────────────────────────
+  # Consumers pin `@v1`, a MOVING major tag. So the fleet does not run what main says; it runs
+  # whatever v1 last pointed at, and the two are only equal because somebody moved the tag.
+  #
+  # Nothing checked that. On 2026-07-29 v1 was seven commits behind main, and one of those commits
+  # fixed a control that had been failing this repository's own CI for days. Every consumer kept
+  # running the broken version while main was green, because a fix that is merged but not released
+  # is indistinguishable from a fix that was never written.
+  #
+  # This is drift caused by something NOT happening, which is why it needs a check of its own: no
+  # commit introduces it, no diff shows it, and no event fires when it gets worse. It runs on the
+  # schedule above for that reason, and on main so that the gap is reported at the moment it opens.
+  #
+  # It fails rather than warns. An unreleased change to central logic is not a housekeeping item -
+  # it means the fleet's actual behaviour is undocumented, and the longer it holds the larger the
+  # release becomes and the less anyone can reason about what a rollback would restore.
+  release-drift:
+    name: Release drift - the v1 tag matches main
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Tags and full history: the comparison is between two refs, so a shallow clone cannot
+          # answer it and would silently report no drift.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: main must not be ahead of the released major tag
+        shell: bash
+        run: |
+          set -uo pipefail
+          if ! git rev-parse -q --verify refs/tags/v1 >/dev/null; then
+            echo "::error::no v1 tag exists, yet every consumer pins @v1. Cut v1.0.0 and point v1 at it."
+            exit 1
+          fi
+          v1="$(git rev-parse refs/tags/v1)"
+          main="$(git rev-parse refs/heads/main 2>/dev/null || git rev-parse HEAD)"
+          if [ "$v1" = "$main" ]; then
+            echo "v1 and main agree at ${main:0:7}; the fleet is running what main says."
+            exit 0
+          fi
+          behind="$(git rev-list --count "$v1..$main")"
+          ahead="$(git rev-list --count "$main..$v1")"
+          if [ "$ahead" -ne 0 ]; then
+            echo "::error::v1 (${v1:0:7}) is $ahead commit(s) NOT on main. The tag points at code that" \
+                 "main does not contain, so the fleet is running something unreviewable."
+            exit 1
+          fi
+          echo "::error::v1 (${v1:0:7}) is $behind commit(s) behind main (${main:0:7}). Consumers pin" \
+               "@v1, so none of these is in effect anywhere:"
+          git log --oneline "$v1..$main" | sed 's/^/  /'
+          latest="$(git tag -l 'v1.*' | sort -V | tail -1)"
+          echo ""
+          echo "Release them by cutting the next tag after ${latest:-v1.0.0} and moving the major tag:"
+          echo "  git tag -a vX.Y.Z <sha> -m '...' && git push origin vX.Y.Z"
+          echo "  git tag -f v1 <sha> && git push --force origin v1"
+          exit 1
