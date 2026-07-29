@@ -438,6 +438,43 @@ python3 scripts/check-api-contract.py path/to/service        # check
 python3 scripts/check-api-contract.py path/to/service --write-baseline   # freeze / ratchet down
 ```
 
+### The contract-vintage gap, and the two controls that close it
+
+The chain behind a published spec is `proto -> generated Go -> the service's OpenAPI components`.
+Two of those links were already gated and one was not, in a way no per-repo check could have found.
+
+`platform-contracts` CI gates the first link properly: `buf lint`, `buf breaking` against the base
+branch, and a codegen-drift job that re-runs the generator and diffs the committed `.pb.go` and
+TypeScript output. The third link is gated per repository by the byte-exact `--check` and by API-004.
+
+The gap was in between. **Every service projects its `common.v1` components from its own
+`platform-contracts-go` pin**, so a per-repo drift check can only ever prove internal consistency —
+two services on different pins both pass while publishing different envelopes. Measured on
+2026-07-29 the fleet held four concurrent pins (v0.1.0 in 13 repos, v0.2.0 in 3, v0.3.0 in 63,
+v0.4.0 in 1), and `platform-shared-go`, which *hosts* the projection, was three releases behind at
+v0.1.0. Concretely, `common.v1.ErrorCode` had 28 values under the engine's pin and 30 under the
+reference service's: the fleet disagreed about which error codes exist, with every gate green.
+
+Two paired controls close it, because either alone is escapable:
+
+- **`controls/module-floors.yaml`**, enforced by `check_module_pins.py`, sets the minimum
+  `platform-contracts-go` version. Below the floor is a warning on dev/staging and an error on
+  preprod/prod, so a stale contract vintage cannot reach a deployed environment while the fleet is
+  still being moved. A floor is a floor and not an exact pin because pinning 86 repos to one version
+  would make every module release a fleet-wide breaking change.
+- **API-007** compares the spec's `common.v1.*` components byte-for-byte against
+  `controls/common-v1-components.json`. That artifact is generated, never hand-written:
+
+```bash
+# in platform-shared-go, redirected into this repo
+go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components \
+  > ../github-actions/controls/common-v1-components.json
+```
+
+The floor makes a service *depend on* a current contract module; API-007 makes it actually *publish*
+current components. API-007 exits 2 rather than passing if the reference artifact is missing, since
+a version gate that reports success because it could not find its reference is worse than no gate.
+
 ### Control catalog (policy-as-code)
 
 Generated from `controls/api-contract.yaml`, drift-gated via `--verify-docs`:
@@ -453,6 +490,7 @@ _Generated from `controls/api-contract.yaml` by `scripts/check-api-contract.py -
 | API-003 | A test that validates live traffic against the OpenAPI document must import platform/openapicontract/conformance. Driving kin-openapi directly - constructing a gorillamux router or calling openapi3filter.ValidateResponse - is a hand-rolled copy of the shared suite and is prohibited. | major | source | http-api | platform-architecture | active |
 | API-004 | Every 2xx JSON response must reference common.v1.SuccessResponse and every 4xx/5xx JSON response must reference common.v1.ErrorResponse. The envelope is owned by proto/common/v1 and is not redefinable per service. | critical | spec | http-api | platform-architecture | active |
 | API-005 | Every operation carries a unique operationId, and the service commits docs/openapi.operationids.lock.json recording each id with the version that introduced it, its deprecation state, and its visibility. | major | spec | http-api | platform-architecture | active |
+| API-007 | Every common.v1.* component in the service's spec must be byte-identical to the projection in controls/common-v1-components.json, which is generated from the proto SSOT by commonv1policy and carries the platform-contracts-go version it was projected from. A service publishing no common.v1 components is governed by API-004 instead, not failed twice here. | major | spec | http-api | platform-architecture | active |
 | API-006 | cmd/server/swagger_main.go and any other swaggo annotation source is prohibited. The canonical generator reflects Go types through the shared contract engine. | minor | source | always | platform-architecture | active |
 
 <!-- END api-contract-controls -->

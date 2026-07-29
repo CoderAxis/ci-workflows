@@ -160,6 +160,37 @@ controls:
     detector: operation_ids_governed
     refs: [ADR-0048]
 
+  - id: API-007
+    title: Published common.v1 components match the current proto projection
+    owner: platform-architecture
+    scope: spec
+    status: active
+    severity: major
+    applies_when: http-api
+    policy: >-
+      Every common.v1.* component in the service's spec must be byte-identical to the
+      projection in controls/common-v1-components.json, which is generated from the proto SSOT
+      by commonv1policy and carries the platform-contracts-go version it was projected from.
+      A service publishing no common.v1 components is governed by API-004 instead, not failed
+      twice here.
+    rationale: >-
+      API-004 proves a response points AT the envelope; this proves the envelope it points at
+      is the CURRENT one, and the two are genuinely different guarantees. Each service projects
+      the components from its own platform-contracts-go pin, so a per-repo drift check can only
+      ever establish internal consistency. At the time this control was written the fleet held
+      four different pins - v0.1.0, v0.2.0, v0.3.0 and v0.4.0 - and platform-shared-go itself,
+      which hosts the projection, was pinned three releases behind at v0.1.0. The measured
+      consequence was that common.v1.ErrorCode carried 28 values under the engine's own pin and
+      30 under the reference service's, so two services could both be green while disagreeing
+      about which error codes exist.
+    remediation: >-
+      Bump the service's platform-contracts-go pin to at least the version named in the
+      reference artifact's `source.version`, then regenerate the spec. If the reference itself
+      is behind the proto, regenerate it from platform-shared-go with
+      `go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.
+    detector: canonical_components_current
+    refs: [RFC-0001, ADR-0048]
+
   - id: API-006
     title: No swaggo annotation source
     owner: platform-architecture
