@@ -1,0 +1,62 @@
+{
+  // Base markdown style policy for governed documentation (DOC-0021).
+  //
+  // Deliberately narrow. The default markdownlint ruleset optimises for a house style; this
+  // repository's documentation is long-form technical prose with wide tables, deep nesting and
+  // embedded YAML, and enabling the cosmetic rules would produce thousands of findings that say
+  // nothing about whether a document is correct. What is enabled here is the subset where a
+  // violation actually breaks rendering or hides content from a reader.
+  //
+  // Lives centrally per ADR-0081. A repo MAY tighten (add rules) but SHOULD NOT loosen.
+
+  "default": false,
+
+  // --- rules that affect whether the document RENDERS as intended --------------------------
+  // A fenced block with no closing fence swallows the rest of the page.
+  "MD040": true,   // fenced code blocks must declare a language (drives highlighting + cspell scoping)
+  "MD046": { "style": "fenced" },
+  "MD048": { "style": "backtick" },
+
+  // A document with two H1s, or one that starts at H3, renders a broken outline and produces
+  // duplicate/missing heading anchors - which is what DOC-0019 then reports as a dead link.
+  "MD025": { "level": 1, "front_matter_title": "" },
+  "MD001": true,   // heading levels increment by one
+  "MD003": { "style": "atx" },
+  "MD024": { "siblings_only": true },  // duplicate sibling headings collide as anchors
+
+  // Lists and tables that are malformed silently drop rows or flatten nesting.
+  "MD005": true,   // consistent list indentation
+  "MD056": true,   // table column count must be consistent
+  "MD031": true,   // fenced blocks surrounded by blank lines (else they render as text)
+  "MD032": true,   // lists surrounded by blank lines (else the first item joins the paragraph)
+  "MD022": true,   // headings surrounded by blank lines
+
+  // --- correctness of links and references --------------------------------------------------
+  "MD011": true,   // reversed link syntax (text)[url] - renders as literal text
+  "MD042": true,   // no empty links
+  "MD051": true,   // link fragments must match a heading in the same file
+
+  // --- hygiene that is cheap and unambiguous ------------------------------------------------
+  "MD009": { "br_spaces": 2 },  // trailing whitespace (2 is a deliberate line break)
+  // Hard tabs in prose or frontmatter are a defect (tabs make YAML frontmatter invalid), but
+  // inside a fenced block they are the quoted language's own convention: Go requires tabs and
+  // gofmt emits them, and Makefile recipes are tab-delimited by syntax. Auto-converting those to
+  // spaces would silently misquote the source the document is citing as evidence.
+  "MD010": { "code_blocks": false },
+  "MD047": true,   // file ends with a single newline
+
+  // --- deliberately DISABLED, with reasons --------------------------------------------------
+  // MD013 line length: architecture prose and wide comparison tables legitimately exceed any
+  //   column limit, and reflowing them makes diffs unreadable.
+  // MD033 inline HTML: the generated-content markers (<!-- BEGIN ... -->) and <details> blocks
+  //   used throughout the runbooks are intentional.
+  // MD034 bare URLs: acceptable inside tables where a link label adds nothing.
+  // MD036 emphasis as heading: used as intra-section labels in scorecards.
+  // MD041 first line must be top-level heading: every governed document opens with YAML
+  //   frontmatter, so this is structurally false here.
+  "MD013": false,
+  "MD033": false,
+  "MD034": false,
+  "MD036": false,
+  "MD041": false
+}

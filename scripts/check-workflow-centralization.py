@@ -78,7 +78,7 @@ def load_catalog(path: Path) -> tuple[dict, dict[str, dict]]:
         if not cid or c.get("severity") not in SEVERITY_ORDER:
             raise SystemExit(f"::error::{path}: control {cid!r} missing a valid id/severity")
         by_id[cid] = c
-    for required in ("WFC-001", "WFC-002", "WFC-004", "WFC-005"):
+    for required in ("WFC-0001", "WFC-0002", "WFC-0004", "WFC-0005"):
         if required not in by_id:
             raise SystemExit(f"::error::{path}: catalog is missing {required}, which has a detector")
     return doc, by_id
@@ -312,7 +312,7 @@ def check_repo(
     # The publishing repo cannot shadow its own publications: those files ARE the central
     # workflows, and they do not call themselves.
     is_central = root == central
-    c6cfg = controls["WFC-006"]
+    c6cfg = controls["WFC-0006"]
     allowed_lanes = set(c6cfg.get("allowed_lanes") or ())
     # A repo-scoped extension, declared centrally. Keyed on directory name rather than on anything
     # the repository itself asserts, so a repo cannot widen its own allowance.
@@ -327,16 +327,16 @@ def check_repo(
             continue
         calls = CENTRAL_CALL_RE.findall(text)
 
-        # WFC-001 — a file named like something we publish, that does not call it.
+        # WFC-0001 — a file named like something we publish, that does not call it.
         if not is_central and wf.name in published and not any(n == wf.name for n, _ in calls):
             shadows.append(str(wf.relative_to(root)))
 
-        # WFC-002 — every central call pins a major tag.
+        # WFC-0002 — every central call pins a major tag.
         for name, ref in calls:
             if not MAJOR_TAG_RE.match(ref):
                 bad_refs.append(f"{wf.relative_to(root)} -> {name}@{ref}")
 
-        # WFC-006 — only the permitted lanes, plus workflows this repo publishes as reusable.
+        # WFC-0006 — only the permitted lanes, plus workflows this repo publishes as reusable.
         # The exemption is checked against the file's own `on:` rather than against a list of
         # repository names, so it cannot be claimed by a repo that merely asserts it is special.
         #
@@ -348,7 +348,7 @@ def check_repo(
         elif wf.name not in allowed_lanes and not _is_reusable(text):
             extra_lanes.append(str(wf.relative_to(root)))
 
-        # WFC-004 — a caller grants what its callee declares. Requires the parsed document: the
+        # WFC-0004 — a caller grants what its callee declares. Requires the parsed document: the
         # relationship is between a job's effective permissions and another FILE's, so it is not
         # expressible as a pattern over this file's text.
         try:
@@ -358,7 +358,7 @@ def check_repo(
         if not isinstance(doc, dict):
             continue
 
-        # WFC-005 — a local bump. Matched on the trigger rather than the filename, because the
+        # WFC-0005 — a local bump. Matched on the trigger rather than the filename, because the
         # thing that makes a file a bump listener is that it subscribes to `<module>-released`;
         # renaming it changes nothing. The filename is checked too, since a bump driven only by
         # workflow_dispatch has no such trigger to match on.
@@ -394,10 +394,10 @@ def check_repo(
                     f"{wf.relative_to(root)}:{job_id} -> {callee.name} needs {', '.join(gaps)}"
                 )
 
-    c1 = controls["WFC-001"]
+    c1 = controls["WFC-0001"]
     findings.append(
         Finding(
-            "WFC-001",
+            "WFC-0001",
             c1["severity"],
             c1["title"],
             "fail" if shadows else "pass",
@@ -415,10 +415,10 @@ def check_repo(
         )
     )
 
-    c2 = controls["WFC-002"]
+    c2 = controls["WFC-0002"]
     findings.append(
         Finding(
-            "WFC-002",
+            "WFC-0002",
             c2["severity"],
             c2["title"],
             "fail" if bad_refs else "pass",
@@ -429,10 +429,10 @@ def check_repo(
         )
     )
 
-    c4 = controls["WFC-004"]
+    c4 = controls["WFC-0004"]
     findings.append(
         Finding(
-            "WFC-004",
+            "WFC-0004",
             c4["severity"],
             c4["title"],
             "fail" if perm_gaps else "pass",
@@ -443,10 +443,10 @@ def check_repo(
         )
     )
 
-    c5 = controls["WFC-005"]
+    c5 = controls["WFC-0005"]
     findings.append(
         Finding(
-            "WFC-005",
+            "WFC-0005",
             c5["severity"],
             c5["title"],
             "fail" if local_bumps else "pass",
@@ -461,10 +461,10 @@ def check_repo(
         )
     )
 
-    c6 = controls["WFC-006"]
+    c6 = controls["WFC-0006"]
     findings.append(
         Finding(
-            "WFC-006",
+            "WFC-0006",
             c6["severity"],
             c6["title"],
             "fail" if extra_lanes else "pass",

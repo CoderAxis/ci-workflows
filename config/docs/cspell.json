@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/streetsidesoftware/cspell/main/cspell.schema.json",
+  "version": "0.2",
+  "language": "en",
+  "//": "Base spellcheck policy for governed documentation (DOC-0022). Lives centrally per ADR-0081: shared logic and policy here, per-repository data in the repo. A repo MAY add cspell-words.txt at the docs_root it invokes the workflow with (not necessarily the repo root) for terms genuinely specific to it; the workflow then generates a config that imports this one and registers that file as a dictionary. Anything platform-wide belongs in dictionaries/platform.txt so one word is not whitelisted twelve times.",
+  "dictionaryDefinitions": [
+    {
+      "name": "platform",
+      "path": "./dictionaries/platform.txt",
+      "addWords": false,
+      "description": "Shared platform vocabulary: service names, protocols, infrastructure and provider terms."
+    }
+  ],
+  "dictionaries": ["platform", "en_US", "softwareTerms", "typescript", "go", "sql", "bash", "companies", "filetypes"],
+  "//ignorePaths": "Generated artifacts and vendored trees are not authored prose. `.core-docs` is a vendored copy of another namespace and is spellchecked in its own repository, not twice.",
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/.git/**",
+    "**/generated/**",
+    "**/.core-docs/**",
+    "**/*.generated.*",
+    "**/CHANGELOG.md"
+  ],
+  "//ignoreRegExpList": "Regions that are identifiers rather than prose. Spellchecking them produces noise no author can act on, and the identifiers themselves are already governed by DOC-0013..DOC-0018.",
+  "ignoreRegExpList": [
+    "/`[^`\\n]*`/",
+    "/```[\\s\\S]*?```/",
+    "/\\]\\([^)]*\\)/",
+    "/https?:\\/\\/\\S+/",
+    "/\\b[A-Z]{2,}-\\d{4}\\b/",
+    "/^---[\\s\\S]*?^---/m"
+  ],
+  "minWordLength": 4,
+  "allowCompoundWords": true
+}

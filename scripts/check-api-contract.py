@@ -41,7 +41,7 @@ SELF_REPO = Path(__file__).resolve().parents[1]
 DEFAULT_CONTROLS = SELF_REPO / "controls" / "api-contract.yaml"
 BASELINE_FILE = ".api-contract-baseline.json"
 
-# The proto projection API-007 compares against. Generated, never hand-written:
+# The proto projection API-0007 compares against. Generated, never hand-written:
 #   go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components
 # in platform-shared-go, redirected here. Its `source.version` records the
 # platform-contracts-go release it was projected from.
@@ -197,7 +197,7 @@ class ServiceRepo:
 # --- detectors: (ServiceRepo) -> Finding ---------------------------------------------------
 
 def no_runtime_docs(repo: ServiceRepo) -> Finding:
-    """API-001: the deployed runtime serves no documentation (ADR-0067)."""
+    """API-0001: the deployed runtime serves no documentation (ADR-0067)."""
     violations = []
     for rel, text in repo.runtime_sources():
         for pattern, why in RUNTIME_DOCS_MARKERS:
@@ -211,7 +211,7 @@ def no_runtime_docs(repo: ServiceRepo) -> Finding:
 
 
 def single_committed_spec(repo: ServiceRepo) -> Finding:
-    """API-002: exactly one committed REST spec, plus its declared generator inputs."""
+    """API-0002: exactly one committed REST spec, plus its declared generator inputs."""
     docs = repo.root / "docs"
     if not docs.is_dir():
         return Finding(True, "no docs/ directory", count=0)
@@ -227,7 +227,7 @@ def single_committed_spec(repo: ServiceRepo) -> Finding:
 
 
 def shared_conformance_suite(repo: ServiceRepo) -> Finding:
-    """API-003: conformance is imported from the shared engine, never re-implemented."""
+    """API-0003: conformance is imported from the shared engine, never re-implemented."""
     hand_rolled = []
     for rel, text in repo.test_sources():
         if KIN_OPENAPI_MARKERS.search(text) and SHARED_CONFORMANCE_IMPORT not in text:
@@ -241,7 +241,7 @@ def shared_conformance_suite(repo: ServiceRepo) -> Finding:
 
 
 def canonical_envelope(repo: ServiceRepo) -> Finding:
-    """API-004: every JSON response references the proto common.v1 envelope."""
+    """API-0004: every JSON response references the proto common.v1 envelope."""
     if repo.spec_error:
         return Finding(False, f"docs/openapi.json is unparseable: {repo.spec_error}", count=1)
     offenders = []
@@ -262,7 +262,7 @@ def canonical_envelope(repo: ServiceRepo) -> Finding:
 
 
 def operation_ids_governed(repo: ServiceRepo) -> Finding:
-    """API-005: every operation has a unique operationId, and the id set is locked."""
+    """API-0005: every operation has a unique operationId, and the id set is locked."""
     if repo.spec_error:
         return Finding(False, f"docs/openapi.json is unparseable: {repo.spec_error}", count=1)
     missing, seen, duplicates = [], set(), []
@@ -287,9 +287,9 @@ def operation_ids_governed(repo: ServiceRepo) -> Finding:
 
 
 def canonical_components_current(repo: ServiceRepo) -> Finding:
-    """API-007: the spec's common.v1 components match the proto projection exactly.
+    """API-0007: the spec's common.v1 components match the proto projection exactly.
 
-    API-004 proves a response POINTS AT the envelope. This proves the envelope it points
+    API-0004 proves a response POINTS AT the envelope. This proves the envelope it points
     at is the CURRENT one. The distinction matters because each service projects the
     components from its own platform-contracts-go pin, so two services can both pass every
     in-repo gate while publishing structurally different common.v1.Meta - each internally
@@ -303,9 +303,9 @@ def canonical_components_current(repo: ServiceRepo) -> Finding:
     schemas = ((repo.spec or {}).get("components") or {}).get("schemas") or {}
     published = {k: v for k, v in schemas.items() if k.startswith("common.v1.")}
     if not published:
-        # Pre-migration service on a bespoke envelope. API-004 already owns that failure;
+        # Pre-migration service on a bespoke envelope. API-0004 already owns that failure;
         # reporting it twice would double-count the same debt in two baselines.
-        return Finding(True, "no common.v1 components published; API-004 governs adoption", count=0)
+        return Finding(True, "no common.v1 components published; API-0004 governs adoption", count=0)
     problems = []
     for name in sorted(set(reference) | set(published)):
         want, got = reference.get(name), published.get(name)
@@ -322,7 +322,7 @@ def canonical_components_current(repo: ServiceRepo) -> Finding:
 
 
 def no_swaggo_annotation_source(repo: ServiceRepo) -> Finding:
-    """API-006: no swaggo annotation source; the engine generates from Go types."""
+    """API-0006: no swaggo annotation source; the engine generates from Go types."""
     offenders = [str(rel) for rel, _ in repo.go_sources if rel.name == "swagger_main.go"]
     if offenders:
         return Finding(False, f"{len(offenders)} swaggo annotation source file(s)",
@@ -551,7 +551,7 @@ def main(argv: list) -> int:
     # pass it never actually checked.
     if any(c.get("detector") == "canonical_components_current" for c in controls):
         if load_canonical_components()[0] is None:
-            print(f"::error::API-007 is enabled but {CANONICAL_COMPONENTS} is missing or "
+            print(f"::error::API-0007 is enabled but {CANONICAL_COMPONENTS} is missing or "
                   "unreadable. Check out this repository's controls/ directory, or regenerate "
                   "the artifact from platform-shared-go with `go run "
                   "./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.")

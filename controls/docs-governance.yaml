@@ -15,14 +15,14 @@
 #                   subject to single-client isolation.
 #   catalog       - evaluated only when the repo carries a catalog/ directory.
 #
-# Control IDs (DOC-NNN) are STABLE and permanent - never rename or recycle; retire a control
+# Control IDs (DOC-NNNN) are STABLE and permanent - never rename or recycle; retire a control
 # via `status: deprecated|superseded`. critical/major fail CI; minor is advisory (--fail-on).
 #
 # Policy SSOT (architecture is owned by the ADR; this catalog only enforces it):
 #   ADR-0081 - Centralized, reusable documentation-governance CI (coderaxis/core-docs)
 #
 # Deliberate non-duplication: catalog schema + generated-artifact DRIFT is domain-specific
-# (each repo's catalog models its own domain). DOC-010 declares the policy but DELEGATES
+# (each repo's catalog models its own domain). DOC-0010 declares the policy but DELEGATES
 # detection to the repo's own scripts/build_catalog.py --check, invoked by the reusable
 # workflow - never re-implemented here. "No duplicate logic" is a design requirement.
 
@@ -32,7 +32,7 @@ policy_ssot:
   - ADR-0081
 
 controls:
-  - id: DOC-001
+  - id: DOC-0001
     title: Every governed document has well-formed, complete frontmatter
     owner: platform-architecture
     scope: document
@@ -54,7 +54,7 @@ controls:
     detector: frontmatter_structure
     refs: [ADR-0081]
 
-  - id: DOC-002
+  - id: DOC-0002
     title: Document owner is a slug registered in the owner directory
     owner: platform-architecture
     scope: document
@@ -73,7 +73,7 @@ controls:
     detector: owner_registered
     refs: [ADR-0081]
 
-  - id: DOC-003
+  - id: DOC-0003
     title: Frontmatter uses only controlled vocabulary
     owner: platform-architecture
     scope: document
@@ -94,7 +94,7 @@ controls:
     detector: controlled_vocabulary
     refs: [ADR-0081]
 
-  - id: DOC-004
+  - id: DOC-0004
     title: related_* keys use canonical block-list style
     owner: platform-architecture
     scope: document
@@ -114,7 +114,7 @@ controls:
     detector: related_key_hygiene
     refs: [ADR-0081]
 
-  - id: DOC-005
+  - id: DOC-0005
     title: Declared related documents are linked in a Related Docs section
     owner: platform-architecture
     scope: document
@@ -132,7 +132,7 @@ controls:
     detector: related_docs_links
     refs: [ADR-0081]
 
-  - id: DOC-006
+  - id: DOC-0006
     title: ADR/RFC supersession chains are consistent and reciprocal
     owner: platform-architecture
     scope: decision-record
@@ -152,7 +152,7 @@ controls:
     detector: supersession_integrity
     refs: [ADR-0081]
 
-  - id: DOC-007
+  - id: DOC-0007
     title: Documents on a calendar review cycle are within their freshness SLA
     owner: platform-infrastructure
     scope: document
@@ -173,7 +173,7 @@ controls:
     detector: freshness_sla
     refs: [ADR-0081]
 
-  - id: DOC-008
+  - id: DOC-0008
     title: Single-client repositories do not name sibling clients
     owner: platform-security
     scope: repository
@@ -194,7 +194,7 @@ controls:
     detector: client_scope_isolation
     refs: [ADR-0081]
 
-  - id: DOC-009
+  - id: DOC-0009
     title: Every registered owner slug is actually used
     owner: platform-architecture
     scope: repository
@@ -212,7 +212,7 @@ controls:
     detector: owner_registry_usage
     refs: [ADR-0081]
 
-  - id: DOC-010
+  - id: DOC-0010
     title: Machine-readable catalog validates and its generated artifacts are current
     owner: platform-infrastructure
     scope: catalog
@@ -234,7 +234,7 @@ controls:
     detector: delegated_catalog_build
     refs: [ADR-0081]
 
-  - id: DOC-011
+  - id: DOC-0011
     title: Doc roots resolve, and document folders use plural names
     owner: platform-architecture
     scope: repository
@@ -257,7 +257,7 @@ controls:
     detector: doc_root_naming
     refs: [ADR-0081]
 
-  - id: DOC-012
+  - id: DOC-0012
     title: Source-code citations are verifiable - no line numbers, no dangling paths
     owner: platform-architecture
     scope: document
@@ -291,3 +291,368 @@ controls:
       re-verify it rather than only fixing the path.
     detector: source_path_citations
     refs: [ADR-0081]
+
+  - id: DOC-0013
+    title: Numbered documents are PREFIX-NNNN-kebab-slug.md, filed under their own type
+    owner: platform-architecture
+    scope: document
+    status: active
+    severity: critical
+    applies_when: always
+    policy: >-
+      A document in adrs/, rfcs/ or prds/ is named PREFIX-NNNN-kebab-case-slug.md, where PREFIX
+      agrees with the folder (ADR/RFC/PRD), NNNN is exactly four zero-padded digits, and the
+      slug is lowercase alphanumerics separated by single hyphens. Folder READMEs, generated
+      indexes such as ADR_INDEX.md, `_`-prefixed partials and templates/ are exempt. Supporting
+      prose in nested subfolders (rfcs/api/, rfcs/data/docker/) is exempt unless it claims a
+      PREFIX, so a malformed ADR-*.md is caught wherever it is filed.
+    rationale: >-
+      Every identifier on this platform is four digits, and until now nothing enforced it - the
+      127 documents that conform did so by habit. Two concrete defects were live behind that
+      habit. DECISION_ID_RE matched `(ADR|RFC)-\d+`, so a file named ADR-12-foo.md would have
+      entered the DOC-0006 supersession index under the id `ADR-12` - an id no citation would
+      ever spell - and its chains would have been silently unverifiable while the control
+      reported them as indexed. And no rule tied a prefix to its folder, so an RFC-*.md filed
+      under adrs/ would drop out of its own type's index with nothing reporting it. Padding is
+      not cosmetic: `ADR-12` and `ADR-0012` are different strings, so a grep for either misses
+      citations written as the other.
+    remediation: >-
+      Rename the file to PREFIX-NNNN-kebab-slug.md with four-digit padding and a lowercase
+      slug, and update inbound links. If the prefix disagrees with the folder, move the file to
+      the folder for its type rather than renaming the prefix - the type is a property of the
+      document, not of where it landed.
+    detector: document_id_convention
+    refs: [ADR-0081]
+
+  - id: DOC-0014
+    title: A document id is unique within its namespace
+    owner: platform-architecture
+    scope: repository
+    status: active
+    severity: critical
+    applies_when: always
+    policy: >-
+      No two documents in one documentation namespace may claim the same PREFIX-NNNN id.
+      Uniqueness is scoped to the namespace, never across namespaces: each namespace
+      (core-docs, and each client hub) allocates its own numbers, so core-docs ADR-0001 and a
+      client hub's ADR-0001 are both legitimate documents and are not duplicates.
+    rationale: >-
+      The id is the citation vocabulary - it is how one document names another, how scorecards
+      name decisions, and how the generated catalog keys its entries. Two files claiming one id
+      inside a namespace makes every citation of it ambiguous, and the catalog build silently
+      keeps whichever file the directory walk reached last, so the wrong document can be
+      published under the right id with nothing reporting a conflict. Cross-namespace collision
+      is deliberately not a violation and is already the live state: all eight of the
+      inboxxhq-platform-docs ADRs share numbers with a core-docs ADR. Those are disambiguated
+      at the citation site by a namespace qualifier, which is what makes per-namespace
+      allocation possible without cross-repo number coordination.
+    remediation: >-
+      Renumber one of the colliding documents to the next unallocated id in this namespace and
+      update its inbound links. Do not renumber to avoid a collision with another namespace -
+      that is not a collision, and qualifying the citation is the fix.
+    detector: duplicate_document_ids
+    refs: [ADR-0081]
+
+  - id: DOC-0015
+    title: Every cited document identifier resolves, in the namespace the citation names
+    owner: platform-architecture
+    # Introduced advisory while the client hub's ~42 bare citations of core-docs ADRs were
+    # qualified and two core-docs citations of client PRDs were reworded. Both namespaces now
+    # report zero, so it is enforcing: at fail-on=major this hard-fails, and there is no backlog
+    # for it to punish anyone for.
+    status: active
+    scope: document
+    severity: major
+    applies_when: always
+    policy: >-
+      A bare document citation (ADR-0069) MUST resolve to a document in the citing repository's
+      own namespace, or to an identifier declared in governance/RESERVED_IDS.md. A qualified
+      citation (Core ADR-0069) MUST resolve in the namespace its qualifier names. Frontmatter,
+      fenced code blocks and markdown link targets are not citations. A peer namespace not
+      present in the run is reported as skipped, never as passing.
+    rationale: >-
+      This control could not be written before ADR-0084, and that is the point. `ADR-0006` names
+      canonical event names in core-docs and per-org telephony credential storage in the client
+      hub, so a checker reading the bare string had no way to know which document was meant -
+      all eight of the hub's ADRs collide with a core-docs ADR by number. Disambiguation instead
+      rested on an accident: the hub holds only 8 ADRs, so a bare number above 0008 "must" be a
+      platform one. That heuristic expires the day the hub writes its ninth ADR, at which point
+      42 existing bare citations become ambiguous retroactively. DOC_HUB_STANDARD.md conceded the
+      gap in writing by listing cross-repo links as hand-authored.
+    remediation: >-
+      If the identifier belongs to another namespace, qualify it with that namespace's registered
+      qualifier from controls/doc-namespaces.yaml and link it on first mention. If it is a
+      deliberate forward reference to a document an RFC will produce on acceptance, declare it in
+      governance/RESERVED_IDS.md. Otherwise fix the typo or repoint the citation.
+    detector: document_reference_resolution
+    refs: [ADR-0084]
+
+  - id: DOC-0016
+    title: Cross-namespace citations use the registered qualifier and link on first mention
+    owner: platform-architecture
+    status: active
+    scope: document
+    severity: major
+    applies_when: always
+    policy: >-
+      A citation that leaves its namespace MUST use that namespace's registered qualifier from
+      controls/doc-namespaces.yaml, spelled exactly (Core, not core or core-docs), and its first
+      mention in each document MUST additionally be a resolvable markdown link. Later mentions in
+      the same document need only the qualifier.
+    rationale: >-
+      The qualifier is what carries meaning to a human reading one sentence, and it was spelled
+      three ways - `Core`, `core`, `core-docs` - on a minority of citations, so no parser could
+      rely on it and no reader could trust it. But a qualifier is only a claim about which
+      namespace is meant, and a claim can be wrong; the link on first mention is what makes the
+      claim verifiable against a real file. Requiring a link on every mention was rejected as it
+      makes prose unreadable and adds no checking power once a document has resolved an id once.
+    remediation: >-
+      Spell the qualifier exactly as registered, and make the first mention in the document a
+      markdown link to the target file. Follow the link form already used for cross-repo links in
+      that repository, since documentation hubs publish as standalone repositories where a
+      monorepo-relative path would not resolve.
+    detector: cross_namespace_citation_form
+    refs: [ADR-0084]
+
+  - id: DOC-0017
+    title: A numbered document declares an id matching its filename
+    owner: platform-architecture
+    status: active
+    scope: document
+    severity: critical
+    applies_when: always
+    policy: >-
+      A document in adrs/, rfcs/ or prds/ MUST declare `id: PREFIX-NNNN` in its frontmatter, and
+      that value MUST equal the identifier in its filename. The filename is authoritative when
+      the two disagree. Documents with no identifier - standards, runbooks, hubs, indexes,
+      templates - MUST NOT declare the key.
+    rationale: >-
+      The key is deliberately redundant with the filename, and the redundancy is the control.
+      `id:` is what the generated catalog and the documentation site key their entries on rather
+      than re-deriving identifiers by parsing paths, so a stale value publishes the right
+      document under the wrong identifier - and every consumer of the catalog then disagrees with
+      the repository. The failure mode is specific and common: duplicate an existing ADR to start
+      the next one, rename the file, and the inherited `id:` still names the document it was
+      copied from. Nothing about the result looks wrong on inspection.
+    remediation: >-
+      Set `id:` to the identifier in the filename. If the frontmatter value is the one you
+      intended, the file is misnamed - rename it (and fix inbound links) rather than editing the
+      key, because the filename is what every citation and link resolves against.
+    detector: document_id_frontmatter
+    refs: [ADR-0084]
+
+  - id: DOC-0018
+    title: A new document takes the next unallocated identifier in its namespace
+    owner: platform-architecture
+    status: active
+    scope: repository
+    severity: major
+    applies_when: always
+    policy: >-
+      Every identifier below the highest allocated one in a namespace MUST be either an existing
+      document or an entry in governance/RESERVED_IDS.md (reserved_ids or known_gaps). Identifiers
+      at or above 9000 are a reserved band for transitional documents and are outside the
+      sequence. Allocation is per namespace; namespaces never coordinate numbers.
+    rationale: >-
+      Expressed as an allocation rule rather than a retroactive audit, because core-docs has a
+      real historical gap at ADR-0047 and a contiguity rule would fail every unrelated
+      documentation change until someone back-filled a decision that was never made. A gate that
+      cannot go green trains people to ignore it. What this catches instead is the only thing a
+      new document can get wrong: skipping ahead. Taking ADR-0090 while ADR-0085 is free is
+      invisible the moment it happens and is what makes two people's concurrent ADRs collide
+      later. The reserved register keeps the deliberate cases - RFC-0031 pre-naming its resulting
+      ADR-0068 - passing without weakening the rule.
+    remediation: >-
+      Renumber the document to the lowest free identifier in its namespace and update inbound
+      links. If the gap is deliberate, record it in governance/RESERVED_IDS.md - `reserved_ids`
+      for an identifier that will be written, `known_gaps` for one that never will.
+    detector: sequential_id_allocation
+    refs: [ADR-0084]
+
+  - id: DOC-0019
+    title: Internal links resolve, anchors included
+    owner: platform-architecture
+    # Advisory while the pre-existing backlog is worked down: at introduction core-docs had 18
+    # dangling links and 5 unresolvable anchors, mostly pointing at files deleted in the
+    # architecture reset (ALL_33_SEED_AUDIT.md, _architecture-reset/). platform-docs was already
+    # at zero across 1020 links. Raise to major once core-docs reaches zero.
+    status: active
+    scope: document
+    severity: minor
+    applies_when: always
+    policy: >-
+      A relative markdown link in a governed document MUST resolve to a file that exists, and if
+      it carries an anchor, that anchor MUST match a heading in the target document. External URLs
+      and template placeholders containing '{{' are out of scope.
+    rationale: >-
+      A link to a renamed section is the most common form of documentation rot and the least
+      visible: the link still works, it just silently lands at the top of the page, so a reviewer
+      clicking it sees a plausible document and moves on. Dangling file links are the residue of
+      deletions - the architecture reset removed files that six runbooks and two ADRs still point
+      at. External URLs are deliberately excluded: they fail for reasons a PR author cannot fix -
+      rate limits, transient outages, CI egress blocks - and a gate that goes red for unrelated
+      reasons is one people learn to re-run rather than read.
+    remediation: >-
+      Repoint the link at the path that exists today, or remove the claim it supports if the
+      target was deleted rather than moved. For an anchor, match the target's current heading
+      text; if the heading was renamed, the surrounding claim may have changed too, so re-verify
+      it rather than only fixing the anchor.
+    detector: internal_link_resolution
+    refs: [ADR-0081]
+
+  - id: DOC-0020
+    title: Mermaid diagrams compile
+    owner: platform-architecture
+    # Advisory at introduction (workflow input markdown_quality=advisory). Raise severity and set
+    # markdown_quality=enforce once a repo is at zero.
+    status: active
+    scope: document
+    severity: minor
+    applies_when: always
+    policy: >-
+      Every ```mermaid block in a governed document MUST compile with @mermaid-js/mermaid-cli.
+      Executed by the docs-governance reusable workflow, not by the Python checker.
+    rationale: >-
+      A mermaid block that does not parse renders as an error box or as raw text on the
+      documentation site, and nothing in review catches it - the diff shows plausible diagram
+      source, and the author is usually the only person who ever looked at the rendered page. The
+      architecture and messaging documents carry the flow diagrams people actually navigate by, so
+      a broken one removes the part of the document that was doing the explaining.
+    remediation: >-
+      Run the diagram through mermaid locally (or the Mermaid Live Editor) and fix the syntax the
+      CLI reports. Do not delete the diagram to make the check pass.
+    detector: delegated_mermaid_render
+    refs: [ADR-0081]
+
+  - id: DOC-0021
+    title: Markdown structure lints clean
+    owner: platform-architecture
+    # Advisory at introduction. Ruleset is deliberately narrow - only rules where a violation
+    # breaks rendering or hides content; see config/docs/.markdownlint.jsonc for what is
+    # disabled and why.
+    status: active
+    scope: document
+    severity: minor
+    applies_when: always
+    policy: >-
+      Governed documents MUST pass the shared markdownlint ruleset at
+      config/docs/.markdownlint.jsonc. A repository MAY add rules, and SHOULD NOT remove them.
+      Executed by the docs-governance reusable workflow.
+    rationale: >-
+      Scoped to structural correctness rather than house style on purpose. An unclosed fence
+      swallows the rest of the page; a duplicate sibling heading collides as an anchor and turns
+      a working link into one that silently lands somewhere else; a list without a preceding blank
+      line joins the paragraph above it and disappears as a list. Each of those changes what a
+      reader sees while looking correct in the diff. Cosmetic rules - line length, inline HTML,
+      emphasis-as-heading - are disabled, because thousands of findings that say nothing about
+      correctness are how a lint gate gets ignored.
+    remediation: >-
+      Fix the reported rule. `markdownlint-cli2 --fix` handles most of the whitespace and blank-line
+      rules mechanically; heading-structure and table-shape findings need a real edit.
+    detector: delegated_markdown_lint
+    refs: [ADR-0081]
+
+  - id: DOC-0022
+    title: Prose passes the shared spellcheck
+    owner: platform-architecture
+    # Advisory at introduction: a spellcheck over ~670 pre-existing documents always starts with a
+    # backlog, and the dictionary needs a few rounds of real use before it is trustworthy.
+    status: active
+    scope: document
+    severity: minor
+    applies_when: always
+    policy: >-
+      Governed prose MUST pass cspell using the shared configuration at config/docs/cspell.json
+      and the shared vocabulary at config/docs/dictionaries/platform.txt. Platform-wide terms
+      belong in the shared dictionary; a repository MAY add cspell-words.txt for terms specific to
+      it. Code spans, fenced blocks, link targets, frontmatter and document identifiers are
+      excluded. Executed by the docs-governance reusable workflow.
+    rationale: >-
+      The value of a spellcheck is entirely in what it refuses, which is why the dictionary is
+      shared rather than per-file: a repository that whitelists a term locally has fixed nothing
+      for the eleven other places the same word is about to be misspelled, and inline ignore
+      comments accumulate until the check means nothing. Identifiers and code are excluded because
+      they are not prose and are already governed by DOC-0013 through DOC-0018 - spellchecking
+      them produces noise no author can act on.
+    remediation: >-
+      Fix the spelling. If the word is a legitimate platform term, add it to
+      config/docs/dictionaries/platform.txt so every repository benefits; add it to a repo-local
+      cspell-words.txt only if it is genuinely specific to that repository.
+    detector: delegated_spellcheck
+    refs: [ADR-0081]
+
+  - id: DOC-0023
+    title: Decision records declare a domain from the namespace's own vocabulary
+    owner: platform-architecture
+    status: active
+    scope: document
+    severity: major
+    applies_when: always
+    policy: >-
+      Every ADR MUST declare a `domain` in frontmatter, and any document that declares one MUST
+      draw the value from the vocabulary its namespace publishes as `domain_vocabulary` in
+      docs-governance.yaml. The vocabulary is namespace-scoped by design: the platform namespace
+      groups decisions by architectural concern (api, messaging, security) and a client hub groups
+      them by business domain (conversations, eventing, encryption). A value naming a component or
+      a service rather than a concern MUST NOT be added. RFCs and PRDs are not required to declare
+      a domain - they carry tier/capability instead - but are validated when they do.
+    rationale: >-
+      A by-domain view of the decisions is how anyone answers "what has already been decided about
+      billing", and the field was free text, so nothing guaranteed it could answer. Two distinct
+      failures had already accumulated behind that. Twenty-two hub ADRs declared no domain at all
+      and were absent from every grouped view. Worse, the ones that did declare a domain had drifted
+      onto the *other* namespace's vocabulary - `security` where that hub's taxonomy says
+      `encryption` - which is invisible rather than merely incomplete: the field looks populated,
+      the filter silently matches nothing, and no reviewer notices. A closed, namespace-scoped list
+      is the only form of this check that catches the second case.
+    remediation: >-
+      Set `domain` to a value from your namespace's `domain_vocabulary`. If no existing value fits,
+      add one to docs-governance.yaml in the same change - and if your namespace derives its
+      vocabulary from a domains/ tree, add the directory and its README first, so the value a reader
+      follows leads somewhere.
+    detector: decision_domain_vocabulary
+    refs: [ADR-0084]
+
+  - id: DOC-0024
+    title: Platform-concern decisions declare the core decisions that bind them
+    owner: platform-architecture
+    status: active
+    scope: document
+    severity: major
+    applies_when: always
+    policy: >-
+      A namespace MAY declare `platform_concern_domains` - a closed subset of its domain vocabulary
+      for decisions that provision or constrain the substrate rather than realizing a business
+      bounded context (cloud account topology, infrastructure repository layout, wire transport).
+      An ADR tagged with one of those values MUST declare `core_authority`: the platform-namespace
+      decision ids that bind it, or an explicit empty list recording that none does. Declared ids
+      MUST resolve in the platform namespace when it is present in the run. The key names the
+      namespace, so ids are written bare and do not collide with the local sequence.
+    rationale: >-
+      A category with no bounded context behind it is where decisions get filed when nobody is sure
+      where they belong, and a client-hub decision about a platform-governed concern is exactly the
+      kind that drifts from the platform namespace. Both failures were already present when this
+      control was written. One hub ADR instructed teams to build a runtime HTTP fallback that the
+      core contract ADR explicitly prohibits, and cited a Go source comment as the authority for
+      platform transport policy. Another restated core secret-management policy verbatim while
+      citing nothing, so nothing tied the restatement to the decision it was paraphrasing - and a
+      restatement that drifts from its source is worse than no restatement, because both look
+      authoritative. Requiring the tier to name its upstream turns "we think core governs this"
+      into a checkable claim. The empty list is load-bearing rather than a loophole: it asserts on
+      the record that no core decision governs the area, which a reviewer can contest, where
+      silence is indistinguishable from an oversight.
+
+      This control implements the machine-checkable half of the precedence rule: Core owns platform
+      architecture, product hubs own product architecture, and a hub may specialize a Core decision
+      but never contradict or override one. Whether two documents actually agree is a judgement no
+      checker can make. What it can do is guarantee the reviewer is told which Core documents to
+      compare against, which turns "a product ADR conflicting with Core is a documentation defect"
+      from a principle nobody can apply into a test with a determinate answer.
+    remediation: >-
+      Add `core_authority` to the ADR's frontmatter listing the platform-namespace ADR/RFC ids that
+      govern the decision, and cite them in the body with the registered qualifier so a reader can
+      follow them (DOC-0016). If the area genuinely has no platform-level owner, declare
+      `core_authority: []` and say why in a comment - and consider whether the decision instead
+      belongs in the platform namespace, where every other namespace could inherit it.
+    detector: platform_concern_core_authority
+    refs: [ADR-0084]

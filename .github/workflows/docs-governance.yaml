@@ -13,7 +13,7 @@ name: Documentation Governance
 # related-docs links / ADR-RFC supersession / freshness SLA / client-scope isolation) is
 # enforced by the pinned SSOT checker scripts/check-docs-governance.py against the caller.
 # Domain-specific catalog schema + generated-artifact drift is DELEGATED to the repo's own
-# scripts/build_catalog.py --check (DOC-010), never duplicated centrally.
+# scripts/build_catalog.py --check (DOC-0010), never duplicated centrally.
 #
 # The checker + control catalog live ONCE here (SSOT) — docs repos vendor nothing. A
 # machine-readable JSON report is uploaded as an artifact for dashboards / compliance,
@@ -46,9 +46,30 @@ on:
         default: v1
       source_roots:
         description: >-
-          Newline-separated checkouts whose source paths the docs may cite (DOC-012). In a
+          Newline-separated checkouts whose source paths the docs may cite (DOC-0012). In a
           docs-in-monorepo layout this is usually '.'. Citations into trees not listed here
           are skipped, never failed, so leaving this empty is safe.
+        required: false
+        type: string
+        default: ""
+      markdown_quality:
+        description: >-
+          Mode for the Node-based markdown quality checks (DOC-0020 mermaid, DOC-0021
+          markdownlint, DOC-0022 cspell): 'advisory' reports findings without failing the job,
+          'enforce' fails on them, 'off' skips the steps and the Node setup entirely. Defaults to
+          advisory while the introduction backlog burns down.
+        required: false
+        type: string
+        default: advisory
+      peer_roots:
+        description: >-
+          Newline-separated NAME=DIR pairs locating peer documentation namespaces whose
+          identifiers this repo cites (DOC-0015/DOC-0016), where NAME matches an entry in
+          controls/doc-namespaces.yaml — e.g. 'core-docs=.core-docs'. Citations into namespaces
+          not listed here are skipped, never passed, so an omission shows up as a skip rather
+          than as false confidence. A client hub that vendors a platform checkout should point at
+          it, or better, check out a fresh one and point here, so a stale vendored copy cannot
+          mask a citation that no longer resolves.
         required: false
         type: string
         default: ""
@@ -83,11 +104,15 @@ jobs:
       - name: Enforce documentation governance (ADR-0081)
         env:
           SOURCE_ROOTS: ${{ inputs.source_roots }}
+          PEER_ROOTS: ${{ inputs.peer_roots }}
         run: |
           args=()
           while IFS= read -r root; do
             [[ -n "$root" ]] && args+=(--source-root "$root")
           done <<< "$SOURCE_ROOTS"
+          while IFS= read -r peer; do
+            [[ -n "$peer" ]] && args+=(--peer-root "$peer")
+          done <<< "$PEER_ROOTS"
           python3 .docs-governance-tools/scripts/check-docs-governance.py \
             "${{ inputs.docs_root }}" \
             --controls .docs-governance-tools/controls/docs-governance.yaml \
@@ -96,7 +121,7 @@ jobs:
             "${args[@]}" \
             --report docs-governance-report.json
 
-      - name: Validate & drift-check the machine-readable catalog (DOC-010, delegated to the repo domain builder)
+      - name: Validate & drift-check the machine-readable catalog (DOC-0010, delegated to the repo domain builder)
         shell: bash
         run: |
           builder="${{ inputs.docs_root }}/scripts/build_catalog.py"
@@ -104,8 +129,85 @@ jobs:
             echo "Running repo catalog builder in --check mode: $builder"
             python3 "$builder" --check --root "${{ inputs.docs_root }}"
           else
-            echo "No scripts/build_catalog.py under '${{ inputs.docs_root }}' — DOC-010 not applicable (skipped)."
+            echo "No scripts/build_catalog.py under '${{ inputs.docs_root }}' — DOC-0010 not applicable (skipped)."
           fi
+
+      # --- markdown quality (DOC-0020..DOC-0022) ------------------------------------------------
+      # ADVISORY at introduction: each step reports findings and annotates the PR, but does not
+      # fail the job. They are wired now so the backlog is visible and burns down, on the same
+      # basis as DOC-0012 and DOC-0019 - landing three new hard gates across ~670 documents on day
+      # one would fail every unrelated docs PR, which is how a gate becomes something people
+      # re-run instead of read. Flip `markdown_quality_enforced` to true per repo once it is at
+      # zero, and raise the control severities to match.
+      - name: Set up Node (markdown quality tooling)
+        if: inputs.markdown_quality != 'off'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Validate mermaid diagrams compile (DOC-0020)
+        if: inputs.markdown_quality != 'off'
+        continue-on-error: ${{ inputs.markdown_quality != 'enforce' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          root="${{ inputs.docs_root }}"
+          mapfile -t files < <(grep -rl --include='*.md' '```mermaid' "$root" \
+            --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.core-docs || true)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No mermaid diagrams found under '$root' — DOC-0020 not applicable."; exit 0
+          fi
+          echo "Validating mermaid in ${#files[@]} file(s)."
+          # mermaid-cli drives headless Chromium; CI needs --no-sandbox.
+          printf '{"args":["--no-sandbox","--disable-setuid-sandbox"]}' > /tmp/puppeteer.json
+          rc=0
+          for f in "${files[@]}"; do
+            if ! npx -y @mermaid-js/mermaid-cli@11 -p /tmp/puppeteer.json \
+                 -i "$f" -o "/tmp/mermaid-out.md" >/tmp/mmdc.log 2>&1; then
+              echo "::warning file=$f::mermaid diagram failed to compile"
+              sed 's/^/    /' /tmp/mmdc.log | tail -20
+              rc=1
+            fi
+          done
+          exit $rc
+
+      - name: Lint markdown structure (DOC-0021)
+        if: inputs.markdown_quality != 'off'
+        continue-on-error: ${{ inputs.markdown_quality != 'enforce' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Templates are excluded on the same basis the Python checker's is_template_doc uses:
+          # a template legitimately carries its own H1 plus the placeholder H1 of the document it
+          # generates, so MD025 (single-title) is structurally false for them.
+          npx -y markdownlint-cli2@0.14 \
+            --config .docs-governance-tools/config/docs/.markdownlint.jsonc \
+            "${{ inputs.docs_root }}/**/*.md" \
+            "!**/node_modules/**" "!**/.core-docs/**" "!**/generated/**" \
+            "!**/templates/**" "!**/_*.md" "!**/*[-_]template.md" "!**/*[-_]TEMPLATE.md"
+
+      - name: Spellcheck prose (DOC-0022)
+        if: inputs.markdown_quality != 'off'
+        continue-on-error: ${{ inputs.markdown_quality != 'enforce' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          shared="$PWD/.docs-governance-tools/config/docs/cspell.json"
+          local_words="$PWD/${{ inputs.docs_root }}/cspell-words.txt"
+          config="$shared"
+          # A repo may extend the shared dictionary with terms specific to it. cspell has no CLI
+          # flag that loads a word list, so the extension is expressed as a generated config that
+          # imports the shared policy and registers the local file as one more dictionary. Paths
+          # are absolute because a dictionary path in a cspell config resolves relative to the
+          # config that declares it, and this one is written outside the repo tree.
+          if [ -f "$local_words" ]; then
+            echo "Including repo-local dictionary: $local_words"
+            config=/tmp/cspell-with-local-words.json
+            printf '{"version":"0.2","import":["%s"],"dictionaryDefinitions":[{"name":"repo-local","path":"%s","addWords":false}],"dictionaries":["repo-local"]}' \
+              "$shared" "$local_words" > "$config"
+          fi
+          npx -y cspell@8 lint --config "$config" --no-progress --relative \
+            "${{ inputs.docs_root }}/**/*.md"
 
       - name: Upload docs-governance report (machine-readable)
         if: always()

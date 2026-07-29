@@ -1,4 +1,4 @@
-# WFC-001 violation fixture: shares its filename with a published reusable workflow but implements
+# WFC-0001 violation fixture: shares its filename with a published reusable workflow but implements
 # the steps itself instead of calling it. This is the exact drift the control exists to catch — the
 # repo keeps passing while the central version moves on, so it silently runs an older policy than
 # the fleet believes it runs.

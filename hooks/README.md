@@ -76,6 +76,6 @@ The guard lost its `python3` dependency and about 70 lines along the way.
 
 `ihq validate` reads the committed spec, so the controls in `controls/api-contract.yaml` that are
 about Go source or cross-repo state cannot be checked from a spec alone: no runtime docs surface
-(API-001), conformance imported from the shared suite (API-003), and the `common.v1` components
-matching the current proto projection (API-007). API-002 (one committed spec) and API-006 (no
-swaggo annotations) would be cheap to add — API-006 partly exists already as `no-legacy-swagger`.
+(API-0001), conformance imported from the shared suite (API-0003), and the `common.v1` components
+matching the current proto projection (API-0007). API-0002 (one committed spec) and API-0006 (no
+swaggo annotations) would be cheap to add — API-0006 partly exists already as `no-legacy-swagger`.

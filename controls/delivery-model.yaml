@@ -8,7 +8,7 @@
 # WITHOUT any change to this catalog. This mirrors how enterprise governance systems
 # separate the control CATALOG from the control MECHANISM.
 #
-# Control IDs (DM-NNN) are STABLE and permanent. Never rename or recycle an ID: to
+# Control IDs (DM-NNNN) are STABLE and permanent. Never rename or recycle an ID: to
 # retire a control set its `status` to deprecated/superseded; to change intent, add a
 # new ID and supersede the old one.
 #
@@ -30,7 +30,7 @@ policy_ssot:
   - RFC-0020
 
 controls:
-  - id: DM-001
+  - id: DM-0001
     title: CI never builds or publishes a container artifact
     owner: platform-infrastructure
     scope: reusable-workflow
@@ -48,7 +48,7 @@ controls:
     detector: no_local_artifact_publish
     refs: [ADR-0051]
 
-  - id: DM-002
+  - id: DM-0002
     title: Exactly one canonical build; no per-environment or per-variant builds
     owner: architecture-review-board
     scope: reusable-workflow
@@ -66,7 +66,7 @@ controls:
     detector: single_canonical_build
     refs: [ADR-0051]
 
-  - id: DM-003
+  - id: DM-0003
     title: Only the dev overlay is written; qualified envs are promoted, never pinned here
     owner: platform-infrastructure
     scope: reusable-workflow
@@ -83,7 +83,7 @@ controls:
     detector: no_qualified_env_write
     refs: [ADR-0051]
 
-  - id: DM-004
+  - id: DM-0004
     title: CI assumes only the ci-build orchestrator identity
     owner: security
     scope: reusable-workflow
@@ -101,7 +101,7 @@ controls:
     detector: orchestrator_role_only
     refs: [ADR-0051]
 
-  - id: DM-005
+  - id: DM-0005
     title: No docs / build-variant tag is injected into the canonical build
     owner: architecture-review-board
     scope: reusable-workflow
@@ -121,7 +121,7 @@ controls:
     detector: no_docs_build_variant
     refs: [ADR-0051]
 
-  - id: DM-006
+  - id: DM-0006
     title: Least-privilege permissions
     owner: security
     scope: reusable-workflow
@@ -138,7 +138,7 @@ controls:
     detector: least_privilege_permissions
     refs: [ADR-0051]
 
-  - id: DM-007
+  - id: DM-0007
     title: The canonical artifact is built from main (trunk-based)
     owner: platform-infrastructure
     scope: reusable-workflow
@@ -152,7 +152,7 @@ controls:
     detector: build_from_main_guard
     refs: [ADR-0051]
 
-  - id: DM-008
+  - id: DM-0008
     title: OIDC credentials are configured (no long-lived keys)
     owner: security
     scope: reusable-workflow
@@ -167,7 +167,7 @@ controls:
     detector: oidc_configured
     refs: [ADR-0051]
 
-  - id: DM-009
+  - id: DM-0009
     title: The immutable digest is pinned into GitOps
     owner: platform-infrastructure
     scope: reusable-workflow
@@ -184,7 +184,7 @@ controls:
     detector: gitops_digest_pin_present
     refs: [ADR-0051]
 
-  - id: DM-010
+  - id: DM-0010
     title: contract_version output is declared
     owner: platform-infrastructure
     scope: reusable-workflow
@@ -198,7 +198,7 @@ controls:
     detector: output_contract_version
     refs: [ADR-0051]
 
-  - id: DM-011
+  - id: DM-0011
     title: image_digest output is declared
     owner: platform-infrastructure
     scope: reusable-workflow
@@ -210,7 +210,7 @@ controls:
     detector: output_image_digest
     refs: [ADR-0051]
 
-  - id: DM-012
+  - id: DM-0012
     title: The workflow cites its governing policy SSOT
     owner: architecture-review-board
     scope: reusable-workflow
@@ -222,7 +222,7 @@ controls:
     detector: cites_policy_ssot
     refs: [ADR-0051, RFC-0020]
 
-  - id: DM-013
+  - id: DM-0013
     title: Every declared build input is resolved, reported, and left to the builder to key on
     owner: platform-infrastructure
     scope: reusable-workflow

@@ -460,7 +460,7 @@ jobs:
     permissions:
       contents: read
       # The called workflow mints a module-read token from its own OIDC identity, and a called
-      # job is capped by what the caller grants. Enforced by WFC-004, which caught the omission
+      # job is capped by what the caller grants. Enforced by WFC-0004, which caught the omission
       # here as a startup_failure with no logs.
       id-token: write
     uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yaml@v1
@@ -566,7 +566,7 @@ jobs:
             exit 1
           fi
 
-  # ── workflow lanes (WFC-006) ────────────────────────────────────────────────────────────────
+  # ── workflow lanes (WFC-0006) ────────────────────────────────────────────────────────────────
   # Absorbed from the per-repo pipeline-policy.yml, which asserted that thirteen named workflow
   # files EXISTED in the repository - quality-check.yml, security-scan.yml, codeql.yml,
   # gitleaks.yml, actionlint.yaml, deploy.yaml, post-deploy.yaml, preview-env.yml and others.
@@ -1137,7 +1137,7 @@ jobs:
   #
   # Three things were wrong with the per-repo form beyond the duplication:
   #   - every copy pinned `@main`, so the contract gate changed under all 38 services with no
-  #     version bump. WFC-002 did not catch it because it only checks refs into
+  #     version bump. WFC-0002 did not catch it because it only checks refs into
   #     coderaxis/github-actions, and this workflow was published by another org.
   #   - every copy passed coderaxis-app-id, which the OIDC migration deleted.
   #   - service-name was hand-written in each file, so a rename silently pointed a service at
@@ -1148,7 +1148,7 @@ jobs:
   # wrong extension, no `v1` tag in that repository, and a private cross-org source GitHub does not
   # accept at all. Because the reusable-workflow graph is resolved at LOAD time, before any `if:`
   # runs, it rejected central CI for the whole fleet - not only the services this job applies to.
-  # That is why the reference lives here now rather than being repaired in place: WFC-002 cannot
+  # That is why the reference lives here now rather than being repaired in place: WFC-0002 cannot
   # see refs into other organisations, so nothing would have caught it happening again.
   #
   # What this gate proves is unchanged: structural validation plus the caller's contract tests. The
