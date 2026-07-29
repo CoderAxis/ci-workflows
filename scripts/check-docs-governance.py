@@ -109,6 +109,15 @@ RELATED_LIST_KEYS = ("related_services", "related_rfcs", "related_adrs")
 LEGACY_RELATED_KEYS = {"related_rfc": "related_rfcs", "related_adr": "related_adrs"}
 MAX_DETAILS = 50  # cap per-control violation lines printed, to avoid flooding CI logs
 
+# Source-code citations in prose, for DOC-012. Matches a backticked token that names a
+# file with a code extension, optionally with a `:NNN` line suffix. Deliberately narrow:
+# it must carry a recognised extension, so prose like `Policy` or `make openapi-contract`
+# is never treated as a path.
+CODE_EXTENSIONS = ("go", "py", "ts", "tsx", "js", "sh", "proto", "sql", "tf", "yaml", "yml")
+CODE_CITATION_RE = re.compile(
+    r"`([A-Za-z0-9_./-]+\.(?:" + "|".join(CODE_EXTENSIONS) + r")(?::\d+)?)`"
+)
+
 
 @dataclass
 class Finding:
@@ -274,10 +283,12 @@ class DocFile:
 
 
 class DocsRepo:
-    def __init__(self, root: Path, config: dict, today: dt.date, grace: int):
+    def __init__(self, root: Path, config: dict, today: dt.date, grace: int,
+                 source_roots: tuple = ()):
         self.root = root
         self.today = today
         self.grace = grace
+        self.source_roots = tuple(Path(p).resolve() for p in source_roots)
         extra_roots = tuple(config.get("extra_doc_roots") or ())
         self.doc_roots = tuple(dict.fromkeys(DEFAULT_DOC_ROOTS + extra_roots))
         # A default root is allowed to be absent - no repo has all of them. A root the repo
@@ -306,6 +317,28 @@ class DocsRepo:
                 docs.append(DocFile(path, path.relative_to(self.root), text, fm_lines,
                                     first_line, fm_error, data, parse_error))
         return docs
+
+    def resolve_source_path(self, rel: str):
+        """Resolve a doc-cited source path to a filesystem path, or None if unresolvable.
+
+        A citation is resolved against the docs repo first, then against any --source-root
+        checkouts the caller supplied. Returning None means "cannot be checked here" (the
+        owning repository is not present), which DOC-012 treats as skipped, never failed.
+        """
+        candidate = self.root / rel
+        if candidate.exists():
+            return candidate
+        for base in self.source_roots:
+            candidate = base / rel
+            if candidate.exists():
+                return candidate
+        # Only claim a path is missing when its owning tree is actually present; otherwise
+        # the citation points into a repo this run cannot see.
+        head = Path(rel).parts[0] if Path(rel).parts else ""
+        for base in (self.root,) + self.source_roots:
+            if head and (base / head).is_dir():
+                return base / rel
+        return None
 
     def with_frontmatter(self) -> list[DocFile]:
         return [d for d in self.governed if d.fm_lines is not None or d.fm_error is not None]
@@ -604,8 +637,52 @@ def doc_root_naming(repo: "DocsRepo") -> "Finding":
     return Finding(True, f"all {len(repo.doc_roots)} doc roots resolve and use plural names")
 
 
+def source_path_citations(repo: "DocsRepo") -> "Finding":
+    """DOC-012: a prose citation of source code must be verifiable, or it is not evidence.
+
+    Two failure modes, both observed in the contracts doc set:
+
+      * `pkg/thing.go:176` - a line-number citation. It is stale the next time anyone
+        edits above line 176, and nothing can ever detect that. Cite the file (and the
+        symbol, in prose) instead.
+      * `platform/apicontract/schema_gen.go` - a path that does not exist, because the
+        code was renamed or refactored and the doc was not. Repo-local paths are
+        resolved here; paths into other repositories are only resolved when the caller
+        supplies --source-root, so this control never fails on an unavailable checkout.
+    """
+    line_cites: list[str] = []
+    missing: list[str] = []
+    checked = unresolved = 0
+
+    for doc in repo.governed:
+        for lineno, line in enumerate(doc.text.splitlines(), 1):
+            for raw in CODE_CITATION_RE.findall(line):
+                token = raw.strip()
+                bare, _, suffix = token.partition(":")
+                if suffix and suffix.isdigit():
+                    line_cites.append(f"{doc.rel}:{lineno}: `{token}` cites a line number; "
+                                      "cite the file and name the symbol in prose")
+                    continue
+                if not bare or bare.endswith("/"):
+                    continue
+                checked += 1
+                resolved = repo.resolve_source_path(bare)
+                if resolved is None:
+                    unresolved += 1
+                elif not resolved.exists():
+                    missing.append(f"{doc.rel}:{lineno}: `{bare}` does not exist")
+
+    details = _capped(sorted(set(line_cites)) + sorted(set(missing)))
+    if line_cites or missing:
+        return Finding(False, f"{len(set(line_cites))} line-number citation(s) and "
+                              f"{len(set(missing))} dangling source path(s)", details)
+    note = f" ({unresolved} external path(s) not resolvable without --source-root)" if unresolved else ""
+    return Finding(True, f"{checked} source-path citation(s) resolve; no line-number citations{note}")
+
+
 DETECTORS = {
     "doc_root_naming": doc_root_naming,
+    "source_path_citations": source_path_citations,
     "frontmatter_structure": frontmatter_structure,
     "owner_registered": owner_registered,
     "controlled_vocabulary": controlled_vocabulary,
@@ -814,6 +891,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--format", choices=("text", "json", "markdown"), default="text")
     ap.add_argument("--fail-on", choices=("critical", "major", "minor"), default="major")
     ap.add_argument("--grace", type=int, default=0, help="days of grace past a freshness due date")
+    ap.add_argument("--source-root", action="append", default=[], metavar="DIR",
+                    help="checkout of a repository whose source paths docs may cite (DOC-012); "
+                         "repeatable. Citations into trees not supplied here are skipped.")
     ap.add_argument("--today", default=None, help="override today's date (ISO) for testing")
     ap.add_argument("--report", help="write the JSON report to this path")
     ap.add_argument("--write-docs", metavar="FILE", help="regenerate the control table in FILE and exit")
@@ -839,7 +919,9 @@ def main(argv: list[str]) -> int:
         print(f"::error::docs-governance: root is not a directory: {root}")
         return 1
     today = as_date(args.today) or dt.date.today()
-    repo = DocsRepo(root, load_config(root, args.config), today, args.grace)
+    config = load_config(root, args.config)
+    source_roots = tuple(args.source_root) or tuple(config.get("source_roots") or ())
+    repo = DocsRepo(root, config, today, args.grace, source_roots)
 
     results = evaluate(repo, doc["controls"])
     threshold = SEVERITY_ORDER[args.fail_on]
