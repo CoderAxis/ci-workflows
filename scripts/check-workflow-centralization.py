@@ -343,9 +343,16 @@ def check_repo(
         # The extension is part of the rule. Both spellings are valid YAML and valid to GitHub, so
         # nothing fails when they are mixed - which is precisely why they drift, and why a search
         # for `ci.yaml` silently misses the repositories that spell it `ci.yml`.
+        #
+        # A thin caller is the third permitted shape, and omitting it made this control contradict
+        # WFC-0001: that control explicitly blesses a file named after a published reusable PROVIDED
+        # it calls it, which is the shape every consumer repo is told to have. Requiring the name to
+        # match a workflow we publish AND that the file actually call that same workflow keeps the
+        # exemption narrow - it admits a faithful caller, not an arbitrary extra lane.
+        is_thin_caller = wf.name in published and any(n == wf.name for n, _ in calls)
         if wf.suffix != ".yaml":
             extra_lanes.append(f"{wf.relative_to(root)} (must be .yaml, not {wf.suffix})")
-        elif wf.name not in allowed_lanes and not _is_reusable(text):
+        elif wf.name not in allowed_lanes and not _is_reusable(text) and not is_thin_caller:
             extra_lanes.append(str(wf.relative_to(root)))
 
         # WFC-0004 — a caller grants what its callee declares. Requires the parsed document: the
@@ -470,8 +477,8 @@ def check_repo(
             "fail" if extra_lanes else "pass",
             f"{len(extra_lanes)} workflow(s) outside the permitted lanes: " + ", ".join(extra_lanes)
             if extra_lanes
-            else f"only the permitted lanes ({', '.join(sorted(allowed_lanes))}) and published "
-            "reusable workflows",
+            else f"only the permitted lanes ({', '.join(sorted(allowed_lanes))}), published "
+            "reusable workflows and thin callers of them",
             c6["remediation"].strip(),
         )
     )

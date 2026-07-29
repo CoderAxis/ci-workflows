@@ -196,11 +196,12 @@ controls:
           deployment environment - and therefore its required reviewers - per job, not per branch,
           so the approval gate is a property of keeping them separate.
     policy: >-
-      A repository's `.github/workflows` directory MUST contain only `ci.yaml`, `release.yaml`, and
-      workflows that the repository itself PUBLISHES as reusable (`on.workflow_call`). Any other
-      workflow file is a finding, whether or not its behaviour duplicates something central.
-      Every YAML file on the platform MUST use the `.yaml` extension; `.yml` is a finding on its
-      own, independent of the filename.
+      A repository's `.github/workflows` directory MUST contain only `ci.yaml`, `release.yaml`,
+      workflows that the repository itself PUBLISHES as reusable (`on.workflow_call`), and thin
+      callers - a file named after a workflow this platform publishes that does nothing but call
+      that same workflow. Any other workflow file is a finding, whether or not its behaviour
+      duplicates something central. Every YAML file on the platform MUST use the `.yaml` extension;
+      `.yml` is a finding on its own, independent of the filename.
     rationale: >-
       Every other control here, and the absorbed-workflow list this replaced in service-ci.yaml,
       is a denylist: it can only catch a filename somebody already thought to forbid. That is the
@@ -223,6 +224,16 @@ controls:
       reusable-openapi-contract.yaml and reusable-sdk-publish.yaml in the two contract repositories.
       A guard, a deploy lane or a drift check is NOT covered by that exemption: those are ordinary
       jobs that happen to live in their own file.
+
+      The thin-caller shape is permitted because WFC-0001 already requires it. That control blesses
+      a file named after a published reusable precisely WHEN it calls that reusable, and treats the
+      same filename with local logic behind it as the finding. Omitting the shape here made the two
+      controls contradict each other: the arrangement WFC-0001 defines as correct was the one
+      WFC-0006 rejected, so the catalog's own compliant fixture could not satisfy both. The
+      exemption is deliberately narrow - the filename must match something this platform publishes
+      AND the file must actually call it - so it admits a faithful caller without reopening the
+      allowlist to arbitrary lanes. A local implementation wearing a published name still fails
+      both controls, which is what the violation fixture pins.
 
       The extension is part of the rule for the same reason the filename is. `.yml` and `.yaml` are
       both valid YAML and both accepted by GitHub, so a repository mixing them fails nothing and
