@@ -84,118 +84,28 @@ jobs:
           fi
           echo "checker fails the dirty fixture as expected (exit $rc)"
 
-  # ── App-token broker, positive case (was ci-app-token-guard.yaml) ───────────────────────────
-  # Self-check for the App-token broker (ADR-0110).
+  # ── App-token broker self-check (ADR-0110) ──────────────────────────────────────────────────
+  # Called, not inlined, and the reason is the guard's own OIDC identity rather than tidiness.
   #
-  # This guard exists because both failure modes are silent. If the trust policy stopped admitting
-  # central workflows, CI would fail loudly and someone would fix it. But if it started admitting
-  # ANYTHING - a wildcard widened, job_workflow_ref dropped, the tag condition removed - nothing
-  # would fail, and the platform's most powerful credential would be reachable from any workflow in
-  # the estate. So the negative case below is asserted on every change, not just the positive one.
+  # `job_workflow_ref` names the workflow a job is DEFINED in, together with the ref it was loaded
+  # from, and the broker's read role admits `.../workflows/*@refs/tags/v1` — wildcard before the `@`,
+  # so the claim must end in the literal v1 tag. Jobs defined HERE run on a branch and present
+  # `ci.yaml@refs/heads/main`, which cannot match; that is why the positive assertion was denied on
+  # every run for as long as it lived in this file. Calling the guard at `@v1` makes the claim
+  # `app-token-selftest.yaml@refs/tags/v1`, which the existing policy already admits, so the guard
+  # needs no trust-policy widening and exercises the broker by the route a real consumer takes.
   #
-  # MOVING THIS JOB CHANGED ITS OIDC IDENTITY, AND BROKE IT. `job_workflow_ref` names the workflow a
-  # job is DEFINED in, so both jobs now present `.../.github/workflows/ci.yaml@<ref>` instead of
-  # `.../ci-app-token-guard.yaml@<ref>`.
+  # `permissions` is declared here because a called workflow cannot hold a permission its caller did
+  # not grant, and the guard mints from AWS via OIDC (WFC-0004). Omitting `id-token` would surface as
+  # the action reporting no OIDC token rather than as a policy failure.
   #
-  # The reasoning that used to sit here said both assertions survive the move, because "the read role
-  # admits the whole central workflow directory at @v1, which ci.yaml is in". That is wrong, and the
-  # positive job below has been denied on every run since it was written. The allowlist entry is
-  # `coderaxis/github-actions/.github/workflows/*@refs/tags/v1` — the wildcard sits BEFORE the `@`,
-  # so the claim must end in the literal `@refs/tags/v1`. A job in THIS repository's own CI runs on a
-  # branch or a pull request, never on the v1 tag, so it presents `ci.yaml@refs/heads/main` and
-  # cannot match. Being inside the directory is necessary, not sufficient; the ref is half the
-  # pattern.
-  #
-  # Note what that does to the PAIR. The negative job passes because it EXPECTS a refusal, and
-  # everything from this file is currently refused — so it would keep passing even if the publish
-  # allowlist were widened to admit ci.yaml. Until the positive job can actually mint, the two
-  # together prove only that the broker fails closed, not that it admits what it should.
-  #
-  # Fixing it is a trust-policy decision, tracked rather than papered over: either the read role
-  # names this file at `@refs/heads/main` explicitly, or these two jobs move into a published
-  # `workflow_call` workflow so the claim reads `@refs/tags/v1` and matches today's policy unchanged
-  # (at the cost of testing released v1 rather than the pull request). If either role is ever
-  # narrowed to a filename list, this file has to be on the read list and must stay off the publish
-  # list.
-  ci-app-token-admits-central:
-    name: App token - admits a job defined in a central workflow
-    runs-on: ubuntu-latest
+  # See app-token-selftest.yaml for what each direction asserts and why both are needed.
+  ci-app-token:
+    name: App token self-check
     permissions:
       contents: read
       id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Mint a read-scoped token
-        id: tok
-        uses: ./ci-app-token
-        with:
-          scope: read
-          owner: coderaxis
-          repositories: auth-core
-
-      - name: The token must actually work
-        env:
-          GH_TOKEN: ${{ steps.tok.outputs.token }}
-        run: |
-          set -euo pipefail
-          # Proves the credential is real and correctly scoped, rather than just
-          # non-empty: a token minted for the wrong installation would still be a
-          # plausible-looking string.
-          slug=$(gh api /repos/coderaxis/auth-core --jq '.full_name')
-          [ "$slug" = "coderaxis/auth-core" ] || { echo "::error::unexpected repo: $slug"; exit 1; }
-          echo "read token works and resolves coderaxis/auth-core"
-
-      - name: A read token must NOT be able to write
-        env:
-          GH_TOKEN: ${{ steps.tok.outputs.token }}
-        run: |
-          set -uo pipefail
-          # The read App has no write scope. If this ever succeeds, the two Apps
-          # have been conflated and the read/publish split is no longer real.
-          if gh api -X POST /repos/coderaxis/auth-core/git/refs \
-               -f ref=refs/heads/ci-app-token-guard-should-fail \
-               -f sha=0000000000000000000000000000000000000000 >/dev/null 2>&1; then
-            echo "::error::a read-scoped token was able to create a ref"
-            exit 1
-          fi
-          echo "read token correctly cannot write"
-
-  # ── App-token broker, negative case (was ci-app-token-guard.yaml) ───────────────────────────
-  # The real negative case. This job requests the PUBLISH scope from a workflow that is
-  # deliberately NOT on the publishing allowlist — which holds module-release alone. An earlier
-  # version of this comment said "module-release and module-bump"; module-bump was removed from the
-  # allowlist deliberately, because no such workflow exists at v1 and an entry matched by nothing is
-  # a standing invitation to create the file later and inherit publish rights unreviewed. It must be
-  # refused by AWS.
-  ci-app-token-refuses-unlisted-workflow:
-    name: App token - refuses publish scope from a non-publishing workflow
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      # continue-on-error is the mechanism of the assertion, not a relaxation of it: the step is
-      # REQUIRED to fail, and the step after it fails the job if it did not.
-      - name: Requesting publish from here must be denied
-        id: attempt
-        continue-on-error: true
-        uses: ./ci-app-token
-        with:
-          scope: publish
-          owner: coderaxis
-
-      - name: Assert it was denied
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
-            echo "::error::this workflow is not on the publishing allowlist yet it obtained a publish token."
-            echo "::error::job_workflow_ref scoping on inboxxhq-ci-app-token-publish is not being enforced."
-            exit 1
-          fi
-          echo "publish scope correctly denied to a non-publishing workflow"
+    uses: coderaxis/github-actions/.github/workflows/app-token-selftest.yaml@v1
 
   # ── delivery model (was delivery-model-guard.yaml) ──────────────────────────────────────────
   # Executable governance for the canonical reusable deploy workflow.
