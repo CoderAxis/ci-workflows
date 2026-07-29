@@ -1,0 +1,229 @@
+name: Contracts CI
+
+# The two contract-drift gates that need a cross-repository read token, published as a reusable
+# workflow so they can actually obtain one.
+#
+# WHY THEY CANNOT LIVE IN platform-contracts' OWN ci.yaml. Both jobs read other repositories - the
+# generated Go and TypeScript SDKs, and the InboxxHQ OpenAPI registry - so both need an App
+# installation token, minted by ci-app-token from the job's OIDC identity against AWS.
+#
+# The `inboxxhq-ci-app-token-read` trust policy conditions on `job_workflow_ref`, and its allowlist
+# entry is `coderaxis/github-actions/.github/workflows/*@refs/tags/v1`. The wildcard sits BEFORE the
+# `@`, so a matching claim must end in the literal `@refs/tags/v1`, and `job_workflow_ref` names the
+# workflow a job is DEFINED in together with the ref that definition was loaded from. A job defined
+# in `coderaxis/platform-contracts/.github/workflows/ci.yaml` therefore presents
+# `...platform-contracts/.github/workflows/ci.yaml@refs/heads/main`, which the pattern cannot match.
+# The result is `AccessDenied` on `sts:AssumeRoleWithWebIdentity` on every run - which is the control
+# working, not a bug: a repository must not be able to mint the platform's App token by writing its
+# own workflow.
+#
+# This is the identical fault, with the identical fix, that app-token-selftest.yaml already documents:
+# those guards were denied on every run for as long as they lived in this repository's own ci.yaml,
+# and moving them into a reusable workflow called at `@v1` fixed it without touching the trust policy.
+# Being inside the allowlisted directory is necessary but not sufficient - the ref is half the pattern.
+#
+# WHAT THIS REPLACED. platform-contracts previously minted these tokens with
+# actions/create-github-app-token@v1 and repo-held CODERAXIS_APP_ID / CODERAXIS_APP_PRIVATE_KEY
+# secrets, which worked precisely because it involved no OIDC and no IAM. The last green run of that
+# implementation was 2026-07-27 (`.github/workflows/codegen-drift.yml`). Consolidating it into
+# ci.yaml switched the mechanism to ci-app-token without moving the jobs out of the repository, so
+# both have failed at the token step ever since. Restoring the forwarded private key is NOT the fix:
+# it is the ~90-copy credential sprawl that ADR-0110 exists to remove.
+#
+# NO TRUST-POLICY CHANGE IS NEEDED for this file to be admitted, because the read role's allowlist
+# wildcards the FILENAME within this directory. It does, however, only become reachable once the `v1`
+# tag moves to include it - see the caller note in platform-contracts' ci.yaml.
+#
+# Policy SSOT: ADR-0110 (app-token broker trust model), ADR-0081 (reusable workflow + thin caller),
+# ADR-0047 (openapi/services/** is a derived artifact).
+
+on:
+  workflow_call:
+    inputs:
+      contracts_go_repo:
+        description: "Repository holding the generated Go SDK."
+        required: false
+        type: string
+        default: coderaxis/platform-contracts-go
+      contracts_ts_repo:
+        description: "Repository holding the generated TypeScript SDK."
+        required: false
+        type: string
+        default: coderaxis/platform-contracts-ts
+      inboxxhq_repo:
+        description: >-
+          Repository holding the per-service OpenAPI contract registry. Lives in a different account
+          from the contracts SSOT, so its token is minted against that account's installation.
+        required: false
+        type: string
+        default: InboxxHQ-CoderAxis/inboxxhq-api-contracts
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Codegen drift - health/safety net, deliberately NOT a PR gate.
+  #
+  # The SSOT -> SDK sync happens AFTER merge (release.yaml -> reusable-sdk-publish.yaml), so on a PR
+  # that changes a .proto the SDK repos are correctly still on the old generated output; asserting
+  # parity there would fail every proto PR by construction. This confirms the post-merge sync
+  # actually landed, and alerts when it did not.
+  # ---------------------------------------------------------------------------
+  codegen-drift:
+    name: Codegen drift (Go + TS SDKs)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GO_REPO: ${{ inputs.contracts_go_repo }}
+      TS_REPO: ${{ inputs.contracts_ts_repo }}
+    steps:
+      # Multi-repo checkout into a single workspace:
+      #   $GITHUB_WORKSPACE/
+      #     platform-contracts/
+      #     platform-contracts-go/
+      #     platform-contracts-ts/
+      # check_codegen_drift.sh resolves the SDK repos as siblings of its own root
+      # ("${ROOT_DIR}/../platform-contracts-go"), so these paths are load-bearing.
+      #
+      # No `repository:` on this one: a reusable workflow runs in its caller's context, so the default
+      # checkout is the CALLING repository at the calling commit - platform-contracts at the commit
+      # under test, which is what the drift check must compare.
+      - name: Checkout platform-contracts (the caller)
+        uses: actions/checkout@v4
+        with:
+          path: platform-contracts
+          fetch-depth: 0
+
+      - name: Resolve repo owners/names
+        id: r
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "go_owner=${GO_REPO%%/*}"; echo "go_name=${GO_REPO##*/}"
+            echo "ts_owner=${TS_REPO%%/*}"; echo "ts_name=${TS_REPO##*/}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Mint Go SDK read token
+        id: gotok
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ steps.r.outputs.go_owner }}
+          repositories: ${{ steps.r.outputs.go_name }}
+
+      - name: Mint TS SDK read token
+        id: tstok
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ steps.r.outputs.ts_owner }}
+          repositories: ${{ steps.r.outputs.ts_name }}
+
+      - name: Checkout platform-contracts-go
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GO_REPO }}
+          token: ${{ steps.gotok.outputs.token }}
+          path: platform-contracts-go
+          fetch-depth: 0
+
+      - name: Checkout platform-contracts-ts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TS_REPO }}
+          token: ${{ steps.tstok.outputs.token }}
+          path: platform-contracts-ts
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Go protoc plugins
+        run: |
+          # Pinned for reproducible codegen - must match the versions in the generated file headers
+          # (updating requires regenerating + committing).
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+
+      - name: Install ts-proto plugin
+        working-directory: platform-contracts/tools/ts
+        run: npm ci
+
+      - name: Run drift check
+        working-directory: platform-contracts
+        run: ./scripts/check_codegen_drift.sh
+
+  # ---------------------------------------------------------------------------
+  # OpenAPI bundle drift - openapi/services/** is a DERIVED artifact of the per-service contract
+  # registry (ADR-0047). Regenerate locally with
+  # `python3 tooling/generators/sync_openapi_bundle.py`.
+  # ---------------------------------------------------------------------------
+  openapi-bundle-drift:
+    name: OpenAPI bundle drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      INBOXXHQ_REPO: ${{ inputs.inboxxhq_repo }}
+    steps:
+      # Multi-repo checkout into a single workspace:
+      #   $GITHUB_WORKSPACE/
+      #     platform-contracts/
+      #     inboxxhq-api-contracts/
+      - name: Checkout platform-contracts (the caller)
+        uses: actions/checkout@v4
+        with:
+          path: platform-contracts
+
+      - name: Resolve registry owner/name
+        id: r
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "ihq_owner=${INBOXXHQ_REPO%%/*}"; echo "ihq_name=${INBOXXHQ_REPO##*/}"
+          } >> "${GITHUB_OUTPUT}"
+
+      # The registry lives in InboxxHQ-CoderAxis rather than coderaxis, so the token is minted
+      # against that account's installation. Both owners are listed in the read role's `sub`
+      # allowlist, so the cross-account read is expected rather than exceptional.
+      - name: Mint inboxxhq registry read token
+        id: ihqtok
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ steps.r.outputs.ihq_owner }}
+          repositories: ${{ steps.r.outputs.ihq_name }}
+
+      - name: Checkout inboxxhq-api-contracts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.INBOXXHQ_REPO }}
+          token: ${{ steps.ihqtok.outputs.token }}
+          path: inboxxhq-api-contracts
+
+      - name: Run bundle drift check
+        working-directory: platform-contracts
+        env:
+          INBOXXHQ_REGISTRY: ${{ github.workspace }}/inboxxhq-api-contracts
+        run: bash tooling/validators/check_openapi_bundle_drift.sh
