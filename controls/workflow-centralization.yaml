@@ -44,6 +44,40 @@
 # per-repo. ADR-0081 covers documentation governance only. Until such a decision exists these
 # controls enforce the boundary that is already unambiguous (do not shadow what we publish; pin the
 # supported tag) and stay silent on the genuinely open question.
+#
+# What that gap costs today, measured 2026-07-29 so the next reader argues with numbers rather than
+# impressions: 8 of the 116 repositories that have workflows hold lanes outside WFC-0006's allowlist.
+# The other 108 hold exactly `ci.yaml` thin-calling service-ci.yaml, which is the shape the missing
+# ADR would presumably ratify.
+#
+#   docs/inboxxhq-platform-docs   deploy, docs-site, docs-slack-digest, validate-doc-frontmatter
+#   frontend/inboxxhq-web-app     deploy, root-standards
+#   frontend/inboxxhq-web-console ci, deploy, root-standards
+#   frontend/inboxxhq-web-www     ci, deploy
+#   frontend/inboxxhq-one         promotion-gate
+#   frontend/inboxxhq-web-design  promotion-gate
+#   frontend/inboxxhq-web-workspace  promotion-gate, root-standards
+#   infra/inboxxhq-infra          20 lanes, of which 2 are declared in repository_lanes
+#
+# Read the `deploy` lanes carefully before concluding the delivery model is being bypassed: all four
+# are thin callers of deploy-reusable.yaml, and every DM-0001..DM-0013 control is scoped to the
+# reusable workflow, so a caller upholds 0 of 0 and the pull-based path is fully intact. What differs
+# is only WHERE the call sits — service-ci.yaml invokes deploy-reusable as a JOB, so a conformant
+# service repo has no deploy file at all. That is a lane-placement finding, not a delivery finding.
+#
+# The docs hub is the case that makes this a genuine open question rather than a cleanup backlog. Its
+# image is composed from TWO repositories (.platform/build-inputs.json), and core-docs deliberately
+# pushes nothing to it (ADR-0052: core-docs is shared across client hubs, so a trigger naming one
+# client's repository does not belong in it). The hub therefore needs `schedule` and
+# `repository_dispatch` triggers to pick up core-docs changes — and service-ci.yaml's deploy job is
+# gated on `github.event_name == 'push'`, so neither can ever fire through it. Some lanes here are
+# drift; at least one is a lifecycle the central lane genuinely does not model.
+#
+# Why this is recorded rather than fixed by widening allowed_lanes: an allowlist extended to fit
+# whatever currently exists blesses the drift and asserts nothing, which is the convention-decay
+# described above wearing a control's clothing. The scope ADR has to come first; WFC-0006's
+# remediation already names the honest interim (declare the lane set with a reason, as
+# inboxxhq-infra partially does) for anyone who needs to go green before then.
 
 version: 1
 domain: workflow-centralization
