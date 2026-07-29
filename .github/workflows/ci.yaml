@@ -636,8 +636,16 @@ jobs:
             echo "::error::no v1 tag exists, yet every consumer pins @v1. Cut v1.0.0 and point v1 at it."
             exit 1
           fi
-          v1="$(git rev-parse refs/tags/v1)"
-          main="$(git rev-parse refs/heads/main 2>/dev/null || git rev-parse HEAD)"
+          # Peel both sides to a COMMIT. `v1` may be a lightweight tag (ref points straight at the
+          # commit) or an annotated one (ref points at a tag object that wraps it), and which one you
+          # get depends on how the tag was last moved: `git tag -f v1 <sha>` produces the former,
+          # `git tag -f v1 v1.2.3` the latter, because naming an annotated tag copies the tag object
+          # rather than the commit under it. Comparing unpeeled refs therefore reported drift against
+          # a correctly released v1 the first time someone moved the tag by version name instead of
+          # by sha - the natural way to do it. A guard that cries wolf gets muted, so it resolves what
+          # a consumer's `@v1` actually checks out rather than which object the ref happens to hold.
+          v1="$(git rev-parse 'refs/tags/v1^{commit}')"
+          main="$(git rev-parse 'refs/heads/main^{commit}' 2>/dev/null || git rev-parse 'HEAD^{commit}')"
           if [ "$v1" = "$main" ]; then
             echo "v1 and main agree at ${main:0:7}; the fleet is running what main says."
             exit 0
