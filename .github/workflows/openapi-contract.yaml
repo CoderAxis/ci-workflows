@@ -120,6 +120,45 @@ jobs:
             echo "::notice::No .spectral.yaml in this repository; structural validation only."
           fi
 
+      # Deliberately unconditional, and deliberately without a caller input to disable it.
+      # Every other gate here is opt-in via a caller-supplied command, which is why the fleet
+      # could satisfy this workflow while shipping a Swagger UI, a bespoke envelope, and a
+      # hand-rolled copy of the shared conformance suite. The checker and its catalog are
+      # checked out from this repository, so a service cannot weaken the policy it is judged
+      # by; check-workflow-centralization.py separately forbids forking this workflow, so a
+      # service cannot escape by keeping its own copy either.
+      - name: Check out the central API-contract guard (SSOT)
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/github-actions
+          ref: v1
+          path: .api-contract-tools
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install guard dependencies
+        shell: bash
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Enforce API-contract controls (ADR-0048, ADR-0067, RFC-0001)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .api-contract-tools/scripts/check-api-contract.py . \
+            --controls .api-contract-tools/controls/api-contract.yaml \
+            --report api-contract-report.json
+
+      - name: Upload API-contract report (machine-readable)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-contract-report
+          path: api-contract-report.json
+          if-no-files-found: ignore
+
       - name: Set up Go
         if: inputs['pre-test-command'] != '' || inputs['contract-test-command'] != ''
         uses: actions/setup-go@v5

@@ -1,0 +1,214 @@
+# Service API-contract control catalog (declarative policy-as-code).
+#
+# This is the single source of WHICH API-contract invariants every service repository must
+# uphold, and their metadata: policy, rationale, remediation, severity, scope, applicability,
+# ownership, and lifecycle. The catalog defines POLICY ONLY - it never describes how detection
+# is implemented. Each control's `detector` key binds it to an implementation in
+# scripts/check-api-contract.py, which may evolve WITHOUT any change to this catalog. This
+# mirrors controls/docs-governance.yaml, controls/delivery-model.yaml, and
+# controls/dockerfile-standard.yaml.
+#
+# `applies_when` gates a control on a per-repo capability:
+#   always    - evaluated for every service repository.
+#   http-api  - evaluated only when the repo carries docs/openapi.json, so pure gRPC/worker
+#               services are never failed for lacking an HTTP contract.
+#
+# Control IDs (API-NNN) are STABLE and permanent - never rename or recycle; retire a control
+# via `status: deprecated|superseded`. critical/major fail CI; minor is advisory (--fail-on).
+#
+# RATCHET. Every control is evaluated as a COUNT, compared against the repo's committed
+# .api-contract-baseline.json. A count that rises fails the build; a count that holds is
+# tolerated; a count that falls prompts a baseline rewrite. A repo with no baseline is held to
+# zero. This is what makes the catalog enforceable today rather than aspirational: a service
+# created tomorrow cannot introduce any of these violations, while the 36 services already
+# carrying them are frozen rather than broken. Migration is tracked by the baselines shrinking.
+#
+# Policy SSOT (architecture is owned by the decision records; this catalog only enforces them):
+#   ADR-0048 - Enterprise API Contract Pattern (reflection engine is the canonical generator)
+#   ADR-0067 - Registry-backed API documentation distribution (no runtime docs)
+#   RFC-0001 - API response envelope
+#   ADR-0006 - operationId naming convention (service-local; promotion to core-docs pending)
+
+version: 1
+domain: api-contract
+policy_ssot:
+  - ADR-0048
+  - ADR-0067
+  - RFC-0001
+
+controls:
+  - id: API-001
+    title: The deployed runtime serves no API documentation
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: critical
+    applies_when: always
+    policy: >-
+      No runtime Go source may import swaggerpolicy or gin-swagger, call
+      openapiroutes.Register*, carry a `swagger` build tag, or register a /swagger or
+      /api/docs route. The contract reaches consumers through the API Contract Registry and
+      the API Portal's per-environment mirror, never from the service process.
+    rationale: >-
+      An environment-gated docs surface is still built, still routed, and still one
+      misconfiguration away from being public; not building it is the stronger guarantee and
+      removes an entire class of exposure from the production image. This also resolves a
+      standing contradiction in which the OpenAPI standard instructed new services to add a
+      Swagger build tag that ADR-0067 forbids, so a service could satisfy one document only
+      by violating the other.
+    remediation: >-
+      Delete the Swagger UI handler, the swaggerpolicy gating, the openapiroutes registration,
+      and any swagger-tagged file. Keep docs/openapi.json embedded via //go:embed for the
+      contract gates - embedding is fine, routing is not. Assert the absence with a test that
+      the docs paths 404 unconditionally.
+    detector: no_runtime_docs
+    refs: [ADR-0067]
+
+  - id: API-002
+    title: Exactly one committed REST spec per service
+    owner: platform-architecture
+    scope: spec
+    status: active
+    severity: major
+    applies_when: always
+    policy: >-
+      docs/ may contain openapi.json (generated), openapi.base.json (authored metadata only),
+      and the operationId lock and schema. Any other openapi*.json is a rival spec and is
+      prohibited.
+    rationale: >-
+      This control exists because the failure already happened. The reference service carried
+      openapi.premigration.json and openapi.migration.json long after its migration completed
+      - 658KB of duplicate contract, one advertising 58 paths against a live 49. Nothing
+      referenced them and nothing flagged them, so any reader or tool that picked the wrong
+      file got a confidently wrong answer about the API.
+    remediation: >-
+      Delete the extra spec files. A migration artifact belongs in the PR that performed the
+      migration, in git history, not committed indefinitely beside the live contract.
+    detector: single_committed_spec
+    refs: [ADR-0048]
+
+  - id: API-003
+    title: Runtime conformance is imported from the shared suite, never re-implemented
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    applies_when: http-api
+    policy: >-
+      A test that validates live traffic against the OpenAPI document must import
+      platform/openapicontract/conformance. Driving kin-openapi directly - constructing a
+      gorillamux router or calling openapi3filter.ValidateResponse - is a hand-rolled copy of
+      the shared suite and is prohibited.
+    rationale: >-
+      The reference service carried a 158-line conformance validator that was a near-verbatim
+      duplicate of the shared package, which meant a fix to the shared suite silently did not
+      reach it. Copies drift in exactly the dimension the suite exists to police, and each
+      copy quietly decides its own definition of conformance.
+    remediation: >-
+      Replace the local validator with conformance.NewValidator(specBytes) and
+      validator.Wrap(router, t.Errorf). If the shared suite is missing an assertion you need,
+      add it there so the whole fleet gets it.
+    detector: shared_conformance_suite
+    refs: [ADR-0040, ADR-0048]
+
+  - id: API-004
+    title: Every JSON response is bound to the proto common.v1 envelope
+    owner: platform-architecture
+    scope: spec
+    status: active
+    severity: critical
+    applies_when: http-api
+    policy: >-
+      Every 2xx JSON response must reference common.v1.SuccessResponse and every 4xx/5xx JSON
+      response must reference common.v1.ErrorResponse. The envelope is owned by
+      proto/common/v1 and is not redefinable per service.
+    rationale: >-
+      The envelope is the one part of the contract every client touches on every call, so
+      divergence there is the most expensive kind. Thirty-six of thirty-eight services still
+      publish a bespoke envelope, which means no client, SDK generator, or gateway can assume
+      a single response shape. Binding the spec to the proto components is what makes
+      "one envelope" a checkable fact rather than an intention.
+    remediation: >-
+      Adopt the shared engine's commonv1policy so generation binds the proto components, or
+      for un-migrated services emit responses through the shared httpresponse writers. Never
+      hand-write an envelope schema into the spec, and never add a top-level `success` field -
+      HTTP status is the truth.
+    detector: canonical_envelope
+    refs: [RFC-0001, ADR-0001, ADR-0048]
+
+  - id: API-005
+    title: operationIds are present, unique, and semver-governed by a lockfile
+    owner: platform-architecture
+    scope: spec
+    status: active
+    severity: major
+    applies_when: http-api
+    policy: >-
+      Every operation carries a unique operationId, and the service commits
+      docs/openapi.operationids.lock.json recording each id with the version that introduced
+      it, its deprecation state, and its visibility.
+    rationale: >-
+      operationIds are a public API surface - generated SDK method names, API catalog keys,
+      and observability dimensions all key off them - so renaming or removing one is a
+      breaking change that no schema diff will catch. Over 1,200 operations across the fleet
+      currently have no operationId at all, which means their generated clients are named
+      from paths and will churn on any routing change.
+    remediation: >-
+      Assign lowerCamelCase, bounded-context-first operationIds, then generate the lockfile.
+      Thereafter a rename or removal requires a MAJOR info.version bump and an addition
+      requires at least a MINOR, enforced by scripts/check_operation_ids.py.
+    detector: operation_ids_governed
+    refs: [ADR-0048]
+
+  - id: API-007
+    title: Published common.v1 components match the current proto projection
+    owner: platform-architecture
+    scope: spec
+    status: active
+    severity: major
+    applies_when: http-api
+    policy: >-
+      Every common.v1.* component in the service's spec must be byte-identical to the
+      projection in controls/common-v1-components.json, which is generated from the proto SSOT
+      by commonv1policy and carries the platform-contracts-go version it was projected from.
+      A service publishing no common.v1 components is governed by API-004 instead, not failed
+      twice here.
+    rationale: >-
+      API-004 proves a response points AT the envelope; this proves the envelope it points at
+      is the CURRENT one, and the two are genuinely different guarantees. Each service projects
+      the components from its own platform-contracts-go pin, so a per-repo drift check can only
+      ever establish internal consistency. At the time this control was written the fleet held
+      four different pins - v0.1.0, v0.2.0, v0.3.0 and v0.4.0 - and platform-shared-go itself,
+      which hosts the projection, was pinned three releases behind at v0.1.0. The measured
+      consequence was that common.v1.ErrorCode carried 28 values under the engine's own pin and
+      30 under the reference service's, so two services could both be green while disagreeing
+      about which error codes exist.
+    remediation: >-
+      Bump the service's platform-contracts-go pin to at least the version named in the
+      reference artifact's `source.version`, then regenerate the spec. If the reference itself
+      is behind the proto, regenerate it from platform-shared-go with
+      `go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.
+    detector: canonical_components_current
+    refs: [RFC-0001, ADR-0048]
+
+  - id: API-006
+    title: No swaggo annotation source
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: minor
+    applies_when: always
+    policy: >-
+      cmd/server/swagger_main.go and any other swaggo annotation source is prohibited. The
+      canonical generator reflects Go types through the shared contract engine.
+    rationale: >-
+      Annotations are prose that claims to describe code, checked by nothing, and they cannot
+      cross a module boundary at all - which is why services with handlers in a shared *-core
+      module could never generate a truthful spec from them. Reflection derives the schema
+      from the types the handler actually returns, so the spec cannot disagree with the code.
+    remediation: >-
+      Migrate to the shared engine (platform/openapicontract), move the top-level API metadata
+      into docs/openapi.base.json, and delete swagger_main.go. Severity is `minor` while the
+      fleet migrates; it rises to `major` once the migration completes.
+    detector: no_swaggo_annotation_source
+    refs: [ADR-0048, ADR-0012]

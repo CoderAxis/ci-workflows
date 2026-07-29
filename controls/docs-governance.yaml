@@ -256,3 +256,38 @@ controls:
       extra_doc_roots. See core-docs governance/DOCUMENTATION_GOVERNANCE.md#directory-naming.
     detector: doc_root_naming
     refs: [ADR-0081]
+
+  - id: DOC-012
+    title: Source-code citations are verifiable - no line numbers, no dangling paths
+    owner: platform-architecture
+    scope: document
+    # Advisory while the pre-existing backlog is worked down. At introduction the
+    # contract doc set (contracts/, standards/api/, ADR-0048, ADR-0067) was brought to
+    # zero, and ~140 violations remained in operations/runbooks/, reference/, and
+    # architecture/. Raise to `major` once those reach zero; landing it as major on day
+    # one would fail every unrelated docs PR, which trains people to ignore the gate.
+    status: active
+    severity: minor
+    applies_when: always
+    policy: >-
+      A governed document that cites a source file in backticks must cite a path that exists,
+      and must not append a line number. Repo-local paths are resolved against the docs
+      repository; paths into other repositories are resolved only when the run supplies a
+      checkout via --source-root (or the source_roots config key), and are skipped otherwise
+      so the control never fails on an unavailable tree.
+    rationale: >-
+      This control exists because the failure already happened. The contract doc set asserted
+      its architecture by citing code - OPENAPI_ENGINE.md mapped fourteen engine files with
+      line-level citations such as schema_gen.go:176 and schema_reconcile.go:149, and
+      ADR-0048 and ENTERPRISE_SCALE_ASSESSMENT.md repeated them as evidence. The engine was
+      then extracted to a shared module and consolidated to six files. Every one of those
+      citations became dangling, five rows of the authority matrix became factually wrong
+      about the reference service, and no check noticed, because prose asserting facts about
+      code had no gate at all. A line number is worse than a wrong path - it is stale the next
+      time anyone edits above it, and it can never be verified by inspection.
+    remediation: >-
+      Drop the `:NNN` suffix and name the symbol in prose instead, or repoint the citation at
+      the path that exists today. If the file moved, the surrounding claim probably moved too -
+      re-verify it rather than only fixing the path.
+    detector: source_path_citations
+    refs: [ADR-0081]
