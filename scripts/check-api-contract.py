@@ -41,6 +41,33 @@ SELF_REPO = Path(__file__).resolve().parents[1]
 DEFAULT_CONTROLS = SELF_REPO / "controls" / "api-contract.yaml"
 BASELINE_FILE = ".api-contract-baseline.json"
 
+# The proto projection API-007 compares against. Generated, never hand-written:
+#   go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components
+# in platform-shared-go, redirected here. Its `source.version` records the
+# platform-contracts-go release it was projected from.
+CANONICAL_COMPONENTS = SELF_REPO / "controls" / "common-v1-components.json"
+_canonical_cache = None
+
+
+def load_canonical_components():
+    """Return (components, source_version), or (None, None) when unavailable.
+
+    Callers must treat unavailable as a configuration error, not a skip - main() checks
+    this up front and exits 2. The artifact ships in this repository beside this script,
+    so its absence means a broken checkout (a sparse-checkout that omitted controls/, say),
+    and a version gate that reports a pass because it could not find its reference is worse
+    than no gate at all.
+    """
+    global _canonical_cache
+    if _canonical_cache is None:
+        try:
+            doc = json.loads(CANONICAL_COMPONENTS.read_text(encoding="utf-8"))
+            _canonical_cache = (doc.get("components") or {},
+                                (doc.get("source") or {}).get("version", "unknown"))
+        except (OSError, json.JSONDecodeError):
+            _canonical_cache = (None, None)
+    return _canonical_cache
+
 SEVERITY_ORDER = {"critical": 3, "major": 2, "minor": 1}
 VALID_SEVERITY = set(SEVERITY_ORDER)
 VALID_STATUS = {"active", "deprecated", "superseded"}
@@ -259,6 +286,41 @@ def operation_ids_governed(repo: ServiceRepo) -> Finding:
     return Finding(True, f"{len(seen)} operationIds present, unique, and locked", count=0)
 
 
+def canonical_components_current(repo: ServiceRepo) -> Finding:
+    """API-007: the spec's common.v1 components match the proto projection exactly.
+
+    API-004 proves a response POINTS AT the envelope. This proves the envelope it points
+    at is the CURRENT one. The distinction matters because each service projects the
+    components from its own platform-contracts-go pin, so two services can both pass every
+    in-repo gate while publishing structurally different common.v1.Meta - each internally
+    consistent, which is all a per-repo drift check can ever establish.
+    """
+    if repo.spec_error:
+        return Finding(False, f"docs/openapi.json is unparseable: {repo.spec_error}", count=1)
+    reference, ref_version = load_canonical_components()
+    if reference is None:
+        return Finding(True, "no reference artifact available; skipped", count=0)
+    schemas = ((repo.spec or {}).get("components") or {}).get("schemas") or {}
+    published = {k: v for k, v in schemas.items() if k.startswith("common.v1.")}
+    if not published:
+        # Pre-migration service on a bespoke envelope. API-004 already owns that failure;
+        # reporting it twice would double-count the same debt in two baselines.
+        return Finding(True, "no common.v1 components published; API-004 governs adoption", count=0)
+    problems = []
+    for name in sorted(set(reference) | set(published)):
+        want, got = reference.get(name), published.get(name)
+        if want is None:
+            continue  # a service may publish extra components of its own
+        if got is None:
+            problems.append(f"{name}: missing from the spec but present in {ref_version}")
+        elif json.dumps(got, sort_keys=True) != json.dumps(want, sort_keys=True):
+            problems.append(f"{name}: differs from the {ref_version} proto projection")
+    if problems:
+        return Finding(False, f"{len(problems)} component(s) stale against {ref_version}",
+                       _capped(problems), len(problems))
+    return Finding(True, f"common.v1 components match the {ref_version} proto projection", count=0)
+
+
 def no_swaggo_annotation_source(repo: ServiceRepo) -> Finding:
     """API-006: no swaggo annotation source; the engine generates from Go types."""
     offenders = [str(rel) for rel, _ in repo.go_sources if rel.name == "swagger_main.go"]
@@ -274,6 +336,7 @@ DETECTORS = {
     "single_committed_spec": single_committed_spec,
     "shared_conformance_suite": shared_conformance_suite,
     "canonical_envelope": canonical_envelope,
+    "canonical_components_current": canonical_components_current,
     "operation_ids_governed": operation_ids_governed,
     "no_swaggo_annotation_source": no_swaggo_annotation_source,
 }
@@ -483,6 +546,16 @@ def main(argv: list) -> int:
 
     threshold = SEVERITY_ORDER[args.fail_on]
     controls = doc["controls"]
+
+    # Refuse to run a control whose reference artifact is missing rather than let it report a
+    # pass it never actually checked.
+    if any(c.get("detector") == "canonical_components_current" for c in controls):
+        if load_canonical_components()[0] is None:
+            print(f"::error::API-007 is enabled but {CANONICAL_COMPONENTS} is missing or "
+                  "unreadable. Check out this repository's controls/ directory, or regenerate "
+                  "the artifact from platform-shared-go with `go run "
+                  "./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.")
+            return 2
     reports, failed = [], False
     for raw in (args.roots or ["."]):
         root = Path(raw).resolve()

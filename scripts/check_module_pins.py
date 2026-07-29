@@ -54,6 +54,40 @@ PSEUDO = re.compile(r"^v\d+\.\d+\.\d+-\d{14}-[0-9a-f]{12}$")
 STABLE = re.compile(r"^v\d+\.\d+\.\d+$")
 STRICT_MODES = {"preprod", "prod"}
 
+SELF_REPO = pathlib.Path(__file__).resolve().parents[1]
+DEFAULT_FLOORS = SELF_REPO / "controls" / "module-floors.yaml"
+
+
+def semver(version: str) -> tuple[int, int, int] | None:
+    """Parse a stable vX.Y.Z tag. Returns None for anything else."""
+    if not STABLE.match(version):
+        return None
+    return tuple(int(p) for p in version[1:].split("."))  # type: ignore[return-value]
+
+
+def load_floors(path: pathlib.Path) -> dict[str, str]:
+    """Return {module: minimum version}, or {} when no floors file is present.
+
+    A missing file means no floors are declared, which is a legitimate configuration. A
+    file that exists but cannot be read is an error, never a skip - a floor that silently
+    stops being enforced is worse than one that was never declared, because the report
+    still says the pin policy passed.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        import yaml  # imported lazily: only a repo declaring floors needs PyYAML
+    except ModuleNotFoundError:
+        raise SystemExit(f"::error::{path} declares module floors but PyYAML is not installed; "
+                         "install it (python3 -m pip install pyyaml) rather than running "
+                         "without floor enforcement")
+    doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    floors = doc.get("floors") or {}
+    if not isinstance(floors, dict):
+        raise SystemExit(f"::error::{path}: expected a 'floors:' mapping of module -> version")
+    return {m: str(spec["min"]) if isinstance(spec, dict) else str(spec)
+            for m, spec in floors.items()}
+
 
 def parse_go_mod(text: str) -> tuple[dict[str, str], set[str]]:
     """Return {module: version} for direct requires, and the set of replaced modules.
@@ -106,14 +140,52 @@ def _describe(version: str) -> str:
 
 
 def check(go_mod: pathlib.Path, modules: list[str], mode: str,
-         governed_prefix: str = "") -> tuple[list[str], list[str]]:
+         governed_prefix: str = "",
+         floors: dict[str, str] | None = None) -> tuple[list[str], list[str], list[str]]:
+    """Return (errors, warnings, report).
+
+    Floor violations are warnings in advisory modes and errors in strict ones, matching this
+    script's existing posture: a stale contract vintage should not silently reach preprod or
+    prod, but it should not block a dev branch while the fleet is still being moved onto the
+    floor.
+    """
     if not go_mod.is_file():
-        return ([f"{go_mod} not found"], [])
+        return ([f"{go_mod} not found"], [], [])
     requires, replaced = parse_go_mod(go_mod.read_text(encoding="utf-8"))
     strict = mode in STRICT_MODES
+    floors = floors or {}
 
     errors: list[str] = []
+    warnings: list[str] = []
     report: list[str] = []
+
+    def check_floor(module: str, version: str, label: str) -> None:
+        """A pin below the declared floor is a stale contract vintage, not a style problem.
+
+        Version skew on a contract module is invisible in every per-repo gate: each service
+        projects its OpenAPI components from its own pin, so both a current and a stale
+        service pass their own drift check while publishing different envelopes.
+        """
+        floor = floors.get(module)
+        if not floor:
+            return
+        want, got = semver(floor), semver(version)
+        if want is None:
+            errors.append(f"{label}: declared floor {floor} is not a stable vX.Y.Z tag")
+            return
+        sink = errors if strict else warnings
+        if got is None:
+            sink.append(
+                f"{label}: pinned at {version}, which cannot be compared against the required "
+                f"floor {floor}. Pin a released tag so the floor is checkable."
+            )
+            return
+        if got < want:
+            sink.append(
+                f"{label}: pinned at {version}, below the required floor {floor}. "
+                f"Run `go get {module}@{floor}` and regenerate any derived artifacts "
+                f"(the published OpenAPI components are projected from this module)."
+            )
 
     def well_formed(module: str, version: str, label: str) -> None:
         if module in replaced:
@@ -122,12 +194,15 @@ def check(go_mod: pathlib.Path, modules: list[str], mode: str,
                 "CI validates, so replace is not permitted on a platform module."
             )
             return
-        report.append(f"{label}: {version} ({_describe(version)})")
+        floor = floors.get(module)
+        suffix = f", floor {floor}" if floor else ""
+        report.append(f"{label}: {version} ({_describe(version)}{suffix})")
         if strict and not STABLE.match(version):
             errors.append(
                 f"{label}: {mode} requires a stable tag, found {version}. Release the module and "
                 "re-pin; a pseudo-version cannot be resolved back to a release."
             )
+        check_floor(module, version, label)
 
     for module in modules:
         label = module.rsplit("/", 1)[-1]
@@ -148,7 +223,7 @@ def check(go_mod: pathlib.Path, modules: list[str], mode: str,
             if module.startswith(governed_prefix) and module not in modules:
                 well_formed(module, version, f"{module.rsplit('/', 1)[-1]} (governed)")
 
-    return errors, report
+    return errors, warnings, report
 
 
 def main() -> int:
@@ -171,6 +246,12 @@ def main() -> int:
         help="Every pin under this prefix must be well-formed, catalog-named or not. This is what "
              "brings platform-shared-go's 86 consumers under policy without enumerating them.",
     )
+    ap.add_argument(
+        "--floors",
+        default=str(DEFAULT_FLOORS),
+        help="YAML declaring the minimum version for contract-bearing modules. A pin below its "
+             "floor fails. Absent file means no floors are declared.",
+    )
     args = ap.parse_args()
 
     try:
@@ -181,12 +262,14 @@ def main() -> int:
 
     # An empty required list is a correct answer for a core module, which sits at the bottom of the
     # DAG - but the governed sweep still applies, because a core pins platform-shared-go too.
-    errors, report = check(
-        pathlib.Path(args.go_mod), list(modules), args.mode, args.governed_prefix
+    errors, warnings, report = check(
+        pathlib.Path(args.go_mod), list(modules), args.mode, args.governed_prefix,
+        load_floors(pathlib.Path(args.floors)),
     )
 
     lines = [f"## Platform module pin policy ({args.mode})", ""]
     lines += [f"- {r}" for r in report]
+    lines += [f"- {w} (warning: blocks on {'/'.join(sorted(STRICT_MODES))})" for w in warnings]
     lines += [f"- **{e}**" for e in errors]
     lines.append(
         f"- Enforcement: {'blocking' if args.mode in STRICT_MODES else 'advisory'} for {args.mode}"
@@ -198,6 +281,8 @@ def main() -> int:
 
     for r in report:
         print(r)
+    for w in warnings:
+        print(f"::warning::{w}")
     for e in errors:
         print(f"::error::{e}")
     return 1 if errors else 0

@@ -1,0 +1,50 @@
+# Minimum versions for contract-bearing platform Go modules.
+#
+# WHY A FLOOR AND NOT AN EXACT PIN
+# --------------------------------
+# Requiring an exact version across 86 repositories would make every module release a
+# fleet-wide breaking change and would be abandoned within a release or two. A floor
+# expresses the actual requirement - "not older than the contract vintage the fleet has
+# agreed on" - while leaving each repo free to move ahead.
+#
+# WHY THIS EXISTS AT ALL
+# ----------------------
+# check_module_pins.py already enforces that a pin is well-formed: direct, stable, not
+# replaced. None of that notices a pin that is simply old, and for a module that carries the
+# API contract, old is the failure mode that matters.
+#
+# The chain is proto -> generated Go -> each service's OpenAPI components. The first link is
+# gated (buf lint, buf breaking, and a codegen drift job that regenerates and diffs). The
+# third is gated per repo (byte-exact --check). But every service projects its components
+# from ITS OWN platform-contracts-go pin, so a per-repo gate can only ever prove internal
+# consistency - two services on different pins both pass while publishing different
+# envelopes.
+#
+# Measured on 2026-07-29, before this floor existed: the fleet held four concurrent pins of
+# platform-contracts-go (v0.1.0 in 13 repos, v0.2.0 in 3, v0.3.0 in 63, v0.4.0 in 1), and
+# platform-shared-go - which HOSTS the proto-to-OpenAPI projection - was itself three
+# releases behind at v0.1.0. The concrete consequence: common.v1.ErrorCode carried 28 values
+# under the engine's pin and 30 under the reference service's, so the fleet disagreed about
+# which error codes exist while every gate reported green.
+#
+# RAISING A FLOOR
+# ---------------
+# Raising a number here is a deliberate, reviewable act that will fail every repo still
+# below it - which is the point, and why it belongs in a CODEOWNERS-guarded file rather than
+# in a script. Raise it when the fleet has been moved, not to force the move.
+#
+# API-007 in controls/api-contract.yaml is the paired control: this file makes a service
+# depend on a current contract module, API-007 makes it actually publish the current
+# components.
+
+version: 1
+domain: module-floors
+
+floors:
+  github.com/coderaxis/platform-contracts-go:
+    min: v0.4.0
+    reason: >-
+      Carries the common.v1 envelope, Meta, PaginationMeta, ProblemDetails and the ErrorCode
+      enum that every service's OpenAPI components are projected from. v0.4.0 is the vintage
+      controls/common-v1-components.json is generated from, so a pin below it cannot produce
+      components matching the reference and will fail API-007.
