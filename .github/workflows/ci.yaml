@@ -1,6 +1,6 @@
 name: CI
 
-# This repository's own self-tests, in the one lane WFC-006 permits.
+# This repository's own self-tests, in the one lane WFC-0006 permits.
 #
 # Seven separate guard workflows used to live beside the eight reusable workflows this repository
 # PUBLISHES. Only the published eight are exempt from the lane allowlist, and the exemption is a
@@ -420,7 +420,7 @@ jobs:
             echo "::error::violating fixture passed; the centralization detectors are not firing"
             exit 1
           fi
-          for control in WFC-001 WFC-002 WFC-004; do
+          for control in WFC-0001 WFC-0002 WFC-0004; do
             if ! echo "$out" | grep -q "::error::\[$control\]"; then
               echo "::error::$control did not fire against the violating fixture"
               exit 1
@@ -428,13 +428,13 @@ jobs:
           done
           echo "all controls fired as expected (exit $rc)"
 
-      # WFC-004 compares two files, so its detector has a failure mode the fixtures cannot show:
+      # WFC-0004 compares two files, so its detector has a failure mode the fixtures cannot show:
       # treating an absent `permissions:` block as "grants nothing" rather than as the repository
       # default token. That reads every permissionless caller of a `contents: read` workflow as
       # broken - 4 of the 5 findings on its first fleet run were this false positive, against
       # callers that pass in CI today. A control that cries wolf gets switched off, so the
       # distinction is pinned here rather than left to the reviewer.
-      - name: Unit test - WFC-004 models the default token, not the empty set
+      - name: Unit test - WFC-0004 models the default token, not the empty set
         run: |
           python3 - <<'PY'
           import importlib.util, pathlib, sys
@@ -468,7 +468,7 @@ jobs:
   # The API-contract gate judges 38 service repositories, so its own catalog, docs table and
   # detectors have to be held to the same standard as the fleet it polices.
   #
-  # The contract-vintage checks (API-007 + controls/module-floors.yaml) carry an extra
+  # The contract-vintage checks (API-0007 + controls/module-floors.yaml) carry an extra
   # obligation the other controls do not: they compare services against a generated reference
   # artifact that lives in this repository but is produced in platform-shared-go. If the floor
   # is raised and the artifact is not regenerated, the two disagree about which proto vintage is
@@ -519,7 +519,7 @@ jobs:
           print(f"floor and reference artifact agree on {floor}")
           PY
 
-      - name: Mutation test - API-007 must fail a spec on a stale proto vintage
+      - name: Mutation test - API-0007 must fail a spec on a stale proto vintage
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -542,11 +542,11 @@ jobs:
           rc=$?
           set -e
           echo "$out"
-          if [ "$rc" -eq 0 ] || ! echo "$out" | grep -q "::error::\[API-007\]"; then
-            echo "::error::API-007 did not fire against a spec built on a stale proto vintage"
+          if [ "$rc" -eq 0 ] || ! echo "$out" | grep -q "::error::\[API-0007\]"; then
+            echo "::error::API-0007 did not fire against a spec built on a stale proto vintage"
             exit 1
           fi
-          echo "API-007 fired as expected (exit $rc)"
+          echo "API-0007 fired as expected (exit $rc)"
 
       - name: Mutation test - a missing reference artifact must fail, never pass
         run: |

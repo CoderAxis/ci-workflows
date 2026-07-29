@@ -6,7 +6,7 @@ name: Dockerfile Standard
 # Every caller declares its `capabilities` (comma-separated, from
 # dockerfile-capability-matrix.yaml: http-api, db-owner, seed, backfill, canary,
 # kafka-producer-dk, worker, gateway, stateless). Static analysis only — this workflow
-# never runs `docker build` and never publishes an image (ADR-0051 DM-001 stays intact).
+# never runs `docker build` and never publishes an image (ADR-0051 DM-0001 stays intact).
 #
 # critical/major controls fail CI; minor is advisory (--fail-on). A machine-readable JSON
 # report is uploaded as an artifact for dashboards / compliance tooling, exactly like

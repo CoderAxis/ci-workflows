@@ -1,5 +1,5 @@
 # Compliant fixture: a thin caller. The filename matches a workflow the platform publishes as
-# reusable, and it calls that workflow at the supported major tag — so WFC-001 and WFC-002 both
+# reusable, and it calls that workflow at the supported major tag — so WFC-0001 and WFC-0002 both
 # hold. This is the shape every consumer repo should have.
 name: Schema Compatibility
 
@@ -9,7 +9,7 @@ on:
 jobs:
   schema-compatibility:
     # A caller bounds the permissions of the workflow it calls, so this must grant at least what
-    # schema-compatibility.yaml's own job declares (WFC-004). id-token is what the called workflow
+    # schema-compatibility.yaml's own job declares (WFC-0004). id-token is what the called workflow
     # exchanges for a short-lived App token; without it the call is rejected at load, not at run.
     permissions:
       contents: read

@@ -1,0 +1,125 @@
+# Platform vocabulary for cspell (DOC-0022).
+#
+# One term per line, case-insensitive by default in cspell. This is the SHARED dictionary: a
+# governed docs repository may add a local `cspell-words.txt` for terms genuinely specific to it
+# (a client's product names), but anything platform-wide belongs here so the same word is not
+# whitelisted twelve times and spelled three ways.
+#
+# Adding a term here is a deliberate act. If a word is wrong, fix the prose instead - the value of
+# a spell check is entirely in what it refuses.
+
+# --- product / org ---------------------------------------------------------------------------
+inboxxhq
+InboxxHQ
+coderaxis
+
+# --- platform architecture -------------------------------------------------------------------
+authz
+idempotency
+idempotent
+idempotency-key
+passcode
+passcodes
+outbox
+supersession
+supersede
+supersedes
+superseded
+namespaced
+observability
+runbook
+runbooks
+scorecard
+scorecards
+multitenancy
+multitenant
+
+# --- messaging / eventing --------------------------------------------------------------------
+Debezium
+Kafka
+RabbitMQ
+Zookeeper
+protojson
+protobuf
+proto
+CDC
+DLQ
+UUIDv5
+UUIDv7
+ULID
+aggregate-version
+
+# --- data ------------------------------------------------------------------------------------
+Postgres
+PostgreSQL
+pgx
+pgbouncer
+psql
+Redis
+OpenSearch
+Elasticsearch
+
+# --- API / contracts -------------------------------------------------------------------------
+OpenAPI
+Swagger
+swaggo
+oasdiff
+Spectral
+gRPC
+protoc
+GraphQL
+webhook
+webhooks
+
+# --- infrastructure / delivery ---------------------------------------------------------------
+Terraform
+kubectl
+kustomize
+Kustomization
+ApplicationSet
+Argo
+ArgoCD
+GitOps
+Fargate
+DynamoDB
+EventBridge
+CloudWatch
+Prometheus
+Grafana
+Loki
+Tempo
+otel
+OTel
+OpenTelemetry
+Karpenter
+kubeconfig
+namespace
+canary
+
+# --- providers -------------------------------------------------------------------------------
+Twilio
+Stripe
+SendGrid
+BYOT
+A2P
+10DLC
+
+# --- security --------------------------------------------------------------------------------
+E2EE
+JWT
+JWKS
+mTLS
+OIDC
+RBAC
+ABAC
+KMS
+
+# --- tooling ---------------------------------------------------------------------------------
+markdownlint
+cspell
+mermaid
+lychee
+k6
+gofmt
+golangci
+ripgrep

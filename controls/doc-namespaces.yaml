@@ -1,0 +1,67 @@
+# Documentation namespace registry - the executable form of ADR-0084.
+#
+# A document identifier is NAMESPACE-LOCAL: `ADR-0006` names a different decision in every
+# namespace that has one, and all eight client-hub ADRs already share numbers with core-docs
+# ADRs. Numbering is therefore never coordinated across namespaces, and a citation that leaves
+# its namespace MUST name the namespace it is entering.
+#
+# This file is the single place that maps a citation qualifier to a namespace. It exists so a
+# misspelled or invented qualifier FAILS rather than being read as ordinary prose - before it
+# existed, `core ADR-0045` and `core-docs ADR-0054` were both in use and neither was checkable.
+#
+# Consumed by check-docs-governance.py (DOC-0015 reference resolution, DOC-0016 citation form).
+# A repository declares WHICH namespace it is via `namespace:` in its own docs-governance.yaml,
+# and where peer trees are on disk via `peer_roots:` there or `--peer-root NAME=PATH`.
+#
+# AUTHORITY IS NOT SYMMETRIC. Identifiers are namespace-local, but decisions are not peers:
+#
+#   Core owns platform architecture. Product hubs own product architecture. A product hub may
+#   SPECIALIZE a Core decision, but it may not contradict or override one.
+#
+# `tier` below is what encodes that: `platform` is the tier every other namespace derives from,
+# and DOC-0024 reads it to decide which namespace a `core_authority` id must resolve in. So the
+# tier is load-bearing config, not a label - renaming the platform-tier namespace moves the
+# obligation with it, and a fleet with no platform tier has no obligation rather than a dangling
+# reference.
+#
+# The consequence for reviewers: a product ADR that conflicts with a governing Core ADR is a
+# documentation defect, not an alternative architecture. CI proves the trace exists (DOC-0015,
+# DOC-0016, DOC-0024); a human still has to read both documents and decide whether they agree.
+# See core-docs governance/DOCUMENTATION_GOVERNANCE.md, "Namespace authority".
+version: 1
+
+namespaces:
+  - name: core-docs
+    qualifier: Core
+    tier: platform
+    doc_types: [adr, rfc, prd]
+    description: >-
+      The shared platform namespace. Holds decisions that bind every service and every client:
+      response envelope, transport choice, event taxonomy, outbox schema, delivery model.
+      Cited from every other namespace. The dependency is intended to be one-way - that is what
+      lets a client hub vendor a core-docs checkout for offline resolution without creating a
+      cycle - so core-docs declares no peer_roots, and a citation from core-docs into a client
+      hub fails closed rather than being resolved. That failure is the intended signal: it has
+      already caught a real case, where a platform gap analysis named two client PRDs by id.
+
+  - name: inboxxhq-platform-docs
+    qualifier: InboxxHQ
+    tier: client-hub
+    doc_types: [adr, rfc, prd]
+    description: >-
+      The InboxxHQ client documentation hub. Owns product and onboarding decisions specific to
+      this client (telephony placement, BYOT tenancy, activation gating). Allocates its own
+      ADR/RFC/PRD numbers starting at 0001, independently of core-docs.
+
+# The service tier
+#
+# Roughly 95 services and gateways carry their own `docs/adr/` namespace, each allocating from
+# 0001. They are deliberately NOT registered here, and the effect is intentional: a citation
+# that tries to reach into a service namespace from outside names an unregistered qualifier and
+# therefore fails closed (DOC-0015). That failure is the signal to ask the right question -
+# a decision that another namespace needs to cite is a platform decision, and belongs in
+# core-docs rather than being reached into sideways.
+#
+# Registering a service namespace here is the deliberate escape hatch if a genuine
+# cross-namespace citation is ever warranted. Adding one is a reviewable change, which is the
+# point.

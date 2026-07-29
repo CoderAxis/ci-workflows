@@ -13,15 +13,15 @@ Design (identical framework to check-delivery-model.py):
   * DATA-DRIVEN, SEVERITY-AWARE (critical/major fail; minor advisory via --fail-on).
   * CAPABILITY-SCOPED: a control with a non-empty `applies_to_capabilities` is only
     evaluated when the caller's declared --capabilities intersects it.
-  * DECLARATION-VERIFIED: --capabilities is a claim, not ground truth; DS-013 cross-checks
+  * DECLARATION-VERIFIED: --capabilities is a claim, not ground truth; DS-0013 cross-checks
     it against repo structure (go.mod core-postgres require, cmd/seed, cmd/backfill,
     cmd/canary) so a stale/wrong declaration is itself a failure.
   * STATIC ANALYSIS ONLY. This script never runs `docker build` and never touches a
-registry - by design, so it cannot conflict with ADR-0051 DM-001 (CI never builds/
+registry - by design, so it cannot conflict with ADR-0051 DM-0001 (CI never builds/
     publishes a container artifact; the central build `inboxxhq-build` is the sole
     builder/publisher).
   * NO DUPLICATE LOGIC: seeding's full contract (binary + data tree + placeholder-only
-    qualified envs) is hard-enforced by seed-contract-check.yaml; DS-012 here is advisory-
+    qualified envs) is hard-enforced by seed-contract-check.yaml; DS-0012 here is advisory-
     only cross-check, never a second hard gate for the same fact.
   * SELF-DOCUMENTING: --write-docs / --verify-docs, exactly like check-delivery-model.py.
 
@@ -249,7 +249,7 @@ def no_latest_tag(df: Dockerfile) -> Finding:
 # ${RUNTIME_UID}[:${RUNTIME_GID}] ARG reference whose *default* (dockerfile-version-
 # matrix.yaml) is itself numeric - the ARG is resolved at build time, this is a static
 # checker, so the sanctioned ARG name is accepted as equivalent to its pinned numeric
-# default (any other ARG name is not - that is what DS-016 catches separately).
+# default (any other ARG name is not - that is what DS-0016 catches separately).
 NUMERIC_USER_RE = re.compile(
     r"^(\d+|\$\{?RUNTIME_UID\}?)(:(\d+|\$\{?RUNTIME_GID\}?))?$"
 )

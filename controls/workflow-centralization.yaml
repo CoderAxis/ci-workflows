@@ -7,7 +7,7 @@
 # WITHOUT any change to this catalog.
 #
 # WHY THIS CATALOG EXISTS. Every other control here governs what a central workflow DOES once it
-# is called — DM-001..DM-013 check the delivery model, DS-001.. the Dockerfile standard, DOC-001..
+# is called — DM-0001..DM-0013 check the delivery model, DS-0001.. the Dockerfile standard, DOC-0001..
 # the doc-governance contract. None of them ask whether a repository USES the central workflow at
 # all. That gap is not theoretical: a repo can keep an entire bespoke implementation of a workflow
 # the platform already publishes, and no check anywhere complains, because every control is scoped
@@ -15,7 +15,7 @@
 # and conventions decay silently — which is exactly the failure mode the platform's own governance
 # philosophy exists to prevent: a rule that lives only in prose gets violated eventually.
 #
-# SCOPE, AND WHAT THIS DELIBERATELY DOES NOT CLAIM. WFC-001 detects a local workflow that SHADOWS a
+# SCOPE, AND WHAT THIS DELIBERATELY DOES NOT CLAIM. WFC-0001 detects a local workflow that SHADOWS a
 # published reusable workflow — same workflow filename, but implementing the steps itself instead of
 # calling the central one. Filename correspondence is a strong signal and produces no false
 # positives in the current fleet, but it is a heuristic, not a proof: a repository that reimplements
@@ -28,7 +28,7 @@
 # matrix here would duplicate the archetype registry (ADR-0064). The rule is narrower and provable:
 # if you have your own copy of something we publish, that is drift.
 #
-# Control IDs (WFC-NNN) are STABLE and permanent — see controls/delivery-model.yaml header for the
+# Control IDs (WFC-NNNN) are STABLE and permanent — see controls/delivery-model.yaml header for the
 # full ID/lifecycle discipline; it applies identically here.
 #
 # Policy SSOT (architecture is owned by the decision records; this catalog only enforces them):
@@ -37,7 +37,7 @@
 #              local. This catalog generalises that principle's ENFORCEMENT beyond docs governance.
 #   ADR-0051 - Artifact promotion; source of the "a delivery change is made ONCE centrally and
 #              rolled out by moving @v1, never by editing this file across the fleet" discipline
-#              that WFC-002 protects.
+#              that WFC-0002 protects.
 #
 # KNOWN GAP this catalog does not close: there is no ADR that defines the intended SCOPE of
 # fleet-wide CI centralization — which workflow families should be central and which are legitimately
@@ -52,7 +52,7 @@ policy_ssot:
   - ADR-0051
 
 controls:
-  - id: WFC-001
+  - id: WFC-0001
     title: A repo does not keep a local implementation of a workflow the platform publishes as reusable
     owner: platform-infrastructure
     scope: caller-workflow
@@ -79,7 +79,7 @@ controls:
     detector: local_shadow_of_published_reusable
     refs: [ADR-0081]
 
-  - id: WFC-002
+  - id: WFC-0002
     title: Calls to a central reusable workflow pin the supported major tag
     owner: platform-infrastructure
     scope: caller-workflow
@@ -103,7 +103,7 @@ controls:
     detector: central_call_pins_major_tag
     refs: [ADR-0051]
 
-  - id: WFC-004
+  - id: WFC-0004
     title: A job calling a reusable workflow grants every permission that workflow declares
     owner: platform-infrastructure
     scope: caller-workflow
@@ -133,7 +133,7 @@ controls:
     detector: caller_grants_declared_permissions
     refs: [ADR-0051, ADR-0081]
 
-  - id: WFC-005
+  - id: WFC-0005
     title: A repository does not implement or listen for dependency bumps locally
     owner: platform-infrastructure
     scope: caller-workflow
@@ -172,7 +172,7 @@ controls:
     detector: no_local_bump_workflows
     refs: [ADR-0051]
 
-  - id: WFC-006
+  - id: WFC-0006
     title: A repository holds only the permitted workflow lanes
     owner: platform-infrastructure
     scope: caller-workflow

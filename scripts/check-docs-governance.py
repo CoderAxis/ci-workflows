@@ -23,7 +23,7 @@ Design:
   * DELEGATED DOMAIN LOGIC. Catalog schema + generated-artifact drift is domain-specific
     (each repo's catalog models its own domain), so it is DELEGATED to the repo's own
     scripts/build_catalog.py --check, invoked by the reusable workflow. It is declared here
-    (DOC-010) but never duplicated.
+    (DOC-0010) but never duplicated.
   * SEVERITY- + LIFECYCLE-AWARE. critical/major fail CI; minor is advisory (--fail-on).
   * EVIDENCE-PRODUCING / ACTIONABLE / MACHINE-READABLE / SELF-DOCUMENTING, exactly as the
     delivery-model and dockerfile-standard checkers.
@@ -75,13 +75,56 @@ DEFAULT_DOC_ROOTS = (
 )
 # Document folders are plural. These singular names were in DEFAULT_DOC_ROOTS while the
 # directories on disk were already `adrs`/`rfcs`, so the roots resolved to nothing and were
-# skipped in silence: 82 ADRs in core-docs had never been validated. DOC-011 now rejects the
+# skipped in silence: 82 ADRs in core-docs had never been validated. DOC-0011 now rejects the
 # singular name outright rather than quietly governing nothing.
 SINGULAR_FOLDER_FIXES = {"adr": "adrs", "rfc": "rfcs", "prd": "prds", "product": "prds"}
-# Folders holding decision records, for DOC-006 supersession indexing. This was previously
+# Folders holding decision records, for DOC-0006 supersession indexing. This was previously
 # spelled inline as ("adr", "rfc", "rfcs"), so every ADR under adrs/ fell outside the index
 # and supersession was structurally unverifiable for ADRs across the whole fleet.
 DECISION_FOLDERS = ("adrs", "rfcs")
+
+# --- identifier vocabulary: one width, one shape, everywhere ------------------------------
+# Every identifier on this platform is 4-digit zero-padded: ADR-0001, RFC-0001, PRD-0001, and
+# the control ids in github-actions/controls/. Mixed widths are not cosmetic - `DOC-0001` and
+# `DOC-0001` are different strings, so a grep for one silently misses citations written as the
+# other, and any tool that sorts ids lexically interleaves the two families. 4 digits is also
+# the width at which zero-padded sort order matches numeric order for every id this platform
+# will ever allocate.
+ID_WIDTH = 4
+# Numbered documents. The prefix must agree with the folder (an RFC-* file under adrs/ is a
+# filing error, not a naming one) and the slug is kebab-case with no leading, trailing or
+# doubled hyphen - `[a-z0-9-]+` would admit all three.
+NUMBERED_DOC_FOLDERS = {"adrs": "ADR", "rfcs": "RFC", "prds": "PRD"}
+DOCUMENT_FILENAME_RE = re.compile(
+    r"^(?P<prefix>ADR|RFC|PRD)-(?P<number>\d{4})-(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)\.md$"
+)
+# Files that legitimately live in a numbered-document folder without being one: the generated
+# indexes, folder READMEs, and `_`-prefixed partials.
+NON_DOCUMENT_STEMS = re.compile(r"^(README|_.*|[A-Z]+_INDEX)$")
+# Control ids in github-actions/controls/*.yaml (DOC-0001, API-0001, DM-0001, DS-0001,
+# WFC-0001). Enforced here because until now `load_controls` only required `id` to be
+# non-empty, so `DOC-1`, `doc-0001` or a bare `1` would all have been accepted.
+CONTROL_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*-\d{4}$")
+
+# Namespace registry (central policy data) and the per-namespace reserved-id register.
+NAMESPACE_REGISTRY = Path(__file__).resolve().parent.parent / "controls" / "doc-namespaces.yaml"
+RESERVED_IDS_PATH = Path("governance/RESERVED_IDS.md")
+# A citation, optionally preceded by a namespace qualifier. The leading token is only treated as
+# a qualifier when it is a registered alias, so ordinary prose ("See ADR-0069", "supersedes
+# ADR-0012") reads as a bare citation rather than as a citation into a namespace called "See".
+CITATION_RE = re.compile(r"(?:(?P<qual>[A-Za-z][A-Za-z0-9-]*)[ \t]+)?(?P<id>(?:ADR|RFC|PRD)-\d{4})\b")
+INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+# IETF RFCs share the `RFC-NNNN` shape with platform RFCs: docs legitimately cite RFC-2119
+# (MUST/SHOULD keywords), RFC-3339 (timestamps), RFC-7807/9457 (problem details). Platform RFC
+# numbers are allocated from 0001 and are therefore always zero-padded with a leading zero, so an
+# unpadded four-digit RFC is an external standard - unless it resolves in a namespace, which
+# keeps the transitional `RFC-9\d{3}` convention (RFC-9001) checkable.
+EXTERNAL_STANDARD_RE = re.compile(r"^RFC-[1-9]\d{3}$")
+# The 9000 block is a reserved band for TRANSITIONAL documents, not part of the main allocation
+# sequence - a pre-existing convention that check_capability_certification.py already matches as
+# `(RFC|ADR)-9\d{3}`. Excluded from sequence checks, or a single RFC-9001 would report ~9000
+# phantom gaps beneath it.
+TRANSITIONAL_BAND_FLOOR = 9000
 REQUIRED_KEYS = ("owner", "status", "last_reviewed", "review_cycle",
                  "related_services", "related_rfcs", "related_adrs")
 VALID_STATUSES = {"draft", "proposed", "accepted", "active", "deprecated", "superseded"}
@@ -104,12 +147,15 @@ RELATED_DOCS_HEADING_RE = re.compile(r"^##+\s+(?:\d+\.\s*)?related docs\s*$", re
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 BLOCK_LIST_ITEM_RE = re.compile(r"^  - \S")
 TOP_LEVEL_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*:")
-DECISION_ID_RE = re.compile(r"^(ADR|RFC)-\d+", re.IGNORECASE)
+# Pinned to exactly ID_WIDTH digits. `\d+` accepted `ADR-12-foo.md`, which then entered the
+# DOC-0006 supersession index under the id `ADR-12` - an id no citation would ever spell, so
+# its chains were unverifiable while reporting as indexed.
+DECISION_ID_RE = re.compile(r"^(ADR|RFC)-\d{4}", re.IGNORECASE)
 RELATED_LIST_KEYS = ("related_services", "related_rfcs", "related_adrs")
 LEGACY_RELATED_KEYS = {"related_rfc": "related_rfcs", "related_adr": "related_adrs"}
 MAX_DETAILS = 50  # cap per-control violation lines printed, to avoid flooding CI logs
 
-# Source-code citations in prose, for DOC-012. Matches a backticked token that names a
+# Source-code citations in prose, for DOC-0012. Matches a backticked token that names a
 # file with a code extension, optionally with a `:NNN` line suffix. Deliberately narrow:
 # it must carry a recognised extension, so prose like `Policy` or `make openapi-contract`
 # is never treated as a path.
@@ -284,7 +330,7 @@ class DocFile:
 
 class DocsRepo:
     def __init__(self, root: Path, config: dict, today: dt.date, grace: int,
-                 source_roots: tuple = ()):
+                 source_roots: tuple = (), peer_roots: dict = None):
         self.root = root
         self.today = today
         self.grace = grace
@@ -301,6 +347,118 @@ class DocsRepo:
         self.owner_slugs, self.owner_errors = self._load_owner_registry()
         self.has_catalog = (root / "catalog").is_dir()
         self.client_scope_terms = self._load_client_scope_terms()
+        self.namespace = config.get("namespace")
+        self.namespaces = self._load_namespace_registry()
+        self.qualifier_aliases = self._build_qualifier_aliases()
+        self.peer_roots = {k: Path(v) if Path(v).is_absolute() else (root / v)
+                           for k, v in (config.get("peer_roots") or {}).items()}
+        self.peer_roots.update(peer_roots or {})
+        self.local_ids = self._ids_in_tree(root)
+        self.reserved_ids = self._load_reserved_ids()
+        self.domain_vocabulary = tuple(config.get("domain_vocabulary") or ())
+        self.platform_concern_domains = tuple(config.get("platform_concern_domains") or ())
+        self._peer_id_cache: dict = {}
+
+    @staticmethod
+    def _ids_in_tree(root: Path) -> set:
+        """Every well-formed numbered document id anywhere in a namespace.
+
+        Deliberately not restricted to adrs/ | rfcs/ | prds/. DOC-0013 governs where a numbered
+        document *should* live, but resolution has to answer a different question - does the
+        cited document exist - and core-docs really does hold numbered documents outside those
+        folders (PRD-0030 and RFC-0030 sit in an architecture/ review bundle). Indexing only the
+        canonical folders would report live documents as dangling citations.
+        """
+        ids = set()
+        for path in root.rglob("*.md"):
+            # Dot-directories are never part of a namespace's own document set. This is
+            # load-bearing, not hygiene: the client hub vendors a full core-docs checkout at
+            # `.core-docs/`, so indexing it would register all 80 platform ADRs as the hub's own
+            # ids. Every cross-namespace citation would then "resolve" locally, which is the
+            # resolve-by-search-order behaviour ADR-0084 explicitly rejects - and the check would
+            # report a confident pass while verifying nothing.
+            if any(part.startswith(".") for part in path.relative_to(root).parts):
+                continue
+            m = DOCUMENT_FILENAME_RE.match(path.name)
+            if m is not None:
+                ids.add(f"{m.group('prefix')}-{m.group('number')}")
+        return ids
+
+    def _load_namespace_registry(self) -> list:
+        if not NAMESPACE_REGISTRY.is_file():
+            return []
+        data = yaml.safe_load(NAMESPACE_REGISTRY.read_text(encoding="utf-8")) or {}
+        entries = data.get("namespaces")
+        return [e for e in entries if isinstance(e, dict) and e.get("name")] if isinstance(entries, list) else []
+
+    def _build_qualifier_aliases(self) -> dict:
+        """Map every recognised spelling of a namespace to its registry entry, case-folded.
+
+        The canonical qualifier is registered; the namespace directory name and its `-docs`
+        stem are also accepted as *recognised* spellings so DOC-0016 can report them as
+        non-canonical. Without the aliases, `core ADR-0045` would parse as a bare citation of
+        ADR-0045 and be reported as a dangling local id - a true failure, but for the wrong
+        reason and with useless remediation.
+        """
+        aliases: dict = {}
+        for entry in self.namespaces:
+            name = entry["name"]
+            tokens = {entry.get("qualifier") or name, name}
+            if name.endswith("-docs"):
+                tokens.add(name[: -len("-docs")])
+            for token in tokens:
+                if token:
+                    aliases[str(token).lower()] = entry
+        return aliases
+
+    def namespace_qualifier(self, name: str) -> str:
+        for entry in self.namespaces:
+            if entry["name"] == name:
+                return entry.get("qualifier") or name
+        return name
+
+    def platform_namespace(self):
+        """The namespace registered as the platform tier - the one every other namespace derives from.
+
+        Read from the registry rather than hardcoded, so DOC-0024 keeps working if the platform
+        namespace is ever renamed, and so a fleet with no platform tier simply has no obligation
+        rather than a broken reference to a namespace that never existed.
+        """
+        for entry in self.namespaces:
+            if entry.get("tier") == "platform":
+                return entry.get("name")
+        return None
+
+    def peer_ids(self, name: str):
+        """Ids in a peer namespace, or None when that namespace is not present in this run."""
+        if name in self._peer_id_cache:
+            return self._peer_id_cache[name]
+        root = self.peer_roots.get(name)
+        ids = self._ids_in_tree(root) if root and root.is_dir() else None
+        self._peer_id_cache[name] = ids
+        return ids
+
+    def _load_reserved_ids(self) -> set:
+        path = self.root / RESERVED_IDS_PATH
+        if not path.is_file():
+            return set()
+        data, err = parse_frontmatter(path.read_text(encoding="utf-8"))
+        if err is not None or not isinstance(data, dict):
+            return set()
+        # Three different reasons an id resolves without a document behind it, kept as separate
+        # lists so the distinction stays reviewable rather than collapsing into one allowlist:
+        # `reserved_ids` are cited-but-not-yet-written; `known_gaps` are numbers that will never be
+        # written but are named in prose *about* the numbering sequence; `retired_ids` were
+        # allocated, then merged into another document and deleted. A retired id must keep
+        # resolving because prose that explains the merge cites it, and it must never be
+        # reassigned - reusing it would silently repoint every historical mention.
+        resolved = set()
+        for key in ("reserved_ids", "known_gaps", "retired_ids"):
+            entries = data.get(key)
+            if isinstance(entries, list):
+                resolved |= {str(e["id"]).strip() for e in entries
+                             if isinstance(e, dict) and isinstance(e.get("id"), str)}
+        return resolved
 
     def _load_governed(self) -> list[DocFile]:
         docs: list[DocFile] = []
@@ -323,7 +481,7 @@ class DocsRepo:
 
         A citation is resolved against the docs repo first, then against any --source-root
         checkouts the caller supplied. Returning None means "cannot be checked here" (the
-        owning repository is not present), which DOC-012 treats as skipped, never failed.
+        owning repository is not present), which DOC-0012 treats as skipped, never failed.
         """
         candidate = self.root / rel
         if candidate.exists():
@@ -638,7 +796,7 @@ def doc_root_naming(repo: "DocsRepo") -> "Finding":
 
 
 def source_path_citations(repo: "DocsRepo") -> "Finding":
-    """DOC-012: a prose citation of source code must be verifiable, or it is not evidence.
+    """DOC-0012: a prose citation of source code must be verifiable, or it is not evidence.
 
     Two failure modes, both observed in the contracts doc set:
 
@@ -680,7 +838,590 @@ def source_path_citations(repo: "DocsRepo") -> "Finding":
     return Finding(True, f"{checked} source-path citation(s) resolve; no line-number citations{note}")
 
 
+def _numbered_doc_candidates(repo: "DocsRepo"):
+    """Yield (doc, expected_prefix) for every file that must be a well-formed numbered document.
+
+    A file inside adrs/ | rfcs/ | prds/ is subject to the naming rule when EITHER it already
+    claims to be a numbered document (its name begins with ADR/RFC/PRD in any case, so
+    `ADR0001.md`, `ADR-kafka.md` and `adr1.md` are all caught rather than ignored for not
+    matching), OR it sits at the immediate top level of the folder, where a numbered document
+    is the only thing that belongs. The second arm is what rejects `kafka.md`.
+
+    Nested trees are deliberately exempt unless they claim a prefix: core-docs/rfcs carries
+    per-domain subfolders (api/, events/, data/docker/...) holding supporting prose such as
+    IMAGE_BUILD.md, which are not decision records and were never meant to be numbered.
+    """
+    for doc in repo.governed:
+        parts = doc.rel.parts
+        folder = parts[0] if parts else ""
+        expected = NUMBERED_DOC_FOLDERS.get(folder)
+        if expected is None or is_template_doc(doc.rel):
+            continue
+        if NON_DOCUMENT_STEMS.match(doc.path.stem):
+            continue
+        claims_prefix = re.match(r"^(ADR|RFC|PRD)", doc.path.stem, re.IGNORECASE) is not None
+        if claims_prefix or len(parts) == 2:
+            yield doc, expected
+
+
+def document_id_convention(repo: "DocsRepo") -> "Finding":
+    """DOC-0013: numbered documents are `PREFIX-NNNN-kebab-slug.md`, filed under their prefix.
+
+    Four failure modes, each of which breaks something concrete downstream:
+
+      * wrong zero-padding (`ADR-12-...`) - the id is then spelled differently everywhere it
+        is cited, so reference checking and grep both miss it;
+      * a missing or malformed number (`ADR-kafka.md`, `adr1.md`) - the document has no id at
+        all, so it cannot be cited, indexed or superseded;
+      * a slug that is not kebab-case (`ADR-0002-Kafka.md`, doubled or trailing hyphens) -
+        filenames become case-sensitivity hazards across macOS and Linux checkouts;
+      * a prefix that disagrees with its folder (`RFC-0001-...` under adrs/) - a filing error
+        that silently removes the document from its type's index.
+    """
+    details: list[str] = []
+    checked = 0
+    for doc, expected in _numbered_doc_candidates(repo):
+        name = doc.path.name
+        m = DOCUMENT_FILENAME_RE.match(name)
+        if m is None:
+            details.append(
+                f"{doc.rel}: filename must be '{expected}-NNNN-kebab-case-slug.md' "
+                f"({ID_WIDTH}-digit zero-padded number, lowercase slug with single hyphens)")
+            continue
+        checked += 1
+        if m.group("prefix") != expected:
+            details.append(
+                f"{doc.rel}: is a {m.group('prefix')} but is filed under {doc.rel.parts[0]}/, "
+                f"which holds {expected} documents - move it to the folder for its type")
+    if details:
+        return Finding(False, f"{len(details)} document(s) violate the id/filename convention",
+                       details[:MAX_DETAILS])
+    return Finding(True, f"all {checked} numbered document(s) use "
+                         f"PREFIX-{'N' * ID_WIDTH}-kebab-slug.md and are filed under their type")
+
+
+def document_id_frontmatter(repo: "DocsRepo") -> "Finding":
+    """DOC-0017: a numbered document declares an `id:` that matches its filename.
+
+    The identifier is derivable from the filename, so this key is deliberately redundant - and
+    the redundancy is the control. `id:` is what the generated catalog and the docs site key
+    entries on, rather than re-deriving them by parsing paths, so a stale value publishes the
+    right document under the wrong identifier. That is exactly what a copied template produces:
+    duplicate an ADR to start the next one, rename the file, and the inherited `id:` still names
+    the document it was copied from. Only a numbered document carries this key; standards,
+    runbooks and hubs have no identifier to declare.
+    """
+    missing: list[str] = []
+    mismatched: list[str] = []
+    checked = 0
+    for doc, _ in _numbered_doc_candidates(repo):
+        m = DOCUMENT_FILENAME_RE.match(doc.path.name)
+        if m is None:
+            continue  # shape is DOC-0013's finding
+        expected = f"{m.group('prefix')}-{m.group('number')}"
+        if not isinstance(doc.data, dict):
+            continue  # absent/invalid frontmatter is DOC-0001's finding
+        checked += 1
+        declared = doc.data.get("id")
+        if declared is None:
+            missing.append(f"{doc.rel}: numbered document must declare `id: {expected}` in "
+                           f"frontmatter")
+        elif str(declared).strip() != expected:
+            mismatched.append(f"{doc.rel}: declares `id: {declared}` but its filename says "
+                              f"{expected} - one of the two is wrong, and a copied template is "
+                              f"the usual cause")
+    details = mismatched + missing
+    if details:
+        return Finding(False, f"{len(mismatched)} mismatched and {len(missing)} missing "
+                              f"document id declaration(s)", details[:MAX_DETAILS])
+    return Finding(True, f"all {checked} numbered document(s) declare an id matching their filename")
+
+
+def duplicate_document_ids(repo: "DocsRepo") -> "Finding":
+    """DOC-0014: a document id is unique within its namespace.
+
+    Scoped to this repository on purpose. Each documentation namespace (core-docs, and each
+    client hub) allocates its own numbers, so core-docs ADR-0001 and a client's ADR-0001 are
+    both legitimate and are NOT duplicates; they are disambiguated at the citation site by the
+    namespace qualifier, not by being globally unique. Two files claiming the same id inside
+    one namespace is the real defect: every citation of that id becomes ambiguous, and the
+    generated catalog silently keeps whichever the walk reached last.
+    """
+    by_id: dict[str, list[str]] = {}
+    for doc, _ in _numbered_doc_candidates(repo):
+        m = DOCUMENT_FILENAME_RE.match(doc.path.name)
+        if m is None:
+            continue  # shape is DOC-0013's finding; do not double-report it here
+        by_id.setdefault(f"{m.group('prefix')}-{m.group('number')}", []).append(str(doc.rel))
+    details = [f"{doc_id} is claimed by {len(paths)} files: {', '.join(sorted(paths))}"
+               for doc_id, paths in sorted(by_id.items()) if len(paths) > 1]
+    if details:
+        return Finding(False, f"{len(details)} duplicate document id(s) in this namespace",
+                       details[:MAX_DETAILS])
+    return Finding(True, f"all {len(by_id)} document id(s) are unique within this namespace")
+
+
+# --- citation resolution (DOC-0015 / DOC-0016), the executable form of ADR-0084 -------------
+
+@dataclass
+class Citation:
+    doc_id: str          # ADR-0069
+    namespace: str       # peer namespace name, or None when the citation is bare (== local)
+    qualifier: str       # the qualifier text as written, or "" when bare
+    offset: int
+    line: int
+    linked: bool         # the citation sits inside the text of a markdown link
+
+
+def _mask_uncitable(text: str) -> str:
+    """Blank the regions where an identifier is not a citation, preserving offsets.
+
+    Three regions are masked rather than removed, so reported line numbers stay true:
+
+      * frontmatter - `related_adrs:` values are structured data governed by DOC-0004/DOC-0005,
+        not prose citations;
+      * fenced code blocks - a sample envelope or YAML snippet may name ids illustratively;
+      * markdown link *targets* - `](../../core-docs/adrs/ADR-0069-....md)` contains an id that
+        is a path component. Without masking it, every correctly-linked cross-namespace citation
+        would also read as a bare local citation and fail;
+      * inline code spans - a backticked `ADR-0001` names a *string* rather than citing a
+        document. Standards and templates write `PREFIX-NNNN` examples this way, so treating
+        them as citations reports the format documentation as a dangling reference.
+    """
+    out = list(text)
+
+    def blank(start: int, end: int) -> None:
+        for i in range(start, min(end, len(out))):
+            if out[i] != "\n":
+                out[i] = " "
+
+    lines = text.splitlines(keepends=True)
+    pos = 0
+    if lines and lines[0].strip() == "---":
+        pos = len(lines[0])
+        for line in lines[1:]:
+            end = pos + len(line)
+            blank(pos, end)
+            pos = end
+            if line.strip() == "---":
+                break
+    in_fence = False
+    cursor = 0
+    for line in lines:
+        end = cursor + len(line)
+        if line.lstrip().startswith(("```", "~~~")):
+            blank(cursor, end)
+            in_fence = not in_fence
+        elif in_fence:
+            blank(cursor, end)
+        cursor = end
+    for m in MARKDOWN_LINK_RE.finditer(text):
+        blank(m.start(2), m.end(2))
+    for m in INLINE_CODE_RE.finditer(text):
+        blank(m.start(), m.end())
+    return "".join(out)
+
+
+def _link_text_spans(text: str):
+    return [(m.start(1), m.end(1)) for m in MARKDOWN_LINK_RE.finditer(text)]
+
+
+def _citations(repo: "DocsRepo", doc: "DocFile"):
+    """Yield every document-id citation in a document's prose.
+
+    A citation is cross-namespace when the token immediately before the id is a registered
+    qualifier for a namespace (or one of that namespace's recognised aliases, which is how the
+    two spellings already in the wild - `core ADR-0045` and `core-docs ADR-0054` - are detected
+    as non-canonical rather than silently read as prose). Anything else is a bare citation,
+    which by ADR-0084 means *this* namespace.
+    """
+    masked = _mask_uncitable(doc.text)
+    spans = _link_text_spans(doc.text)
+    for m in CITATION_RE.finditer(masked):
+        token = (m.group("qual") or "").strip()
+        entry = repo.qualifier_aliases.get(token.lower()) if token else None
+        start = m.start("id")
+        yield Citation(
+            doc_id=m.group("id"),
+            namespace=entry["name"] if entry else None,
+            qualifier=token if entry else "",
+            offset=start,
+            line=masked.count("\n", 0, start) + 1,
+            linked=any(a <= start < b for a, b in spans),
+        )
+
+
+def _slugify_heading(text: str) -> str:
+    """GitHub's heading-anchor algorithm: strip formatting, lowercase, spaces to hyphens."""
+    text = re.sub(r"`([^`]*)`", r"\1", text)
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)      # links keep their text
+    text = re.sub(r"[*_~]", "", text)
+    text = text.strip().lower()
+    text = re.sub(r"[^\w\- ]", "", text, flags=re.UNICODE)
+    return text.replace(" ", "-")
+
+
+def internal_link_resolution(repo: "DocsRepo") -> "Finding":
+    """DOC-0019: a relative link inside the docs tree resolves, anchor included.
+
+    Only repository-internal links are checked. External URLs are deliberately out of scope: they
+    fail for reasons that have nothing to do with the change under review - rate limits,
+    transient outages, sites that block CI egress - and a gate that goes red for reasons a PR
+    author cannot fix is a gate people learn to re-run rather than read.
+
+    Anchors are resolved against the target document's headings, because a link to a section that
+    was renamed is the most common form of documentation rot and the one least visible to a
+    reviewer: the link still works, it just silently lands at the top of the page.
+    """
+    missing_file: list[str] = []
+    missing_anchor: list[str] = []
+    checked = 0
+    heading_cache: dict = {}
+
+    def anchors_for(path: Path) -> set:
+        if path not in heading_cache:
+            slugs, counts = set(), Counter()
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                heading_cache[path] = set()
+                return heading_cache[path]
+            for line in text.splitlines():
+                m = re.match(r"^(#{1,6})\s+(.*?)\s*#*$", line)
+                if m is None:
+                    continue
+                base = _slugify_heading(m.group(2))
+                if not base:
+                    continue
+                # GitHub disambiguates repeated headings by appending -1, -2, ...
+                slugs.add(base if not counts[base] else f"{base}-{counts[base]}")
+                counts[base] += 1
+            heading_cache[path] = slugs
+        return heading_cache[path]
+
+    for doc in repo.governed:
+        for m in MARKDOWN_LINK_RE.finditer(doc.text):
+            target = m.group(2).strip()
+            if not target or target.startswith(("http://", "https://", "mailto:", "#", "<")):
+                continue
+            if "{{" in target:
+                continue  # a template placeholder, resolved when the template is instantiated
+            target = target.split()[0]  # drop a trailing "title"
+            rel_path, _, anchor = target.partition("#")
+            if not rel_path:
+                continue
+            resolved = (doc.path.parent / rel_path).resolve()
+            checked += 1
+            if not resolved.exists():
+                missing_file.append(f"{doc.rel}: link target does not exist: {rel_path}")
+                continue
+            if anchor and resolved.suffix == ".md":
+                if anchor.lower() not in anchors_for(resolved):
+                    missing_anchor.append(
+                        f"{doc.rel}: `{rel_path}` exists but has no heading matching "
+                        f"anchor #{anchor}")
+    details = missing_file + missing_anchor
+    if details:
+        return Finding(False, f"{len(missing_file)} dangling internal link(s) and "
+                              f"{len(missing_anchor)} unresolvable anchor(s)", details[:MAX_DETAILS])
+    return Finding(True, f"all {checked} internal link(s) resolve, anchors included")
+
+
+def sequential_id_allocation(repo: "DocsRepo") -> "Finding":
+    """DOC-0018: a new document takes the next unallocated identifier in its namespace.
+
+    Checked as an ALLOCATION rule, never as a retroactive audit of the whole sequence. The
+    distinction matters: core-docs has a legitimate historical gap at ADR-0047, and a rule that
+    demanded a contiguous sequence would fail every unrelated documentation change until someone
+    back-filled a decision that was never made. A gate that cannot go green teaches people to
+    ignore it.
+
+    So the rule is about the *top* of the sequence, which is the only part a new document can get
+    wrong: the highest allocated identifier must not leave a gap above the previous high-water
+    mark that is neither an existing document nor a declared reservation. Skipping ahead - taking
+    ADR-0090 when ADR-0085 is free - is what makes two people's concurrent ADRs collide later,
+    and it is invisible the moment it happens.
+    """
+    by_prefix: dict = {}
+    transitional: dict = {}
+    for doc, _ in _numbered_doc_candidates(repo):
+        m = DOCUMENT_FILENAME_RE.match(doc.path.name)
+        if m is None:
+            continue
+        number = int(m.group("number"))
+        bucket = transitional if number >= TRANSITIONAL_BAND_FLOOR else by_prefix
+        bucket.setdefault(m.group("prefix"), set()).add(number)
+    reserved: dict = {}
+    for rid in repo.reserved_ids:
+        prefix, _, num = rid.partition("-")
+        if num.isdigit():
+            reserved.setdefault(prefix, set()).add(int(num))
+
+    details: list[str] = []
+    for prefix, numbers in sorted(by_prefix.items()):
+        known = numbers | reserved.get(prefix, set())
+        highest = max(numbers)
+        # Every number below the high-water mark must be an existing document or a declared
+        # reservation/gap. Anything else is a slot that was skipped without being recorded.
+        undeclared = sorted(n for n in range(1, highest + 1) if n not in known)
+        if undeclared:
+            shown = ", ".join(f"{prefix}-{n:04d}" for n in undeclared[:10])
+            more = f" (+{len(undeclared) - 10} more)" if len(undeclared) > 10 else ""
+            details.append(
+                f"{prefix}: {len(undeclared)} identifier(s) below the highest allocated "
+                f"{prefix}-{highest:04d} are neither allocated nor declared: {shown}{more}. "
+                f"Either the number was skipped - take the lowest free one instead - or the gap "
+                f"is intentional and belongs in {RESERVED_IDS_PATH} under known_gaps")
+    if details:
+        return Finding(False, f"{len(details)} identifier sequence(s) contain undeclared gaps",
+                       details[:MAX_DETAILS])
+    summary = ", ".join(f"{p}-{max(n):04d}" for p, n in sorted(by_prefix.items())) or "none"
+    band = ""
+    if transitional:
+        count = sum(len(v) for v in transitional.values())
+        band = f"; {count} transitional document(s) in the {TRANSITIONAL_BAND_FLOOR} band, " \
+               f"outside the sequence"
+    return Finding(True, f"identifier sequences are contiguous or declared "
+                         f"(high-water: {summary}{band})")
+
+
+def document_reference_resolution(repo: "DocsRepo") -> "Finding":
+    """DOC-0015: every cited document identifier resolves, in the namespace the citation names.
+
+    A bare id resolves against this namespace; a qualified id against the named peer. This is
+    the control that could not be written before ADR-0084, because `ADR-0006` names a real
+    document in more than one namespace and a checker had no way to know which was meant.
+
+    A peer namespace that is not present in this run is reported as skipped, never as passing -
+    the same rule DOC-0012 applies to source paths in unavailable repositories.
+    """
+    if not repo.namespace:
+        return Finding(False, "this repository does not declare which namespace it is",
+                       ["docs-governance.yaml: add `namespace: <name>` naming this repository's "
+                        "entry in controls/doc-namespaces.yaml (ADR-0084 §1)"])
+    dangling: list[str] = []
+    skipped: set[str] = set()
+    checked = 0
+    for doc in repo.governed:
+        for cite in _citations(repo, doc):
+            # A qualified citation of this repository's OWN namespace is still a local citation.
+            # core-docs prose legitimately writes "core-docs ADR-0035" when describing the
+            # namespace itself; resolving that against a peer checkout would look for core-docs
+            # inside core-docs and report it as an unavailable peer.
+            if cite.namespace is None or cite.namespace == repo.namespace:
+                resolved = (cite.doc_id in repo.local_ids
+                            or cite.doc_id in repo.reserved_ids)
+                if not resolved and EXTERNAL_STANDARD_RE.match(cite.doc_id):
+                    continue  # an IETF standard, not a platform document
+                checked += 1
+                if not resolved:
+                    dangling.append(
+                        f"{doc.rel}:{cite.line}: `{cite.doc_id}` does not exist in this namespace "
+                        f"({repo.namespace}). If it belongs to another namespace, qualify it "
+                        f"(e.g. `Core {cite.doc_id}`); if it is a deliberate forward reference, "
+                        f"declare it in {RESERVED_IDS_PATH}")
+                continue
+            peer_ids = repo.peer_ids(cite.namespace)
+            if peer_ids is None:
+                skipped.add(cite.namespace)
+                continue
+            checked += 1
+            if cite.doc_id not in peer_ids:
+                dangling.append(f"{doc.rel}:{cite.line}: `{cite.qualifier} {cite.doc_id}` does not "
+                                f"exist in namespace {cite.namespace}")
+    note = f" ({len(skipped)} peer namespace(s) not present in this run: "\
+           f"{', '.join(sorted(skipped))})" if skipped else ""
+    if dangling:
+        return Finding(False, f"{len(dangling)} unresolvable document citation(s){note}",
+                       dangling[:MAX_DETAILS])
+    return Finding(True, f"all {checked} document citation(s) resolve{note}")
+
+
+def cross_namespace_citation_form(repo: "DocsRepo") -> "Finding":
+    """DOC-0016: a cross-namespace citation uses the registered qualifier and links on first use.
+
+    Two failure modes, both live before ADR-0084. The qualifier was spelled three ways (`Core`,
+    `core`, `core-docs`), so no parser could rely on it; and a qualifier is only a claim about
+    which namespace is meant, so the first mention in a document must also be a resolvable link
+    that makes the claim checkable on disk. Later mentions need no link - the document has
+    already resolved the id once, and requiring it everywhere makes prose unreadable without
+    adding any checking power.
+    """
+    if not repo.namespace:
+        return Finding(False, "this repository does not declare which namespace it is", [])
+    wrong_spelling: list[str] = []
+    unlinked: list[str] = []
+    seen: set[tuple] = set()
+    checked = 0
+    for doc in repo.governed:
+        for cite in sorted(_citations(repo, doc), key=lambda c: c.offset):
+            if cite.namespace is None or cite.namespace == repo.namespace:
+                continue
+            checked += 1
+            canonical = repo.namespace_qualifier(cite.namespace)
+            if cite.qualifier != canonical:
+                wrong_spelling.append(
+                    f"{doc.rel}:{cite.line}: `{cite.qualifier} {cite.doc_id}` must be written "
+                    f"`{canonical} {cite.doc_id}` - the registered qualifier for "
+                    f"{cite.namespace}")
+            key = (doc.rel, cite.namespace, cite.doc_id)
+            if key not in seen:
+                seen.add(key)
+                if not cite.linked:
+                    unlinked.append(
+                        f"{doc.rel}:{cite.line}: first mention of `{canonical} {cite.doc_id}` in "
+                        f"this document must be a resolvable markdown link")
+    details = wrong_spelling + unlinked
+    if details:
+        return Finding(False, f"{len(wrong_spelling)} non-canonical qualifier(s) and "
+                              f"{len(unlinked)} unlinked first mention(s)", details[:MAX_DETAILS])
+    return Finding(True, f"all {checked} cross-namespace citation(s) use the registered "
+                         f"qualifier and link on first mention")
+
+
+def decision_domain_vocabulary(repo: "DocsRepo") -> "Finding":
+    """DOC-0023: every decision record declares a `domain`, drawn from this namespace's vocabulary.
+
+    The vocabulary is namespace-scoped (`domain_vocabulary` in the repo's docs-governance.yaml)
+    because the platform namespace groups decisions by architectural concern while a client hub
+    groups them by business domain. One shared enum would fit neither.
+
+    Two failures are reported, and the second is the reason this control exists. A missing `domain`
+    leaves a decision out of every by-domain view, which is visible. A `domain` holding a value from
+    a *different* namespace's vocabulary is invisible: it looks populated, filters silently match
+    nothing, and it was already happening - hub ADRs carrying `security` where that namespace's
+    taxonomy says `encryption`. Free-text frontmatter cannot tell those apart, which is why this is
+    a closed list rather than a presence check.
+    """
+    if not repo.domain_vocabulary:
+        return Finding(True, "no domain vocabulary declared for this namespace; DOC-0023 inactive")
+    allowed = set(repo.domain_vocabulary)
+    missing: list[str] = []
+    unknown: list[str] = []
+    checked = 0
+    for doc in repo.governed:
+        # A template is the shape of a decision, not one, so it has no domain to declare - the same
+        # exemption DOC-0002, DOC-0014 and DOC-0017 already make.
+        if is_template_doc(doc.rel):
+            continue
+        # A document whose frontmatter is absent or unparseable is DOC-0001's finding, not this
+        # one's; reporting it twice buries the parse error under a domain error that cannot be
+        # fixed until the parse error is.
+        data = doc.data if isinstance(doc.data, dict) else {}
+        declared = data.get("domain")
+        # Required on decision records only. RFCs and PRDs in this fleet carry `tier`/`capability`
+        # instead, and inventing a domain for them would be filling a field rather than using it.
+        required = data.get("doc_type") == "adr"
+        if declared is None or (isinstance(declared, str) and not declared.strip()):
+            if required:
+                missing.append(f"{doc.rel}: no `domain`; expected one of {sorted(allowed)}")
+            continue
+        checked += 1
+        if not isinstance(declared, str):
+            unknown.append(f"{doc.rel}: `domain` must be a single string, got {type(declared).__name__}")
+        elif declared.strip() not in allowed:
+            unknown.append(f"{doc.rel}: `domain: {declared.strip()}` is not in this namespace's "
+                           f"vocabulary; expected one of {sorted(allowed)}")
+    violations = missing + unknown
+    if violations:
+        return Finding(False, f"{len(missing)} decision(s) with no domain and {len(unknown)} "
+                              f"outside the declared vocabulary", violations)
+    return Finding(True, f"all {checked} declared domain(s) are in this namespace's vocabulary "
+                         f"of {len(allowed)}")
+
+
+def platform_concern_core_authority(repo: "DocsRepo") -> "Finding":
+    """DOC-0024: a decision tagged with a platform concern declares which core decisions bind it.
+
+    A client hub's `domain` vocabulary is a list of business bounded contexts, each with a directory
+    describing what it owns. A few decisions genuinely do not fit that shape - cloud account
+    topology, infrastructure repository layout, wire transport - because they provision or constrain
+    the substrate every domain runs on rather than realizing a slice of the business model. Those
+    are tagged from a second, closed tier (`platform_concern_domains`).
+
+    That tier is the risk this control exists to contain. A category with no bounded context behind
+    it is exactly where decisions get filed when nobody is sure where they go, and a hub decision
+    about a platform-governed concern is precisely the kind that drifts from - or silently
+    contradicts - the platform namespace. Both had already happened here: a hub ADR mandated a
+    runtime HTTP fallback that the core contract ADR prohibits, and another restated core
+    secret-management policy word for word while citing nothing.
+
+    So membership in the tier carries an obligation: name the platform-namespace decisions that
+    bind this one. An empty list is allowed and is the point - it is a claim on the record that no
+    core decision governs this, which a reviewer can disagree with, rather than silence that cannot
+    be distinguished from an oversight. Ids are namespace-unambiguous because the key names the
+    namespace, which is what lets a hub declare `ADR-0002` here without colliding with its own.
+    """
+    concerns = set(repo.platform_concern_domains)
+    if not concerns:
+        return Finding(True, "no platform-concern domains declared for this namespace; "
+                             "DOC-0024 inactive")
+    violations: list[str] = []
+    # A concern absent from the vocabulary can never be tagged, so the obligation hanging off it is
+    # dead config that reads as an active rule.
+    stray = sorted(concerns - set(repo.domain_vocabulary))
+    if stray:
+        violations.append(f"docs-governance.yaml: platform_concern_domains names {stray}, absent "
+                          f"from domain_vocabulary and therefore never taggable")
+    platform_ns = repo.platform_namespace()
+    peer_ids = repo.peer_ids(platform_ns) if platform_ns else None
+    declared = 0
+    verified = 0
+    for doc in repo.governed:
+        if is_template_doc(doc.rel):
+            continue
+        data = doc.data if isinstance(doc.data, dict) else {}
+        if data.get("doc_type") != "adr":
+            continue
+        domain = data.get("domain")
+        if not isinstance(domain, str) or domain.strip() not in concerns:
+            continue
+        # Absent key and empty list are deliberately different: one is silence, the other a claim.
+        if "core_authority" not in data:
+            violations.append(
+                f"{doc.rel}: `domain: {domain.strip()}` is a platform concern, so it must declare "
+                f"`core_authority` naming the {platform_ns} decision(s) that bind it, or "
+                f"`core_authority: []` to record that none does")
+            continue
+        declared += 1
+        value = data.get("core_authority") or []
+        if not isinstance(value, list):
+            violations.append(f"{doc.rel}: `core_authority` must be a list of decision ids, got "
+                              f"{type(value).__name__}")
+            continue
+        for entry in value:
+            token = entry.strip() if isinstance(entry, str) else entry
+            if not isinstance(token, str) or not DECISION_ID_RE.match(token):
+                violations.append(f"{doc.rel}: `core_authority` entry {entry!r} is not a "
+                                  f"four-digit decision id")
+                continue
+            if peer_ids is None:
+                continue
+            if token not in peer_ids:
+                violations.append(f"{doc.rel}: `core_authority` names {token}, which does not "
+                                  f"exist in namespace {platform_ns}")
+                continue
+            verified += 1
+    if violations:
+        return Finding(False, f"{len(violations)} platform-concern authority violation(s)",
+                       violations[:MAX_DETAILS])
+    note = "" if peer_ids is not None else \
+        f" ({platform_ns or 'platform namespace'} not present in this run; ids unverified)"
+    return Finding(True, f"all {declared} platform-concern decision(s) declare core_authority "
+                         f"({verified} id(s) verified against {platform_ns}){note}")
+
+
 DETECTORS = {
+    "decision_domain_vocabulary": decision_domain_vocabulary,
+    "platform_concern_core_authority": platform_concern_core_authority,
+    "platform_concern_core_authority": platform_concern_core_authority,
+    "document_id_convention": document_id_convention,
+    "document_id_frontmatter": document_id_frontmatter,
+    "duplicate_document_ids": duplicate_document_ids,
+    "sequential_id_allocation": sequential_id_allocation,
+    "internal_link_resolution": internal_link_resolution,
+    "document_reference_resolution": document_reference_resolution,
+    "cross_namespace_citation_form": cross_namespace_citation_form,
     "doc_root_naming": doc_root_naming,
     "source_path_citations": source_path_citations,
     "frontmatter_structure": frontmatter_structure,
@@ -696,9 +1437,19 @@ DETECTORS = {
 # Domain-specific catalog schema+drift is delegated to the repo's own scripts/build_catalog.py
 # --check, invoked by the docs-governance reusable workflow. Declared as policy, never
 # duplicated here.
+# Markdown quality checks that need a Node toolchain (mermaid-cli, markdownlint, cspell) are
+# declared here as policy and executed by the reusable workflow. They are not reimplemented in
+# Python: a second mermaid parser or spell checker would drift from the real one, and a check that
+# disagrees with the tool developers run locally is worse than no check.
 DELEGATED_DETECTORS = {
     "delegated_catalog_build": "delegated to the docs-governance workflow catalog step "
                                "(scripts/build_catalog.py --check); not evaluated by this checker",
+    "delegated_mermaid_render": "delegated to the docs-governance workflow mermaid step "
+                                "(@mermaid-js/mermaid-cli); not evaluated by this checker",
+    "delegated_markdown_lint": "delegated to the docs-governance workflow markdownlint step "
+                               "(markdownlint-cli2); not evaluated by this checker",
+    "delegated_spellcheck": "delegated to the docs-governance workflow spellcheck step "
+                            "(cspell); not evaluated by this checker",
 }
 
 
@@ -714,6 +1465,13 @@ def load_controls(path: Path) -> dict:
         missing = [f for f in REQUIRED_FIELDS if not c.get(f)]
         if missing:
             errors.append(f"{cid}: missing required field(s) {missing}")
+        # A control id is cited in scorecards, effective profiles, waiver records and PR
+        # review comments. Until now its shape was unconstrained, so nothing stopped a new
+        # catalog from introducing `DOC-1` or `doc-0001` alongside `DOC-0001` - three spellings
+        # of one control, none of which grep finds together.
+        if c.get("id") and not CONTROL_ID_RE.match(str(c["id"])):
+            errors.append(f"{cid}: control id must be PREFIX-{'N' * ID_WIDTH} with an uppercase "
+                          f"prefix and exactly {ID_WIDTH} digits (e.g. DOC-0001)")
         if c.get("severity") not in VALID_SEVERITY:
             errors.append(f"{cid}: severity {c.get('severity')!r} not in {sorted(VALID_SEVERITY)}")
         if c.get("status") not in VALID_STATUS:
@@ -770,9 +1528,32 @@ def is_enforced(rec: dict, threshold: int) -> bool:
     return rec["result"] == "fail" and SEVERITY_ORDER.get(rec["severity"], 2) >= threshold
 
 
+def governance_score(results) -> dict:
+    """A severity-weighted pass rate over the controls this run actually evaluated.
+
+    Weighted rather than a flat ratio, because a flat ratio prices a stale review date the same
+    as an unresolvable citation, and a score that moves the same amount for both is not a signal
+    anyone can act on. Skipped controls are excluded from numerator and denominator alike - a
+    repository with no client-scope policy should neither be credited nor penalised for a control
+    that does not apply to it, and folding skips into the denominator would cap it below 100 with
+    no way to ever earn the remainder.
+    """
+    weighted = [(SEVERITY_ORDER.get(r["severity"], 2), r["result"] == "pass")
+                for r in results if r["result"] in ("pass", "fail", "error")]
+    possible = sum(w for w, _ in weighted)
+    earned = sum(w for w, ok in weighted if ok)
+    return {
+        "score": round(100 * earned / possible) if possible else 100,
+        "weighting": "severity (critical 3, major 2, minor 1); skipped controls excluded",
+        "weight_earned": earned,
+        "weight_possible": possible,
+    }
+
+
 def build_report(repo: DocsRepo, results, ssot, fail_on, threshold) -> dict:
     enforced = [r for r in results if is_enforced(r, threshold)]
     return {
+        "governance_score": governance_score(results),
         "root": str(repo.root), "policy_ssot": ssot, "fail_on": fail_on,
         "capabilities": {"catalog": repo.has_catalog, "client_scope": repo.client_scope_terms is not None},
         "documents_scanned": len(repo.governed),
@@ -810,6 +1591,9 @@ def render_text(report: dict, threshold: int) -> None:
 
     ssot = ", ".join(report["policy_ssot"])
     caps = ", ".join(k for k, v in report["capabilities"].items() if v) or "none"
+    gs = report["governance_score"]
+    print(f"Governance score: {gs['score']}/100 "
+          f"({gs['weight_earned']}/{gs['weight_possible']} weighted; {gs['weighting']}).")
     if report["ok"]:
         print(f"docs-governance: OK - {report['passed']}/{report['evaluated']} controls upheld "
               f"({report['skipped']} skipped) across {report['documents_scanned']} documents "
@@ -892,8 +1676,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--fail-on", choices=("critical", "major", "minor"), default="major")
     ap.add_argument("--grace", type=int, default=0, help="days of grace past a freshness due date")
     ap.add_argument("--source-root", action="append", default=[], metavar="DIR",
-                    help="checkout of a repository whose source paths docs may cite (DOC-012); "
+                    help="checkout of a repository whose source paths docs may cite (DOC-0012); "
                          "repeatable. Citations into trees not supplied here are skipped.")
+    ap.add_argument("--peer-root", action="append", default=[], metavar="NAME=DIR",
+                    help="checkout of a peer documentation namespace whose ids this repo cites "
+                         "(DOC-0015/DOC-0016); repeatable. Citations into namespaces not supplied "
+                         "here are skipped, never passed.")
     ap.add_argument("--today", default=None, help="override today's date (ISO) for testing")
     ap.add_argument("--report", help="write the JSON report to this path")
     ap.add_argument("--write-docs", metavar="FILE", help="regenerate the control table in FILE and exit")
@@ -921,7 +1709,14 @@ def main(argv: list[str]) -> int:
     today = as_date(args.today) or dt.date.today()
     config = load_config(root, args.config)
     source_roots = tuple(args.source_root) or tuple(config.get("source_roots") or ())
-    repo = DocsRepo(root, config, today, args.grace, source_roots)
+    peer_roots = {}
+    for spec in args.peer_root:
+        name, _, path = spec.partition("=")
+        if not name or not path:
+            print(f"::error::docs-governance: --peer-root expects NAME=DIR, got {spec!r}")
+            return 1
+        peer_roots[name] = Path(path)
+    repo = DocsRepo(root, config, today, args.grace, source_roots, peer_roots)
 
     results = evaluate(repo, doc["controls"])
     threshold = SEVERITY_ORDER[args.fail_on]

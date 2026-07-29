@@ -33,8 +33,8 @@
 # below it - which is the point, and why it belongs in a CODEOWNERS-guarded file rather than
 # in a script. Raise it when the fleet has been moved, not to force the move.
 #
-# API-007 in controls/api-contract.yaml is the paired control: this file makes a service
-# depend on a current contract module, API-007 makes it actually publish the current
+# API-0007 in controls/api-contract.yaml is the paired control: this file makes a service
+# depend on a current contract module, API-0007 makes it actually publish the current
 # components.
 
 version: 1
@@ -47,4 +47,4 @@ floors:
       Carries the common.v1 envelope, Meta, PaginationMeta, ProblemDetails and the ErrorCode
       enum that every service's OpenAPI components are projected from. v0.4.0 is the vintage
       controls/common-v1-components.json is generated from, so a pin below it cannot produce
-      components matching the reference and will fail API-007.
+      components matching the reference and will fail API-0007.

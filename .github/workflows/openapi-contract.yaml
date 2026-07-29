@@ -7,13 +7,13 @@ name: OpenAPI contract
 # resolve from any repository:
 #   - the reference named `reusable-openapi-contract.yaml`, but the file there is `.yml` - the
 #     extension sweep reached the caller and not the callee.
-#   - it pinned `@v1` to satisfy WFC-002, and that repository carries no tags at all.
+#   - it pinned `@v1` to satisfy WFC-0002, and that repository carries no tags at all.
 #   - it is private and owned by a different organisation, which GitHub does not accept as a
 #     reusable-workflow source whatever the extension and tag say.
 # GitHub resolves the entire reusable-workflow graph when it LOADS a workflow, before any `if:` is
 # evaluated. So this one unreachable job rejected central CI for every repository in the fleet,
 # including library repos whose `contract` job would have been skipped anyway. It presented as a
-# run with no job, no log and no annotation - the shape WFC-004's rationale already describes.
+# run with no job, no log and no annotation - the shape WFC-0004's rationale already describes.
 #
 # WHAT DID NOT MOVE. Each omission is deliberate:
 #   generate-drift    regenerated the spec with `swag` from Go annotations. Superseded: the
@@ -67,7 +67,7 @@ jobs:
   validate-contract:
     name: Validate and test contract
     # id-token because ci-app-token below exchanges this job's OIDC token for the App key. A
-    # caller that does not grant it fails at load time with no log (WFC-004).
+    # caller that does not grant it fails at load time with no log (WFC-0004).
     permissions:
       contents: read
       id-token: write

@@ -13,7 +13,7 @@
 #   http-api  - evaluated only when the repo carries docs/openapi.json, so pure gRPC/worker
 #               services are never failed for lacking an HTTP contract.
 #
-# Control IDs (API-NNN) are STABLE and permanent - never rename or recycle; retire a control
+# Control IDs (API-NNNN) are STABLE and permanent - never rename or recycle; retire a control
 # via `status: deprecated|superseded`. critical/major fail CI; minor is advisory (--fail-on).
 #
 # RATCHET. Every control is evaluated as a COUNT, compared against the repo's committed
@@ -37,7 +37,7 @@ policy_ssot:
   - RFC-0001
 
 controls:
-  - id: API-001
+  - id: API-0001
     title: The deployed runtime serves no API documentation
     owner: platform-architecture
     scope: source
@@ -64,7 +64,7 @@ controls:
     detector: no_runtime_docs
     refs: [ADR-0067]
 
-  - id: API-002
+  - id: API-0002
     title: Exactly one committed REST spec per service
     owner: platform-architecture
     scope: spec
@@ -87,7 +87,7 @@ controls:
     detector: single_committed_spec
     refs: [ADR-0048]
 
-  - id: API-003
+  - id: API-0003
     title: Runtime conformance is imported from the shared suite, never re-implemented
     owner: platform-architecture
     scope: source
@@ -111,7 +111,7 @@ controls:
     detector: shared_conformance_suite
     refs: [ADR-0040, ADR-0048]
 
-  - id: API-004
+  - id: API-0004
     title: Every JSON response is bound to the proto common.v1 envelope
     owner: platform-architecture
     scope: spec
@@ -136,7 +136,7 @@ controls:
     detector: canonical_envelope
     refs: [RFC-0001, ADR-0001, ADR-0048]
 
-  - id: API-005
+  - id: API-0005
     title: operationIds are present, unique, and semver-governed by a lockfile
     owner: platform-architecture
     scope: spec
@@ -160,7 +160,7 @@ controls:
     detector: operation_ids_governed
     refs: [ADR-0048]
 
-  - id: API-007
+  - id: API-0007
     title: Published common.v1 components match the current proto projection
     owner: platform-architecture
     scope: spec
@@ -171,10 +171,10 @@ controls:
       Every common.v1.* component in the service's spec must be byte-identical to the
       projection in controls/common-v1-components.json, which is generated from the proto SSOT
       by commonv1policy and carries the platform-contracts-go version it was projected from.
-      A service publishing no common.v1 components is governed by API-004 instead, not failed
+      A service publishing no common.v1 components is governed by API-0004 instead, not failed
       twice here.
     rationale: >-
-      API-004 proves a response points AT the envelope; this proves the envelope it points at
+      API-0004 proves a response points AT the envelope; this proves the envelope it points at
       is the CURRENT one, and the two are genuinely different guarantees. Each service projects
       the components from its own platform-contracts-go pin, so a per-repo drift check can only
       ever establish internal consistency. At the time this control was written the fleet held
@@ -191,7 +191,7 @@ controls:
     detector: canonical_components_current
     refs: [RFC-0001, ADR-0048]
 
-  - id: API-006
+  - id: API-0006
     title: No swaggo annotation source
     owner: platform-architecture
     scope: source

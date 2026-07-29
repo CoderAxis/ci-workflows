@@ -12,7 +12,7 @@
 # control is only evaluated for callers that declare at least one of those capabilities
 # (evaluated via --capabilities, mirroring event-handling-compliance.yaml's `role` input).
 #
-# Control IDs (DS-NNN) are STABLE and permanent — see controls/delivery-model.yaml header
+# Control IDs (DS-NNNN) are STABLE and permanent — see controls/delivery-model.yaml header
 # for the full ID/lifecycle discipline; it applies identically here.
 #
 # Policy SSOT (architecture is owned by the ADR; this catalog only enforces it):
@@ -22,7 +22,7 @@
 #   Capability matrix - docs/core-docs/standards/infrastructure/dockerfile-capability-matrix.yaml
 #
 # Deliberate non-duplication: seeding invariants (binary marker, data-tree COPY, placeholder-
-# only qualified envs) are ALREADY hard-enforced by seed-contract-check.yaml. DS-012 here is
+# only qualified envs) are ALREADY hard-enforced by seed-contract-check.yaml. DS-0012 here is
 # an ADVISORY cross-check only (so the two checks cannot silently diverge), never a second
 # hard gate for the same fact - "no duplicate logic" is a design requirement, not a slogan.
 
@@ -32,7 +32,7 @@ policy_ssot:
   - ADR-0072
 
 controls:
-  - id: DS-001
+  - id: DS-0001
     title: Dockerfile declares the canonical two-stage layout
     owner: platform-infrastructure
     scope: caller-workflow
@@ -52,7 +52,7 @@ controls:
     detector: two_stage_layout
     refs: [ADR-0072]
 
-  - id: DS-002
+  - id: DS-0002
     title: Builder cross-compiles FROM the build platform, never QEMU-emulated
     owner: platform-infrastructure
     scope: caller-workflow
@@ -72,7 +72,7 @@ controls:
     detector: cross_compile_builder
     refs: [ADR-0072]
 
-  - id: DS-003
+  - id: DS-0003
     title: Base image versions match the centrally pinned version matrix
     owner: platform-infrastructure
     scope: caller-workflow
@@ -95,7 +95,7 @@ controls:
     detector: version_matrix_pinned
     refs: [ADR-0072]
 
-  - id: DS-004
+  - id: DS-0004
     title: No floating/no latest tags anywhere in the Dockerfile
     owner: platform-security
     scope: caller-workflow
@@ -113,7 +113,7 @@ controls:
     detector: no_latest_tag
     refs: [ADR-0072]
 
-  - id: DS-005
+  - id: DS-0005
     title: Runtime stage runs as a numeric, pinned non-root UID:GID
     owner: platform-security
     scope: caller-workflow
@@ -137,7 +137,7 @@ controls:
     detector: numeric_nonroot_user
     refs: [ADR-0072]
 
-  - id: DS-006
+  - id: DS-0006
     title: HEALTHCHECK required for http-api / gateway capability
     owner: platform-infrastructure
     scope: caller-workflow
@@ -156,7 +156,7 @@ controls:
     detector: healthcheck_present_and_consistent
     refs: [ADR-0072]
 
-  - id: DS-007
+  - id: DS-0007
     title: worker capability MUST NOT assume an HTTP HEALTHCHECK
     owner: platform-infrastructure
     scope: caller-workflow
@@ -176,7 +176,7 @@ controls:
     detector: worker_healthcheck_not_http
     refs: [ADR-0072]
 
-  - id: DS-008
+  - id: DS-0008
     title: Required OCI labels present on the runtime stage
     owner: platform-infrastructure
     scope: caller-workflow
@@ -196,7 +196,7 @@ controls:
     detector: required_oci_labels
     refs: [ADR-0072]
 
-  - id: DS-009
+  - id: DS-0009
     title: Exec-form CMD/ENTRYPOINT; exactly one foreground process
     owner: platform-infrastructure
     scope: caller-workflow
@@ -217,7 +217,7 @@ controls:
     detector: exec_form_cmd
     refs: [ADR-0072]
 
-  - id: DS-010
+  - id: DS-0010
     title: STOPSIGNAL declared explicitly
     owner: platform-infrastructure
     scope: caller-workflow
@@ -235,7 +235,7 @@ controls:
     detector: stopsignal_declared
     refs: [ADR-0072]
 
-  - id: DS-011
+  - id: DS-0011
     title: db-owner capability ships a dbtool binary
     owner: platform-architecture
     scope: caller-workflow
@@ -243,7 +243,7 @@ controls:
     severity: critical
     applies_to_capabilities: [db-owner]
     policy: >-
-      A caller that declares (or structurally has - see DS-013) the `db-owner` capability
+      A caller that declares (or structurally has - see DS-0013) the `db-owner` capability
       MUST build `./cmd/dbtool` into an image binary, COPY it into the runtime stage, and
       carry the marker comment `# dbtool binary path: /app/<binary>`.
     rationale: >-
@@ -256,7 +256,7 @@ controls:
     detector: dbowner_ships_dbtool
     refs: [ADR-0072, ADR-0062]
 
-  - id: DS-012
+  - id: DS-0012
     title: seed capability ships a seed binary (advisory cross-check only)
     owner: platform-infrastructure
     scope: caller-workflow
@@ -279,7 +279,7 @@ controls:
     detector: seed_ships_seed_binary
     refs: [ADR-0072]
 
-  - id: DS-013
+  - id: DS-0013
     title: Declared capability set matches structural reality
     owner: platform-architecture
     scope: caller-workflow
@@ -301,7 +301,7 @@ controls:
     detector: capability_declaration_matches_reality
     refs: [ADR-0072]
 
-  - id: DS-014
+  - id: DS-0014
     title: No build-time code generation in the Dockerfile
     owner: platform-architecture
     scope: caller-workflow
@@ -320,7 +320,7 @@ controls:
     detector: no_build_time_codegen
     refs: [ADR-0072]
 
-  - id: DS-015
+  - id: DS-0015
     title: No ADD instruction (COPY only)
     owner: platform-security
     scope: caller-workflow
@@ -338,7 +338,7 @@ controls:
     detector: no_add_instruction
     refs: [ADR-0072]
 
-  - id: DS-016
+  - id: DS-0016
     title: No freeform version-bearing build ARGs
     owner: platform-infrastructure
     scope: caller-workflow
@@ -359,7 +359,7 @@ controls:
     detector: no_freeform_version_args
     refs: [ADR-0072]
 
-  - id: DS-017
+  - id: DS-0017
     title: BuildKit secret mount for private-module credentials; no baked token
     owner: platform-security
     scope: caller-workflow
@@ -378,7 +378,7 @@ controls:
     detector: secret_mount_for_credentials
     refs: [ADR-0072]
 
-  - id: DS-018
+  - id: DS-0018
     title: Package installs are pinned to the approved allow-list
     owner: platform-security
     scope: caller-workflow
