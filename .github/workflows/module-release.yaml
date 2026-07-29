@@ -35,15 +35,23 @@ name: Module release
 #
 # THE GATES. Ordering is the correctness property here: the dependency direction is
 # core <- core-postgres <- deployable, so a module must never be published ahead of what it
-# pins. Two gates enforce that, and they run before the tag is created because a tag cannot
-# be withdrawn once consumers have fetched it:
+# pins. Three gates enforce that, and they all run before the tag is created because a tag
+# cannot be withdrawn once consumers have fetched it:
 #
+#   0. The repository's own CI passed for the exact commit being released (ci-gate). This
+#      workflow used to tag with no relationship to ci.yaml at all; both fire on the same
+#      push to main, so a green release over a red CI was a reachable and observed state.
 #   1. No pseudo-version pins (§8). A pseudo-version means "an untagged commit", so
 #      releasing against one publishes a version whose own dependency cannot be resolved by
 #      anyone else.
 #   2. The upstream pin must already be released. An adapter tagged against an unreleased
 #      core is the documented auth failure: the adapter claims a core version that does not
 #      exist for consumers.
+#
+# VERSIONING. Bumps are derived from Conventional Commits, and a breaking change on a 0.x
+# module bumps the MINOR, not the MAJOR (SemVer §4). See the version-resolution step: v1.0.0
+# is a stability commitment and is reachable only by explicit dispatch, never as a side
+# effect of a commit subject.
 #
 # Policy SSOT: SHARED_CORE_RELEASE_AND_PROMOTION.md (release/bump ordering),
 # VERSIONING_STRATEGY.md (conventional-commit versioning), RFC-0020 (supply-chain
@@ -86,6 +94,14 @@ on:
 
 permissions:
   contents: read
+  # Read THIS repository's own workflow runs, so ci-gate can establish that CI passed for the exact
+  # commit being released. Declared at workflow level rather than only on the job that uses it
+  # because that is the surface WFC-0004 compares a caller against: a called workflow's token is
+  # capped by its caller and the cap is fixed when GitHub LOADS the workflow, so a caller that does
+  # not grant this gets `startup_failure` with no job, no log and no annotation. Declaring it here
+  # makes the requirement statically detectable by check-workflow-centralization.py instead of
+  # discoverable only by a release that fails to start. See the propagation note on ci-gate.
+  actions: read
 
 concurrency:
   # Serialised, never cancelled: a cancelled run can leave a pushed tag with no GitHub Release
@@ -143,10 +159,133 @@ jobs:
           esac
           [[ -n "${MODULE}" ]] || { echo "::error::catalog bound this repo but declares no module path"; exit 1; }
 
+  # ── CI gate ───────────────────────────────────────────────────────────────────────────────
+  # This workflow verified a module and then tagged it, with no relationship to the repository's own
+  # CI. Both are triggered by the same push to main, so they raced: a red `ci` and a green `release`
+  # for one commit was a reachable - and observed - state, and the tag won because it does not wait
+  # for anything. platform-contracts 3288b41 is the recorded instance: on 2026-07-28 at 12:21:45Z
+  # `ci` failed and `Release contracts` succeeded at the same timestamp on the same commit, and the
+  # tag was cut.
+  #
+  # The inline `go build` / `go test` steps in `release` are not a substitute and were the reason
+  # this looked covered for as long as it did. They re-run a SUBSET of one lane: ci.yaml (via
+  # service-ci.yaml) additionally runs go vet, the `-tags swagger` build/vet/test, CodeQL, gitleaks,
+  # govulncheck, staticcheck and the tier coverage gate. A module could therefore fail CodeQL and
+  # still be published, because nothing connected the two.
+  #
+  # A tag is the thing that cannot be withdrawn once a consumer has fetched it, so this gate runs
+  # before `release` rather than alongside it, and every uncertain answer fails: no run for the
+  # commit, an unreachable API, a run still going past the timeout, and any non-success conclusion
+  # are all refusals. There is no input, variable or condition that turns it off - a release whose
+  # verification is optional is the state this whole pipeline exists to prevent.
+  #
+  # PROPAGATION. Consumers pin @v1, so this reaches them only when that major tag is moved, and it
+  # must not be moved until every caller grants `actions: read` on its release job. A caller that
+  # has not is capped below what this workflow declares and GitHub rejects it at LOAD time with
+  # `startup_failure` - no job, no log, no annotation. WFC-0004 detects exactly this, which is why
+  # the permission is declared at workflow level above.
+  ci-gate:
+    name: Gate - repository CI passed for this commit
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    # Generous, because it is waiting for the repository's full CI lane rather than doing work. The
+    # timeout is a refusal, not a pass: running out of time fails the gate.
+    timeout-minutes: 45
+    steps:
+      - name: Require a successful ci.yaml run for the exact commit being released
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The commit being released. For a branch push this is the pushed commit; for a tag push it
+          # is the commit the tag points at. Either way it is the exact tree that would be published,
+          # which is what has to have been tested - a green run on a later or earlier commit says
+          # nothing about this one.
+          SHA: ${{ github.sha }}
+          # Addressed by FILE PATH, not by the `name:` field. WFC-0006 permits exactly ci.yaml and
+          # release.yaml, and service-ci.yaml's `lanes` job asserts ci.yaml exists for every core,
+          # schema and shared-library repo, so the path is fixed by control while the display name is
+          # cosmetic and already varies across the fleet ("ci" and "CI" both occur).
+          CI_WORKFLOW: ci.yaml
+        run: |
+          set -euo pipefail
+
+          api="repos/${GITHUB_REPOSITORY}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=${SHA}&per_page=100"
+          deadline=$(( SECONDS + 40 * 60 ))
+
+          while :; do
+            # An API error and "no runs yet" must never collapse into the same answer. Both refuse
+            # here, but they refuse for different reasons and the message has to say which, or the
+            # next person debugging a blocked release cannot tell a broken token from missing CI.
+            if ! payload="$(gh api "${api}" 2>/tmp/ci-gate.err)"; then
+              if grep -qi 'Not Found' /tmp/ci-gate.err; then
+                echo "::error::${GITHUB_REPOSITORY} has no .github/workflows/${CI_WORKFLOW}, so there"
+                echo "is no CI result to release against. Every core, schema and shared-library repo"
+                echo "must hold a ci.yaml thin-calling service-ci.yaml (WFC-0006)."
+                exit 1
+              fi
+              echo "::error::cannot reach the GitHub Actions API to determine whether CI passed for"
+              echo "${SHA}. Refusing to publish on an unverified commit; a tag cannot be withdrawn."
+              awk '{ print "  " $0 }' /tmp/ci-gate.err
+              exit 1
+            fi
+
+            total="$(jq -r '.total_count' <<<"${payload}")"
+            running="$(jq -r '[.workflow_runs[] | select(.status != "completed")] | length' <<<"${payload}")"
+            bad="$(jq -r '[.workflow_runs[] | select(.status == "completed")
+                          | select(.conclusion == "failure" or .conclusion == "timed_out"
+                                   or .conclusion == "startup_failure")] | length' <<<"${payload}")"
+            good="$(jq -r '[.workflow_runs[] | select(.conclusion == "success")] | length' <<<"${payload}")"
+
+            # Decided before "still running", so a red run stops the release immediately instead of
+            # waiting out a concurrent one that can no longer change the answer.
+            if [[ "${bad}" -gt 0 ]]; then
+              echo "::error::CI for ${SHA} has ${bad} failing run(s), so this commit is not"
+              echo "releasable. Fix CI on this commit and re-run; the version is derived from the"
+              echo "commits, so nothing is lost by releasing the fix instead."
+              jq -r '.workflow_runs[] | select(.status == "completed")
+                     | select(.conclusion != "success")
+                     | "  \(.conclusion)  \(.html_url)"' <<<"${payload}"
+              exit 1
+            fi
+
+            if [[ "${running}" -gt 0 || "${total}" -eq 0 ]]; then
+              if [[ ${SECONDS} -ge ${deadline} ]]; then
+                if [[ "${total}" -eq 0 ]]; then
+                  echo "::error::no ${CI_WORKFLOW} run exists for ${SHA} after waiting. A release"
+                  echo "requires a CI result for the exact commit; there is nothing to verify"
+                  echo "against. If CI's path filters excluded this commit, the release must be"
+                  echo "dispatched from a commit CI actually covers."
+                else
+                  echo "::error::CI for ${SHA} was still running when this gate timed out. Refusing"
+                  echo "to publish against an unfinished verification."
+                fi
+                exit 1
+              fi
+              echo "waiting for CI on ${SHA} (${total} run(s), ${running} still going)..."
+              sleep 20
+              continue
+            fi
+
+            # Every run is complete and none failed. A success must still exist: a commit whose only
+            # runs were cancelled or skipped has not been verified, and "nothing said no" is not the
+            # same as "CI passed".
+            if [[ "${good}" -eq 0 ]]; then
+              echo "::error::${CI_WORKFLOW} produced no successful run for ${SHA} - every run was"
+              echo "cancelled, skipped or neutral. That is not a pass, so it cannot authorise a tag."
+              jq -r '.workflow_runs[] | "  \(.status)/\(.conclusion)  \(.html_url)"' <<<"${payload}"
+              exit 1
+            fi
+
+            echo "CI passed for ${SHA} (${good} successful run(s), no failures)."
+            jq -r '.workflow_runs[] | select(.conclusion == "success") | "  \(.html_url)"' <<<"${payload}"
+            exit 0
+          done
+
   # ── release ───────────────────────────────────────────────────────────────────────────────
   release:
     name: Verify, tag, and publish
-    needs: resolve
+    needs: [resolve, ci-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -252,6 +391,45 @@ jobs:
           fi
 
           IFS=. read -r MA MI PA <<< "${base}"
+
+          # SemVer §4: "Major version zero is for initial development. Anything MAY change at any
+          # time. The public API SHOULD NOT be considered stable." A 0.x version therefore makes no
+          # compatibility promise, and a breaking change on one bumps the MINOR - v0.5.0 -> v0.6.0.
+          # The leading zero already encodes the instability, so there is nothing for a major bump
+          # to communicate.
+          #
+          # Without this branch the first honest `feat!:` on any pre-1.0 module force-promotes it to
+          # v1.0.0. Reaching v1.0.0 is a deliberate commitment that the API is now stable and will
+          # only break on a further major - it is a decision about the module's maturity, and it
+          # must never be a side effect of a commit subject. Every one of the fleet's contract and
+          # SDK modules is pre-1.0, so this path is the normal one, not the edge case.
+          #
+          # 0.0.z gets the SAME rule rather than a special case: base 0.0.4 with a breaking change
+          # bumps the minor to v0.1.0. That is the documented choice. It leaves the 0.0.z range -
+          # which promises even less than 0.x, since `^0.0.4` resolves to `>=0.0.4 <0.0.5` and every
+          # patch is already a compatibility boundary - without claiming the stability of v1.0.0. A
+          # separate 0.0.z rule would have to invent a third meaning for "breaking" and could only
+          # ever bump the patch, which would make a breaking change indistinguishable from a fix.
+          #
+          # This convention is NOT Go-specific, which matters because the fleet publishes to three
+          # ecosystems and this same block is mirrored in the npm and PyPI release workflows. Go
+          # modules treat all of v0.x as one major version (no /vN suffix until v2), npm's caret
+          # resolves `^0.5.0` to `>=0.5.0 <0.6.0`, and Poetry/PEP 440's `^0.5.0` and `~=0.5` behave
+          # the same way. In all three, the MINOR is the compatibility boundary below 1.0.0, so a
+          # minor bump IS the breaking bump. No ecosystem here needs a different rule.
+          #
+          # The deliberate route to 1.0.0 stays open and is not a bypass of this: a maintainer
+          # dispatches this workflow with an explicit `version: 1.0.0`, which is exactly the
+          # considered human act that the stability commitment requires. What is closed is reaching
+          # it by accident.
+          if [[ "${MA}" -eq 0 && "${bump}" == "major" ]]; then
+            echo "::notice::v${base} is a 0.x version, which makes no compatibility promise" \
+                 "(SemVer §4), so this breaking change bumps the MINOR. Promotion to v1.0.0 is a" \
+                 "deliberate stability commitment - dispatch this workflow with an explicit" \
+                 "version to make it."
+            bump="minor"
+          fi
+
           case "${bump}" in
             major) MA=$((MA + 1)); MI=0; PA=0 ;;
             minor) MI=$((MI + 1)); PA=0 ;;
