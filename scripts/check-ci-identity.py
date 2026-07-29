@@ -211,13 +211,39 @@ def decompose(raw: str, file: str, line: int) -> Pattern | None:
     return Pattern(raw, _unmask(owner), _unmask(repository), _unmask(subject), file, line)
 
 
-def collect_groups(root: Path) -> list[Group]:
+def _within(path: Path, base: Path) -> bool:
+    return path == base or base in path.parents
+
+
+def excluded_roots(root: Path) -> tuple[Path, ...]:
+    """Directories under `root` that must not be walked.
+
+    This repository, when it has been checked out INSIDE the tree being scanned. The reusable
+    workflow does exactly that - `actions/checkout` cannot place a repository outside the workspace -
+    so scanning a caller's whole repository also reaches the checker's own violation fixture, and the
+    job fails reporting five defects that belong to the fixture rather than to the caller. That is how
+    this shipped: the fixtures pass, the mutation tests pass, and the first real consumer run is red
+    for a reason that has nothing to do with its Terraform.
+
+    Narrowing the workflow's roots instead would have hidden it and left the same trap for the next
+    caller, since nothing about `roots: "."` looks dangerous.
+
+    Excluded only when the scanned root is OUTSIDE this repository. When a root inside it is named
+    explicitly - which is how the fixtures and mutation tests run - the fixtures are the subject and
+    must be walked.
+    """
+    return () if _within(root, SELF_REPO) else (SELF_REPO,)
+
+
+def collect_groups(root: Path, exclude: tuple[Path, ...] = ()) -> list[Group]:
     """Every run of adjacent `repo:` pattern literals in the Terraform under `root`."""
     groups: list[Group] = []
     for tf in sorted(root.rglob("*.tf")):
         # .terraform holds vendored provider and module copies - other people's code, and often many
         # copies of it, which would report the same finding once per copy.
         if any(part in {".terraform", ".git"} for part in tf.parts):
+            continue
+        if any(_within(tf, e) for e in exclude):
             continue
         try:
             lines = tf.read_text(encoding="utf-8").splitlines()
@@ -419,7 +445,7 @@ DETECTORS = {
 
 
 def check_root(root: Path, controls: dict[str, dict]) -> tuple[list[Finding], int]:
-    groups = collect_groups(root)
+    groups = collect_groups(root, excluded_roots(root))
     findings: list[Finding] = []
     for cid, control in sorted(controls.items()):
         detector = DETECTORS.get(control.get("detector"))
@@ -448,6 +474,12 @@ def report(roots: Iterable[Path], controls: dict[str, dict], fail_on: str, fmt: 
     total_groups = 0
 
     for root in roots:
+        # Announced rather than silent: an unexplained gap in what was scanned is indistinguishable
+        # from a checker that found nothing, which is the failure mode this whole catalog is about.
+        if fmt == "text":
+            for skipped in excluded_roots(root):
+                if _within(skipped, root):
+                    print(f"[skip] {skipped.name}/: the checker's own checkout, not the caller's code")
         findings, n_groups = check_root(root, controls)
         total_groups += n_groups
         if not n_groups:
