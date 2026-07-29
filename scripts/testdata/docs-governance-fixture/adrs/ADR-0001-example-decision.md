@@ -1,4 +1,5 @@
 ---
+id: ADR-0001
 owner: platform-docs
 doc_type: adr
 status: accepted
