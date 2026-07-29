@@ -464,6 +464,44 @@ jobs:
           done
           echo "all controls fired as expected (exit $rc)"
 
+      # Regression test for a bug the fixtures structurally could not catch, and which the first real
+      # consumer run found immediately.
+      #
+      # The reusable workflow checks the central repository out INSIDE the caller's workspace, because
+      # actions/checkout cannot place it anywhere else. Scanning the caller's whole repository
+      # therefore also reached this repository's violation fixture, and the job failed reporting five
+      # defects that belonged to the fixture. Every local test passed; the fixtures pass by
+      # construction, and no fixture contains the checker.
+      #
+      # Narrowing the workflow's roots would have hidden it and left the trap for the next caller, so
+      # the exclusion lives in the checker and this asserts the layout that exposed it.
+      - name: Regression - a nested checkout of this repo is not mistaken for the caller's code
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          cp -r scripts/testdata/ci-identity-fixture "$work/infra"
+          # The runner layout: caller's code at the root, this repository nested inside it.
+          mkdir -p "$work/.ci-identity-tools"
+          cp -r scripts controls "$work/.ci-identity-tools/"
+          if ! python3 "$work/.ci-identity-tools/scripts/check-ci-identity.py" "$work" \
+                 --controls "$work/.ci-identity-tools/controls/ci-identity.yaml" \
+                 --fail-on major; then
+            echo "::error::a nested checkout of this repository was scanned as if it were the"
+            echo "::error::caller's Terraform, so every consumer's run fails on our own fixtures."
+            exit 1
+          fi
+          # And the exclusion must not be so broad that naming a fixture explicitly stops working -
+          # that would silently disable the mutation tests above.
+          if python3 "$work/.ci-identity-tools/scripts/check-ci-identity.py" \
+               "$work/.ci-identity-tools/scripts/testdata/ci-identity-violation-fixture" \
+               --controls "$work/.ci-identity-tools/controls/ci-identity.yaml" \
+               --fail-on major > /dev/null 2>&1; then
+            echo "::error::the exclusion swallowed an explicitly named root; the violation fixture"
+            echo "::error::is no longer being checked and the mutation tests above prove nothing."
+            exit 1
+          fi
+          echo "nested checkout excluded; explicitly named roots still checked"
+
       # A fixture proves the detector matches something. Only the real history proves it matches the
       # thing that actually broke. Both trees are reconstructed from inboxxhq-infra's own commits, so
       # this cannot drift away from what happened.
