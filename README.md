@@ -409,8 +409,91 @@ _Generated from `controls/docs-governance.yaml` by `scripts/check-docs-governanc
 | DOC-009 | Every slug registered in governance/OWNER_DIRECTORY.md should own at least one governed document. Advisory: unused slugs are reported, not blocked. | minor | repository | always | platform-architecture | active |
 | DOC-010 | A repository with a catalog/ directory must keep every catalog file valid against its JSON Schema, its cross-references resolvable, and its generated artifacts regenerated from source (no drift). Because the catalog domain model and its renderers are repo-specific, detection is DELEGATED to the repo's own scripts/build_catalog.py --check, invoked by the docs-governance reusable workflow - this checker never re-implements it. | critical | catalog | catalog | platform-infrastructure | active |
 | DOC-011 | Document folders are plural - adrs/, rfcs/, prds/ - never adr/, rfc/, prd/ or product/. A doc root the repository explicitly declares in extra_doc_roots must exist on disk. Default roots may be absent, since no repository carries all of them. | critical | repository | always | platform-architecture | active |
+| DOC-012 | A governed document that cites a source file in backticks must cite a path that exists, and must not append a line number. Repo-local paths are resolved against the docs repository; paths into other repositories are resolved only when the run supplies a checkout via --source-root (or the source_roots config key), and are skipped otherwise so the control never fails on an unavailable tree. | minor | document | always | platform-architecture | active |
 
 <!-- END docs-governance-controls -->
+
+## Service API contract (does the service obey the contract decisions, or merely have a spec?)
+
+`openapi-contract.yaml` already proved a service's spec exists, lints, and that the service's own
+contract tests pass. Every one of those gates is opt-in via a caller-supplied command, so a service
+could satisfy the workflow completely while shipping a Swagger UI, inventing its own response
+envelope, hand-rolling a copy of the shared conformance suite, and committing four rival spec
+files — and 37 of 38 services did at least one of those.
+
+`scripts/check-api-contract.py` runs as an **unconditional step inside that same workflow**, with no
+caller input to disable it and its catalog checked out from this repository, so a service cannot
+weaken the policy it is judged by. `check-workflow-centralization.py` separately forbids forking the
+workflow, so it cannot escape by keeping its own copy either.
+
+**The ratchet is what makes it enforceable today.** Every control is a count compared against the
+repo's committed `.api-contract-baseline.json`. A count that rises fails the build; a count that
+holds is tolerated; a count that falls prompts a baseline rewrite. **A repo with no baseline is held
+to zero**, so a service created tomorrow cannot introduce any of this, while the services already
+carrying debt are frozen rather than broken. Deleting the last baseline in a repo is the moment its
+migration is provably finished.
+
+```bash
+python3 scripts/check-api-contract.py path/to/service        # check
+python3 scripts/check-api-contract.py path/to/service --write-baseline   # freeze / ratchet down
+```
+
+### The contract-vintage gap, and the two controls that close it
+
+The chain behind a published spec is `proto -> generated Go -> the service's OpenAPI components`.
+Two of those links were already gated and one was not, in a way no per-repo check could have found.
+
+`platform-contracts` CI gates the first link properly: `buf lint`, `buf breaking` against the base
+branch, and a codegen-drift job that re-runs the generator and diffs the committed `.pb.go` and
+TypeScript output. The third link is gated per repository by the byte-exact `--check` and by API-004.
+
+The gap was in between. **Every service projects its `common.v1` components from its own
+`platform-contracts-go` pin**, so a per-repo drift check can only ever prove internal consistency —
+two services on different pins both pass while publishing different envelopes. Measured on
+2026-07-29 the fleet held four concurrent pins (v0.1.0 in 13 repos, v0.2.0 in 3, v0.3.0 in 63,
+v0.4.0 in 1), and `platform-shared-go`, which *hosts* the projection, was three releases behind at
+v0.1.0. Concretely, `common.v1.ErrorCode` had 28 values under the engine's pin and 30 under the
+reference service's: the fleet disagreed about which error codes exist, with every gate green.
+
+Two paired controls close it, because either alone is escapable:
+
+- **`controls/module-floors.yaml`**, enforced by `check_module_pins.py`, sets the minimum
+  `platform-contracts-go` version. Below the floor is a warning on dev/staging and an error on
+  preprod/prod, so a stale contract vintage cannot reach a deployed environment while the fleet is
+  still being moved. A floor is a floor and not an exact pin because pinning 86 repos to one version
+  would make every module release a fleet-wide breaking change.
+- **API-007** compares the spec's `common.v1.*` components byte-for-byte against
+  `controls/common-v1-components.json`. That artifact is generated, never hand-written:
+
+```bash
+# in platform-shared-go, redirected into this repo
+go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components \
+  > ../github-actions/controls/common-v1-components.json
+```
+
+The floor makes a service *depend on* a current contract module; API-007 makes it actually *publish*
+current components. API-007 exits 2 rather than passing if the reference artifact is missing, since
+a version gate that reports success because it could not find its reference is worse than no gate.
+
+### Control catalog (policy-as-code)
+
+Generated from `controls/api-contract.yaml`, drift-gated via `--verify-docs`:
+
+<!-- BEGIN api-contract-controls (generated: scripts/check-api-contract.py --write-docs) -->
+
+_Generated from `controls/api-contract.yaml` by `scripts/check-api-contract.py --write-docs` — do not edit by hand._
+
+| Control | Policy | Severity | Scope | Applies | Owner | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| API-001 | No runtime Go source may import swaggerpolicy or gin-swagger, call openapiroutes.Register*, carry a `swagger` build tag, or register a /swagger or /api/docs route. The contract reaches consumers through the API Contract Registry and the API Portal's per-environment mirror, never from the service process. | critical | source | always | platform-architecture | active |
+| API-002 | docs/ may contain openapi.json (generated), openapi.base.json (authored metadata only), and the operationId lock and schema. Any other openapi*.json is a rival spec and is prohibited. | major | spec | always | platform-architecture | active |
+| API-003 | A test that validates live traffic against the OpenAPI document must import platform/openapicontract/conformance. Driving kin-openapi directly - constructing a gorillamux router or calling openapi3filter.ValidateResponse - is a hand-rolled copy of the shared suite and is prohibited. | major | source | http-api | platform-architecture | active |
+| API-004 | Every 2xx JSON response must reference common.v1.SuccessResponse and every 4xx/5xx JSON response must reference common.v1.ErrorResponse. The envelope is owned by proto/common/v1 and is not redefinable per service. | critical | spec | http-api | platform-architecture | active |
+| API-005 | Every operation carries a unique operationId, and the service commits docs/openapi.operationids.lock.json recording each id with the version that introduced it, its deprecation state, and its visibility. | major | spec | http-api | platform-architecture | active |
+| API-007 | Every common.v1.* component in the service's spec must be byte-identical to the projection in controls/common-v1-components.json, which is generated from the proto SSOT by commonv1policy and carries the platform-contracts-go version it was projected from. A service publishing no common.v1 components is governed by API-004 instead, not failed twice here. | major | spec | http-api | platform-architecture | active |
+| API-006 | cmd/server/swagger_main.go and any other swaggo annotation source is prohibited. The canonical generator reflects Go types through the shared contract engine. | minor | source | always | platform-architecture | active |
+
+<!-- END api-contract-controls -->
 
 ## Workflow centralization (are the central workflows actually being used?)
 

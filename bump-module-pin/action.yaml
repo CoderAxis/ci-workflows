@@ -194,7 +194,11 @@ runs:
         repository: coderaxis/github-actions
         ref: v1
         path: .bump-central
-        sparse-checkout: scripts
+        # controls/ carries module-floors.yaml. Without it the floor check finds no floors
+        # and reports a pass, which is the one outcome a version gate must never produce.
+        sparse-checkout: |
+          scripts
+          controls
 
     - name: Platform module pin policy
       if: steps.guard.outputs.skip != 'true'
@@ -214,6 +218,9 @@ runs:
           staging) MODE=staging ;;
           *) MODE=dev ;;
         esac
+        # The floor check reads controls/module-floors.yaml, and refuses to run rather than
+        # report a pass it did not verify, so PyYAML has to be present rather than assumed.
+        python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --upgrade PyYAML
         python3 "${WORKSPACE}/.bump-central/scripts/check_module_pins.py" --mode "${MODE}"
 
     - name: Drop the central checkout

@@ -1,0 +1,200 @@
+{
+  "_comment": "Canonical common.v1 OpenAPI components, projected from the proto SSOT. Generated - do not edit by hand. Regenerate with `go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.",
+  "components": {
+    "common.v1.ErrorCode": {
+      "enum": [
+        "ERROR_CODE_UNSPECIFIED",
+        "UNAUTHORIZED",
+        "FORBIDDEN",
+        "TOKEN_EXPIRED",
+        "TOKEN_INVALID",
+        "INVALID_CREDENTIALS",
+        "ACCOUNT_LOCKED",
+        "ACCOUNT_DISABLED",
+        "VALIDATION_FAILED",
+        "INVALID_INPUT",
+        "MISSING_FIELD",
+        "INVALID_FORMAT",
+        "INVALID_EMAIL",
+        "INVALID_UUID",
+        "INVALID_DATE",
+        "UNPROCESSABLE_ENTITY",
+        "RESOURCE_NOT_FOUND",
+        "RESOURCE_ALREADY_EXISTS",
+        "CONFLICT",
+        "OPERATION_NOT_ALLOWED",
+        "QUOTA_EXCEEDED",
+        "PRECONDITION_FAILED",
+        "TOO_MANY_REQUESTS",
+        "INTERNAL_ERROR",
+        "DATABASE_FAILURE",
+        "DEADLOCK_DETECTED",
+        "EXTERNAL_DEPENDENCY_FAILURE",
+        "TIMEOUT",
+        "SERVICE_UNAVAILABLE",
+        "NOT_IMPLEMENTED"
+      ],
+      "type": "string"
+    },
+    "common.v1.ErrorResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "allOf": [
+            {
+              "$ref": "#/components/schemas/common.v1.ProblemDetails"
+            }
+          ],
+          "nullable": true
+        },
+        "meta": {
+          "allOf": [
+            {
+              "$ref": "#/components/schemas/common.v1.Meta"
+            }
+          ],
+          "nullable": true
+        }
+      },
+      "type": "object"
+    },
+    "common.v1.Meta": {
+      "additionalProperties": false,
+      "properties": {
+        "correlationId": {
+          "type": "string"
+        },
+        "pagination": {
+          "allOf": [
+            {
+              "$ref": "#/components/schemas/common.v1.PaginationMeta"
+            }
+          ],
+          "nullable": true
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "nullable": true,
+          "type": "string"
+        },
+        "traceId": {
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "common.v1.PaginationMeta": {
+      "additionalProperties": false,
+      "properties": {
+        "hasNext": {
+          "type": "boolean"
+        },
+        "hasPrevious": {
+          "type": "boolean"
+        },
+        "nextCursor": {
+          "type": "string"
+        },
+        "page": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "pageSize": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "previousCursor": {
+          "type": "string"
+        },
+        "totalItems": {
+          "format": "int64",
+          "type": "string"
+        },
+        "totalPages": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "common.v1.ProblemDetails": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/components/schemas/common.v1.ErrorCode"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "details": {
+          "nullable": true
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/components/schemas/common.v1.ProblemItem"
+          },
+          "type": "array"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "status": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "common.v1.ProblemItem": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/components/schemas/common.v1.ErrorCode"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "pointer": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "common.v1.SuccessResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "nullable": true
+        },
+        "meta": {
+          "allOf": [
+            {
+              "$ref": "#/components/schemas/common.v1.Meta"
+            }
+          ],
+          "nullable": true
+        }
+      },
+      "type": "object"
+    }
+  },
+  "source": {
+    "module": "github.com/coderaxis/platform-contracts-go",
+    "version": "v0.4.0"
+  }
+}

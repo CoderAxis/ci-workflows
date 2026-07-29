@@ -463,3 +463,133 @@ jobs:
           if bad: sys.exit(1)
           print(f"{len(cases)} permission-model cases hold")
           PY
+
+  # ---------------------------------------------------------------------------
+  # The API-contract gate judges 38 service repositories, so its own catalog, docs table and
+  # detectors have to be held to the same standard as the fleet it polices.
+  #
+  # The contract-vintage checks (API-007 + controls/module-floors.yaml) carry an extra
+  # obligation the other controls do not: they compare services against a generated reference
+  # artifact that lives in this repository but is produced in platform-shared-go. If the floor
+  # is raised and the artifact is not regenerated, the two disagree about which proto vintage is
+  # canonical - and every service would then be measured against a version nothing is required
+  # to pin. That pair is asserted here because it is the one inconsistency no service-side run
+  # could ever surface.
+  #
+  # Policy SSOT: ADR-0048, ADR-0067, RFC-0001.
+  api-contract:
+    name: API contract - catalog + reference artifact self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Validate control catalog schema
+        run: |
+          python3 scripts/check-api-contract.py --format json > /dev/null
+          echo "control catalog schema OK"
+
+      - name: Verify control docs are in sync with the catalog
+        run: python3 scripts/check-api-contract.py --verify-docs README.md
+
+      - name: The module floor and the reference artifact name the same proto vintage
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys, yaml
+          module = "github.com/coderaxis/platform-contracts-go"
+          floors = yaml.safe_load(pathlib.Path("controls/module-floors.yaml").read_text())["floors"]
+          floor = str(floors[module]["min"])
+          ref = json.loads(pathlib.Path("controls/common-v1-components.json").read_text())
+          got = ref["source"]["version"]
+          if got != floor:
+              print(f"::error::controls/module-floors.yaml requires {module} {floor}, but "
+                    f"controls/common-v1-components.json was projected from {got}. Regenerate the "
+                    "artifact from platform-shared-go with `go run "
+                    "./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.")
+              sys.exit(1)
+          print(f"floor and reference artifact agree on {floor}")
+          PY
+
+      - name: Mutation test - API-007 must fail a spec on a stale proto vintage
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, shutil
+          fixture = pathlib.Path("/tmp/api007-fixture")
+          shutil.rmtree(fixture, ignore_errors=True)
+          (fixture / "docs").mkdir(parents=True)
+          ref = json.loads(pathlib.Path("controls/common-v1-components.json").read_text())
+          components = dict(ref["components"])
+          # Drop one enum value: exactly what an older platform-contracts-go pin produces.
+          stale = json.loads(json.dumps(components["common.v1.ErrorCode"]))
+          stale["enum"] = stale["enum"][:-1]
+          components["common.v1.ErrorCode"] = stale
+          (fixture / "docs" / "openapi.json").write_text(json.dumps(
+              {"openapi": "3.0.3", "info": {"title": "fixture", "version": "1"}, "paths": {},
+               "components": {"schemas": components}}))
+          PY
+          set +e
+          out="$(python3 scripts/check-api-contract.py /tmp/api007-fixture --fail-on major 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -eq 0 ] || ! echo "$out" | grep -q "::error::\[API-007\]"; then
+            echo "::error::API-007 did not fire against a spec built on a stale proto vintage"
+            exit 1
+          fi
+          echo "API-007 fired as expected (exit $rc)"
+
+      - name: Mutation test - a missing reference artifact must fail, never pass
+        run: |
+          set -euo pipefail
+          cp controls/common-v1-components.json /tmp/ref-backup.json
+          rm controls/common-v1-components.json
+          set +e
+          python3 scripts/check-api-contract.py . --fail-on major > /tmp/out.txt 2>&1
+          rc=$?
+          set -e
+          mv /tmp/ref-backup.json controls/common-v1-components.json
+          cat /tmp/out.txt
+          if [ "$rc" -ne 2 ]; then
+            echo "::error::expected exit 2 for a missing reference artifact, got $rc"
+            exit 1
+          fi
+          echo "missing reference artifact fails loudly (exit $rc)"
+
+      - name: Unit test - the version floor comparison
+        run: |
+          python3 - <<'PY'
+          import importlib.util, pathlib, sys
+          spec = importlib.util.spec_from_file_location(
+              "pins", pathlib.Path("scripts/check_module_pins.py"))
+          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          mod = "github.com/coderaxis/platform-contracts-go"
+          floors = {mod: "v0.4.0"}
+          cases = [
+              # (pinned, mode, expect_error, expect_warning, why)
+              ("v0.4.0", "prod", False, False, "at the floor passes"),
+              ("v0.5.0", "prod", False, False, "above the floor passes"),
+              ("v0.3.0", "prod", True, False, "below the floor blocks on prod"),
+              ("v0.3.0", "dev", False, True, "below the floor only warns on dev"),
+              ("v0.10.0", "prod", False, False, "compared numerically, not lexically"),
+          ]
+          bad = 0
+          for pinned, mode, want_err, want_warn, why in cases:
+              go_mod = pathlib.Path("/tmp/floor-case/go.mod")
+              go_mod.parent.mkdir(parents=True, exist_ok=True)
+              go_mod.write_text(f"module x\n\ngo 1.24\n\nrequire {mod} {pinned}\n")
+              errors, warnings, _ = m.check(go_mod, [], mode, "github.com/coderaxis/", floors)
+              if bool(errors) != want_err or bool(warnings) != want_warn:
+                  print(f"::error::{why}: errors={errors} warnings={warnings}"); bad += 1
+          if bad: sys.exit(1)
+          print(f"{len(cases)} floor-comparison cases hold")
+          PY

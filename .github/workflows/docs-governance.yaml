@@ -44,6 +44,14 @@ on:
         required: false
         type: string
         default: v1
+      source_roots:
+        description: >-
+          Newline-separated checkouts whose source paths the docs may cite (DOC-012). In a
+          docs-in-monorepo layout this is usually '.'. Citations into trees not listed here
+          are skipped, never failed, so leaving this empty is safe.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -73,12 +81,19 @@ jobs:
         run: python3 -m pip install --upgrade PyYAML jsonschema
 
       - name: Enforce documentation governance (ADR-0081)
+        env:
+          SOURCE_ROOTS: ${{ inputs.source_roots }}
         run: |
+          args=()
+          while IFS= read -r root; do
+            [[ -n "$root" ]] && args+=(--source-root "$root")
+          done <<< "$SOURCE_ROOTS"
           python3 .docs-governance-tools/scripts/check-docs-governance.py \
             "${{ inputs.docs_root }}" \
             --controls .docs-governance-tools/controls/docs-governance.yaml \
             --fail-on "${{ inputs.fail_on }}" \
             --grace "${{ inputs.grace }}" \
+            "${args[@]}" \
             --report docs-governance-report.json
 
       - name: Validate & drift-check the machine-readable catalog (DOC-010, delegated to the repo domain builder)
