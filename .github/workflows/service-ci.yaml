@@ -1287,6 +1287,126 @@ jobs:
       spec-file: docs/openapi.json
       contract-test-command: GOWORK=off go test ./tests/contracts/... -count=1 -v
 
+  # ── end-to-end (RFC-0037 stage 3) ───────────────────────────────────────────────────────────
+  # The tier the platform did not have. inboxxhq-platform-bff and inboxxhq-org-bff both ship a
+  # tests/e2e directory, and neither has ever executed: each test skips unless E2E=1, and no
+  # workflow has ever set E2E=1. Both suites also address a deployed environment and expect an
+  # operator to have provisioned an account, so neither could gate a merge even if it did run.
+  #
+  # A conforming suite (ADR-0086) is gated by the `e2e` BUILD TAG rather than an environment
+  # variable, so "did not run" cannot present as "passed" - without the tag the package does not
+  # compile. That is why nothing here passes an enable flag: the tag is the switch, and this job
+  # either runs the suite or fails.
+  #
+  # The suite owns its own stack. TestMain brings compose up and tears it down, so this job runs
+  # `go test` and nothing else - there is no sequence of compose commands here that could drift
+  # from what a developer runs through `ihq e2e`.
+  #
+  # Sibling checkouts come from the repository's own tests/e2e/dependencies.yaml rather than
+  # being hard-coded here, so a service that gains a dependency edits one file in its own repo
+  # and this workflow is untouched.
+  e2e:
+    name: End-to-end
+    needs: resolve
+    if: needs.resolve.outputs.repo_kind == 'deployable' && needs.resolve.outputs.language == 'go'
+    runs-on: ubuntu-latest
+    # Image builds dominate: two Go services compiled from source, layer-cached between runs.
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      # Sibling repositories are private, and both Dockerfiles resolve private
+      # github.com/coderaxis modules at build time, so this job mints a read token the same way
+      # the structure job does. Without id-token: write, ci-app-token fails with "No OIDC token
+      # available" and the gate never runs.
+      id-token: write
+    env:
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide whether an end-to-end suite is owed
+        id: selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Not every service owns one. A service with no external dependencies is covered by
+          # its integration and contract tiers, and an E2E tier over a single process is
+          # integration testing with a longer name (RFC-0037 §1).
+          if [[ -f tests/e2e/docker-compose.yaml ]]; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+            echo "no tests/e2e/docker-compose.yaml; this service owns no end-to-end suite"
+          fi
+
+      - uses: actions/setup-go@v5
+        if: steps.selection.outputs.present == 'true'
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Mint module-read token
+        id: e2eauth
+        if: steps.selection.outputs.present == 'true'
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          configure-git: "true"
+
+      - name: Check out the stack's dependencies
+        if: steps.selection.outputs.present == 'true'
+        shell: bash
+        env:
+          MOD_TOKEN: ${{ steps.e2eauth.outputs.token }}
+        run: |
+          set -euo pipefail
+          manifest=tests/e2e/dependencies.yaml
+          [[ -f "${manifest}" ]] || { echo "no dependency manifest; stack builds this repo only"; exit 0; }
+
+          # Deliberately parsed with python rather than an action: the manifest is three fields
+          # and adding a YAML action here would put a second parser between the repository's
+          # declaration and the checkout it drives.
+          python3 - "${manifest}" <<'PY' > "${RUNNER_TEMP}/deps.tsv"
+          import re, sys
+          repo = ref = env = None
+          rows = []
+          for line in open(sys.argv[1]):
+              line = line.split('#', 1)[0].rstrip()
+              if (m := re.match(r'\s*-\s*repository:\s*(\S+)', line)):
+                  if repo: rows.append((repo, ref, env))
+                  repo, ref, env = m.group(1), 'main', None
+              elif (m := re.match(r'\s*ref:\s*(\S+)', line)):   ref = m.group(1)
+              elif (m := re.match(r'\s*env:\s*(\S+)', line)):   env = m.group(1)
+          if repo: rows.append((repo, ref, env))
+          for r in rows:
+              if not r[2]:
+                  sys.exit(f"dependency {r[0]} declares no env variable")
+              print('\t'.join(r))
+          PY
+
+          while IFS=$'\t' read -r repo ref var; do
+            [[ -n "${repo}" ]] || continue
+            dest="${RUNNER_TEMP}/e2e-deps/$(basename "${repo}")"
+            echo "::group::checkout ${repo}@${ref}"
+            git clone --depth 1 --branch "${ref}" \
+              "https://x-access-token:${MOD_TOKEN}@github.com/${repo}.git" "${dest}"
+            echo "::endgroup::"
+            echo "${var}=${dest}" >> "${GITHUB_ENV}"
+          done < "${RUNNER_TEMP}/deps.tsv"
+
+      - name: Run the end-to-end suite
+        if: steps.selection.outputs.present == 'true'
+        shell: bash
+        env:
+          # Both service images fetch private modules during their build. TestMain writes this
+          # into the compose build secret; it is not exposed to the running containers.
+          GH_TOKEN: ${{ steps.e2eauth.outputs.token }}
+        run: |
+          set -euo pipefail
+          # The identical command `ihq e2e` runs. The stack is brought up and torn down by
+          # TestMain, so a failure here reproduces locally with no extra setup.
+          GOWORK=off go test -tags e2e -count=1 -timeout 35m -v ./tests/e2e/...
+
   # ── documentation ───────────────────────────────────────────────────────────────────────────
   # Replaces the per-repo docs-lint.yml and stale-docs-check.yml, which both ran
   # scripts/validate_docs.py from the repository being checked. That file existed in 91
