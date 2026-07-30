@@ -494,8 +494,10 @@ jobs:
       # here as a startup_failure with no logs.
       id-token: write
     uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yaml@v1
-    # Explicit, because `secrets: inherit` does not cross the org boundary between a service repo
-    # and this workflow. Without them the App token step failed on "Input required and not
+    # No secrets are forwarded, consistent with the rest of this pipeline: the called workflow
+    # mints its own module-read token from its OIDC identity through ci-app-token. The
+    # CODERAXIS_APP_* inputs it still declares are `required: false` leftovers from before that,
+    # kept so the repos that call it directly with `secrets: inherit` keep working.
 
   dockerfile:
     name: Dockerfile standard
