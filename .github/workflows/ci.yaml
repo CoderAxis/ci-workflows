@@ -864,7 +864,15 @@ jobs:
   release-drift:
     name: Release drift - the v1 tag matches main
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # No longer on push. release.yaml now cuts a release for every commit that lands on main, so on
+    # push this job asserts something that is false by construction until that release runs - and
+    # gating the release on CI while CI contains this job deadlocks: CI cannot pass until the
+    # release happens, and the release will not start until CI passes.
+    #
+    # It keeps the schedule, where its meaning has changed rather than weakened. It used to ask
+    # whether a person remembered to move the tag; it now asks whether the automation is working,
+    # which is the failure nobody would otherwise notice.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
         uses: actions/checkout@v4

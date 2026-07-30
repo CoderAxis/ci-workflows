@@ -1,0 +1,190 @@
+name: Release
+
+# Cuts this repository's own release and moves the major tag consumers pin.
+#
+# WHY THIS EXISTS
+# ---------------
+# Consumers pin `@v1`, a MOVING major tag, so the fleet does not run what main says - it runs
+# whatever v1 last pointed at. Keeping those equal was a manual act, and the only thing enforcing
+# it was ci.yaml's release-drift job turning red AFTER the gap had already opened. That made every
+# push to main fail a check by design, which trains people to read a red X as noise; and while the
+# gap was open the fleet ran superseded central logic. On 2026-07-29 v1 sat seven commits behind
+# main and consumers kept running a control that had already been fixed here.
+#
+# So the invariant is maintained rather than reported: every commit that lands on main is released.
+#
+# EVERY COMMIT, NOT JUST FEATURES
+# -------------------------------
+# module-release.yaml deliberately treats ci/chore/docs commits as non-releasable, so a docs-only
+# merge does not fan a no-op bump across every consumer. The opposite is right here, because this
+# repository's contract is the tag itself: v1 must equal main, so a docs-only commit that is not
+# released re-opens exactly the drift this workflow exists to prevent. Commit type therefore
+# decides the SIZE of the bump, never whether to release at all.
+#
+# A MAJOR IS NOT AUTOMATABLE
+# --------------------------
+# A breaking change stops this workflow rather than bumping it. Moving v1 across a major would
+# hand every consumer a breaking change without anyone choosing to take it - the migration is the
+# whole point of a major, and it needs a person and a v2 tag that consumers opt into.
+
+on:
+  push:
+    branches: [main]
+
+# Serialised, and explicitly NOT cancel-in-progress. Two pushes landing together must produce two
+# releases in order; cancelling the first would leave its commits unreleased while the tag jumped
+# past them, which is the drift this prevents wearing a different hat.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Cut the next version and move v1
+    runs-on: ubuntu-latest
+    # Generous because most of it is spent waiting on this repository's own CI lane rather than
+    # doing work. Running out of time refuses the release; it never publishes on a timeout.
+    timeout-minutes: 60
+    permissions:
+      contents: write # push the version tag and move v1
+      actions: read # read this repository's own CI runs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Conventional-commit versioning reads history back to the last tag, so a shallow clone
+          # would silently resolve the wrong bump.
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Nothing is published on an untested tree. A tag cannot be withdrawn once consumers have
+      # resolved it, and @v1 means they resolve it within minutes.
+      #
+      # release-drift is excluded on purpose, and it is the reason that job no longer runs on push.
+      # It asserts v1 == main, which is false for every commit until this workflow releases it, so
+      # gating on it would deadlock: CI could never pass, so the release could never run, so CI
+      # could never pass. It still runs on the daily schedule, where it now checks that THIS
+      # automation is working rather than whether a human remembered.
+      - name: Require a successful CI run for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          api="repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yaml/runs?head_sha=${SHA}&per_page=100"
+          deadline=$(( SECONDS + 45 * 60 ))
+
+          while :; do
+            # An API failure and "CI has not started yet" are different problems and must not
+            # collapse into one message, or the next person cannot tell a broken token from a
+            # workflow that never ran.
+            if ! payload="$(gh api "${api}" 2>/tmp/ci.err)"; then
+              echo "::error::cannot reach the Actions API to determine whether CI passed for ${SHA}."
+              echo "Refusing to release on an unverified commit."
+              awk '{ print "  " $0 }' /tmp/ci.err
+              exit 1
+            fi
+
+            running="$(jq -r '[.workflow_runs[] | select(.status != "completed")] | length' <<<"${payload}")"
+            bad="$(jq -r '[.workflow_runs[] | select(.status == "completed")
+                           | select(.conclusion != "success" and .conclusion != "skipped")]
+                          | length' <<<"${payload}")"
+            good="$(jq -r '[.workflow_runs[] | select(.conclusion == "success")] | length' <<<"${payload}")"
+
+            if [[ "${bad}" -gt 0 ]]; then
+              echo "::error::CI did not pass for ${SHA}; refusing to release it."
+              jq -r '.workflow_runs[] | select(.status == "completed")
+                     | select(.conclusion != "success" and .conclusion != "skipped")
+                     | "  \(.conclusion)  \(.html_url)"' <<<"${payload}"
+              exit 1
+            fi
+
+            if [[ "${good}" -gt 0 && "${running}" -eq 0 ]]; then
+              echo "CI passed for ${SHA}"
+              break
+            fi
+
+            if (( SECONDS > deadline )); then
+              echo "::error::timed out waiting for CI on ${SHA}. Refusing to release an unverified"
+              echo "commit; re-run this workflow once CI has finished."
+              exit 1
+            fi
+            sleep 30
+          done
+
+      - name: Resolve the next version from conventional commits
+        id: version
+        run: |
+          set -euo pipefail
+
+          latest="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1)"
+          if [[ -z "${latest}" ]]; then
+            echo "::error::no vMAJOR.MINOR.PATCH tag exists to bump from. Cut the first one by hand."
+            exit 1
+          fi
+
+          # Idempotent: a re-run, or a push that lands on an already-released commit, must not mint
+          # a second tag for the same tree.
+          if [[ "$(git rev-parse "${latest}^{commit}")" == "$(git rev-parse HEAD)" ]]; then
+            echo "::notice::${latest} already points at this commit; nothing to release"
+            echo "release=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          msgs="$(git log --format=%B "${latest}..HEAD")"
+
+          # Refused rather than bumped. See the header: a major is a migration, not a side effect of
+          # a commit subject, and v1 must never be moved onto one.
+          if grep -qiE '^[a-z]+(\([^)]+\))?!:' <<<"${msgs}" || grep -qE 'BREAKING[ -]CHANGE' <<<"${msgs}"; then
+            echo "::error::a breaking change is on main, which cannot be released automatically."
+            echo "Moving v1 onto it would break every consumer without anyone choosing to take it."
+            echo "Cut v2 by hand and migrate consumers deliberately."
+            exit 1
+          fi
+
+          if grep -qE '^feat(\([^)]+\))?:' <<<"${msgs}"; then
+            bump="minor"
+          else
+            # Everything else is a patch, including ci/chore/docs. Not releasing them would re-open
+            # the drift this workflow exists to close.
+            bump="patch"
+          fi
+
+          IFS=. read -r MA MI PA <<< "${latest#v}"
+          case "${bump}" in
+            minor) MI=$(( MI + 1 )); PA=0 ;;
+            patch) PA=$(( PA + 1 )) ;;
+          esac
+          V="v${MA}.${MI}.${PA}"
+
+          echo "${latest} + ${bump} -> ${V}"
+          { echo "release=true"; echo "version=${V}"; echo "previous=${latest}"; } >> "${GITHUB_OUTPUT}"
+
+      - name: Tag the release and move v1 onto it
+        if: steps.version.outputs.release == 'true'
+        env:
+          V: ${{ steps.version.outputs.version }}
+          PREV: ${{ steps.version.outputs.previous }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Built in a variable rather than inline: interpolating the log into a quoted argument
+          # here indents its first line with this file's own YAML indentation and leaves the rest
+          # flush left, so the tag body arrives visibly misaligned.
+          notes="$(git log --format='- %s' "${PREV}..HEAD")"
+          git tag -a "${V}" -m "${V}" -m "${notes}"
+          git push origin "${V}"
+
+          # Annotated, and forced, because v1 is a moving tag by design. release-drift peels both
+          # sides to a commit before comparing, so it does not care whether v1 is annotated or
+          # lightweight - but keeping it annotated preserves who moved it and when.
+          git tag -f -a v1 -m "Moving major tag: ${V}" "${V}^{commit}"
+          git push --force origin v1
+
+          echo "released ${V}; consumers pinning @v1 now resolve $(git rev-parse --short HEAD)"
