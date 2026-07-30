@@ -1,15 +1,18 @@
 name: Reusable Schema Compatibility
 
 # Central, single-source schema-compatibility + canonical-outbox-conformance gate
-# for the coderaxis platform. Consumed by every *-core-postgres repo via a thin
-# caller (see README, "Reusable workflows"):
+# for the coderaxis platform. Every *-core-postgres repo reaches it the same way
+# every other central check is reached — through service-ci, which its ci.yaml
+# already calls. It needs no per-repo wiring and no inputs:
 #
 #   jobs:
-#     schema-compatibility:
-#       uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yaml@v1
-#       with:
-#         table: auth_service_outbox      # omit to skip outbox conformance
-#       secrets: inherit                  # REQUIRED: passes the module-read App creds
+#     ci:
+#       uses: coderaxis/github-actions/.github/workflows/service-ci.yaml@v1
+#
+# The header here used to document a thin per-repo caller passing `table:` and
+# `secrets: inherit`. No such caller existed in any of the 27 core-postgres
+# repos, and neither input is needed now: the outbox table is discovered from
+# the migrated schema, and the token is minted from the job's own OIDC identity.
 #
 # What it does (single source of truth — change here, roll the @v1 tag, never
 # edit ~27 core-postgres repos):
@@ -20,9 +23,11 @@ name: Reusable Schema Compatibility
 #      embedded schema.Migrate baseline -> static SQL lint). This fixes the
 #      long-standing "goose gap" where pure-goose repos silently fell through to a
 #      static lint and never actually migrated.
-#   3. If `table` is set, run the shared canonical-outbox verifier (RFC-0032 /
-#      ADR-0069) against the live table and fail closed on ANY semantic drift
-#      (columns/types/defaults/domain/PK/unique/checks/partitioning). The verifier
+#   3. Discover every *_outbox table the migrated schema owns and run the shared
+#      canonical-outbox verifier (RFC-0032 / ADR-0069) against each, failing closed
+#      on ANY semantic drift (columns/types/defaults/domain/PK/unique/checks/
+#      partitioning). Discovery replaced an opt-in `table` input that no caller ever
+#      set, which meant this step had never verified a single table. The verifier
 #      version is pinned HERE (outbox_verify_version), so the contract is tightened
 #      fleet-wide from one place with zero per-repo go.mod churn.
 #
@@ -35,7 +40,7 @@ on:
   workflow_call:
     inputs:
       table:
-        description: "Outbox table to verify against the canonical contract (e.g. auth_service_outbox). Empty = skip outbox conformance; migration apply/validate still runs."
+        description: "Escape hatch: verify exactly this table instead of discovering. Leave empty — every *_outbox table in the migrated schema is discovered and verified, so conformance cannot be skipped by omission."
         required: false
         type: string
         default: ""
@@ -64,19 +69,12 @@ on:
         required: false
         type: string
         default: ubuntu-latest
-    # Declared explicitly rather than left to `secrets: inherit`. Inheritance does not cross an
-    # organization boundary, so when this workflow is called from central CI on behalf of a repo in
-    # another org the App credentials arrive empty and the token-minting step fails with "Input
-    # required and not supplied: app-id" - which reads as a broken action rather than a missing
-    # secret. Declaring them keeps `secrets: inherit` working for the repos that already call it
-    # that way, while letting a cross-org caller pass them through explicitly.
-    secrets:
-      CODERAXIS_APP_ID:
-        description: "GitHub App id used to mint a module-read token for private Go modules."
-        required: false
-      CODERAXIS_APP_PRIVATE_KEY:
-        description: "Private key for the module-read App."
-        required: false
+    # No secrets. This workflow mints its own module-read token from the job's OIDC identity
+    # through ci-app-token, which takes no app-id or private-key input at all, so the failure
+    # this previously guarded against ("Input required and not supplied: app-id") cannot occur.
+    # The CODERAXIS_APP_* secrets it declared were deleted fleet-wide by the OIDC migration and
+    # no caller passes them, so declaring them only implied a credential path that no longer
+    # exists.
 
 permissions:
   contents: read
@@ -104,9 +102,13 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      GOPRIVATE: github.com/coderaxis/*
+      # Both accounts, matching every other Go job in service-ci. This job had only
+      # coderaxis, which is latent rather than broken today (inboxxhq-coderaxis appears
+      # as auth-service's and identity-service's OWN module path, never as a dependency,
+      # and a main module is resolved from the checkout rather than fetched) — but it
+      # would bite silently the first time a module crosses accounts.
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
       GONOSUMDB: github.com/coderaxis/*
-      GONOSUMCHECK: "1"
     steps:
       - name: Checkout service (caller)
         uses: actions/checkout@v4
