@@ -132,6 +132,7 @@ class ServiceRepo:
         self.spec_path = root / "docs" / "openapi.json"
         self.spec, self.spec_error = self._load_spec()
         self.go_sources = self._load_go_sources()
+        self.baseline_error = None
         self.baseline = self._load_baseline()
 
     def _load_spec(self):
@@ -184,14 +185,31 @@ class ServiceRepo:
         return out
 
     def _load_baseline(self) -> dict:
+        """Frozen per-control counts, or {} when this repo carries no baseline.
+
+        An ABSENT baseline and an UNREADABLE one both used to return {}, and the caller could
+        not tell them apart. They mean opposite things: absent is a compliant service held to
+        zero, unreadable is a service whose recorded debt just vanished. Conflating them turns
+        a typo in this file into "every pre-existing violation is new", which fails the gate
+        loudly on code the author never touched. The error is recorded so the caller can refuse
+        to run rather than judge the repo against a baseline that is not there.
+        """
         path = self.root / BASELINE_FILE
         if not path.is_file():
             return {}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            self.baseline_error = str(exc)
             return {}
-        return data.get("controls", {}) if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            self.baseline_error = "expected a JSON object at the top level"
+            return {}
+        counts = data.get("controls", {})
+        if not isinstance(counts, dict):
+            self.baseline_error = "'controls' is not an object"
+            return {}
+        return counts
 
 
 # --- detectors: (ServiceRepo) -> Finding ---------------------------------------------------
@@ -375,6 +393,42 @@ def load_controls(path: Path) -> dict:
             print(f"::error::api-contract catalog invalid: {e}")
         raise SystemExit(2)
     return doc
+
+
+def baseline_problems(repo: ServiceRepo, controls: list) -> list:
+    """Reasons this repo's baseline cannot be trusted to mean what it says.
+
+    THIS EXISTS BECAUSE IT ALREADY HAPPENED. Control IDs were renamed from three digits to
+    four (API-001 -> API-0001) in the catalog, which lives in this repository. The baselines
+    keyed on those IDs live in the SERVICE repositories, so no single commit could carry both
+    halves, and the rename shipped alone. Every baseline key then matched no control.
+
+    Nothing detected it, because the lookup in evaluate() is `repo.baseline.get(c["id"], 0)`:
+    a control asks for its own ID, does not find it, and reads its frozen debt as zero. The
+    stale keys are never consulted, so they raise no error. All four gateway repositories went
+    red at once - inboxxhq-platform-bff reporting 678 responses "not bound to the canonical
+    envelope" as though a single commit had introduced them - and stayed red, for a reason
+    visible nowhere in the output.
+
+    The ratchet is the only thing making this catalog enforceable against services that already
+    carry debt, so a baseline that silently stops applying does not weaken the gate, it inverts
+    it: the check now fails precisely the repositories that were being tolerated. Refusing to
+    run is the same call the API-0007 guard makes in main() - a control whose reference artifact
+    is missing must not report a verdict it did not actually reach.
+    """
+    if repo.baseline_error:
+        return [f"{repo.name}: {BASELINE_FILE} is unreadable ({repo.baseline_error}). "
+                f"Fix the file or delete it - deleting holds this repo to zero, which is a "
+                f"stricter gate, not a looser one."]
+    known = {c["id"] for c in controls}
+    unknown = sorted(set(repo.baseline) - known)
+    if not unknown:
+        return []
+    return [f"{repo.name}: {BASELINE_FILE} freezes {k}, which is not a control in this "
+            f"catalog, so the count it records is being ignored and that control is held to "
+            f"zero. If {k} was renamed, rename it here too; if it was retired, drop the line. "
+            f"Re-run with --write-baseline to refreeze from the current state."
+            for k in unknown]
 
 
 def evaluate(repo: ServiceRepo, controls: list) -> list:
@@ -563,6 +617,14 @@ def main(argv: list) -> int:
             print(f"::error::not a directory: {root}")
             return 2
         repo = ServiceRepo(root)
+        # --write-baseline is the documented fix for a stale key, so it has to stay reachable
+        # when the baseline is the thing that is broken.
+        if not args.write_baseline:
+            problems = baseline_problems(repo, controls)
+            if problems:
+                for p in problems:
+                    print(f"::error::api-contract baseline invalid: {p}")
+                return 2
         results = evaluate(repo, controls)
         if args.write_baseline:
             write_baseline(repo, results)
