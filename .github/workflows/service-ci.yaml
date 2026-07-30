@@ -169,10 +169,37 @@ jobs:
         with:
           args: -color
 
+      # PAUSED — non-blocking, deliberately and temporarily.
+      #
+      # gitleaks-action has been licence-gated for organization-owned repositories since v2.0.0.
+      # `coderaxis` is a personal account, so its 71 repos scan free; `InboxxHQ-CoderAxis` is an
+      # organization, so all 48 of its repos fail here with "missing gitleaks license". No
+      # GITLEAKS_LICENSE exists at org or repo scope, and the free tier covers a single repo, so
+      # a free key would not clear 48.
+      #
+      # Paused rather than resolved, and that has a cost worth stating: gitleaks is the ONLY
+      # scanner watching for committed credentials, because Trivy's secret scanner is switched
+      # off below for reading past .gitleaks.toml. While this is paused, nothing enforces.
+      #
+      # The resolution is to drop the wrapper and run the scanner: gitleaks itself is MIT and
+      # carries no licence gate — only the Action does. Verified locally at v8.30.1 against
+      # inboxxhq-auth-service, where it reads the repo's .gitleaks.toml and reports correctly.
       - name: Scan for committed secrets
+        id: gitleaks
+        continue-on-error: true
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ github.token }}
+
+      # A gate that has stopped enforcing has to say so out loud. Without this the step's failure
+      # reads as noise and the job's green tick reads as "no secrets committed" — which is the
+      # exact misreading that DOC-0001, core-guard and the outbox conformance gate each cost this
+      # fleet before.
+      - name: Warn that secret scanning did not run
+        if: steps.gitleaks.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::warning title=Secret scanning paused::gitleaks did not run, so this commit was NOT scanned for committed credentials. The step is non-blocking while the org licence issue is resolved; a green run is not evidence that no secret was committed."
 
   # ── language pipeline ───────────────────────────────────────────────────────────────────────
   build-test:
