@@ -1,0 +1,73 @@
+name: Workflow Lint
+
+# Reusable workflow — lints a repository's own GitHub Actions workflow definitions.
+#
+# WHY THIS EXISTS SEPARATELY FROM service-ci.yaml. service-ci.yaml already carries this step, and
+# through it 97 of the fleet's 118 repositories with workflows are linted. The remaining ones are
+# precisely the repositories whose lifecycle is not a service pipeline — the contract and shared
+# SDK repos, the infra repo, the docs hub, the frontend repos — so they call no central CI at all
+# and had no workflow linting of any kind. That split was not a policy: it was a side effect of
+# which repositories happened to fit service-ci.yaml.
+#
+# The cost of it was measurable rather than theoretical. Scanned 2026-07-30: of 118 repositories,
+# every one of the 11 carrying an actionlint finding was in the uncovered set, and all 97 covered
+# by service-ci.yaml were clean. The gate worked wherever it existed; it simply did not exist
+# everywhere.
+#
+# WHY A REUSABLE WORKFLOW AND NOT A COPIED JOB. A copied job is what the workflow-centralization
+# catalog exists to prevent, and this one carries a version pin that has to be raised in exactly
+# one place — see the digest note below. Callers add a JOB to their existing `ci.yaml` rather than
+# a new lane file, so WFC-0006's allowlist does not have to be widened to accommodate this: an
+# allowlist extended to fit whatever exists asserts nothing.
+#
+# Enforced by WFC-0007, which fails a repository that has workflows but neither calls
+# service-ci.yaml nor this workflow. Policy SSOT: ADR-0081, ADR-0051.
+
+on:
+  workflow_call: {}
+
+jobs:
+  workflow-lint:
+    name: Workflow definitions lint clean
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+
+      # A lint that lints nothing cannot fail, and that is not a hypothetical here: the equivalent
+      # step in this repository's own ci.yaml spent the entire `.yml` -> `.yaml` migration matching
+      # zero files and reporting success. The count is therefore asserted rather than assumed.
+      - name: At least one workflow file is actually linted
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(.github/workflows/*.yaml .github/workflows/*.yml)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::the workflow lint matched no files, so it would report success without"
+            echo "having checked anything. Either this repository has no workflows - in which case"
+            echo "it should not be calling this workflow - or they are not where GitHub expects."
+            exit 1
+          fi
+          echo "linting ${#files[@]} workflow file(s)"
+
+      # Pinned by digest, and deliberately given no `files` glob.
+      #
+      # The pin: an unpinned linter fails on an upstream release rather than on a change in the
+      # repository being checked, and stops a developer's local run from reproducing CI. Measured
+      # on identical source, actionlint 1.7.7 with shellcheck 0.10.0 reports 18 findings in
+      # inboxxhq-infra where 1.7.12 with shellcheck 0.11.0 reports 15. A digest rather than a tag,
+      # because a tag can be re-pushed onto different content. Raising it is a deliberate act: bump
+      # the pin, scan the fleet, fix what the new version finds, land them together. Keep this in
+      # step with the digest in service-ci.yaml so the whole fleet is judged by one set of rules.
+      #
+      # The absent glob: supplying one is what caused the silent pass described above. With no
+      # glob, actionlint discovers `.github/workflows` itself and covers both spellings, which
+      # makes that failure structurally impossible rather than corrected after the fact.
+      - name: Lint workflow definitions
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: -color
