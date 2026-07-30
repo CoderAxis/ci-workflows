@@ -101,6 +101,10 @@
         "hasPrevious": {
           "type": "boolean"
         },
+        "maxPageSize": {
+          "format": "int32",
+          "type": "integer"
+        },
         "nextCursor": {
           "type": "string"
         },
@@ -111,6 +115,9 @@
         "pageSize": {
           "format": "int32",
           "type": "integer"
+        },
+        "policyVersion": {
+          "type": "string"
         },
         "previousCursor": {
           "type": "string"
@@ -195,6 +202,6 @@
   },
   "source": {
     "module": "github.com/coderaxis/platform-contracts-go",
-    "version": "v0.4.0"
+    "version": "v0.7.0"
   }
 }
