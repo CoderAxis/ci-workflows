@@ -1310,8 +1310,12 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.repo_kind == 'deployable' && needs.resolve.outputs.language == 'go'
     runs-on: ubuntu-latest
-    # Image builds dominate: two Go services compiled from source, layer-cached between runs.
-    timeout-minutes: 40
+    # Image builds dominate: two Go services compiled from source. The auth suite measures ~70s
+    # of test execution against roughly four minutes of build, so this ceiling is several times
+    # the observed cost rather than a budget to grow into. It is set deliberately tight: a
+    # ceiling is what a hung container costs the author, and a suite that legitimately
+    # approaches this number has outgrown the merge gate and belongs on a schedule (RFC-0037 §4).
+    timeout-minutes: 20
     permissions:
       contents: read
       # Sibling repositories are private, and both Dockerfiles resolve private
@@ -1323,21 +1327,77 @@ jobs:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The selection step below diffs against the base commit, which a depth-1 checkout
+          # does not contain. Service repositories are small; the extra fetch costs seconds and
+          # buys the ability to skip a job measured in minutes.
+          fetch-depth: 0
 
       - name: Decide whether an end-to-end suite is owed
         id: selection
         shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          # Not every service owns one. A service with no external dependencies is covered by
-          # its integration and contract tiers, and an E2E tier over a single process is
-          # integration testing with a longer name (RFC-0037 §1).
-          if [[ -f tests/e2e/docker-compose.yaml ]]; then
-            echo "present=true" >> "${GITHUB_OUTPUT}"
-          else
+
+          # Gate one: does this service own a suite at all?
+          #
+          # Not every service does. A service with no external dependencies is covered by its
+          # integration and contract tiers, and an E2E tier over a single process is integration
+          # testing with a longer name (RFC-0037 §1).
+          if [[ ! -f tests/e2e/docker-compose.yaml ]]; then
             echo "present=false" >> "${GITHUB_OUTPUT}"
             echo "no tests/e2e/docker-compose.yaml; this service owns no end-to-end suite"
+            exit 0
           fi
+
+          # Gate two: can this change alter runtime behaviour?
+          #
+          # This is the cost control, and it is deliberately the only one. The obvious
+          # alternative - run a cheap subset on pull requests and the real suite after merge -
+          # buys nothing here and costs correctness: the wall-clock is dominated by compiling
+          # two Go services into images, not by executing the tests, so a suite trimmed to a
+          # third still pays nine tenths of the bill. Worse, a subset gate lets a defect through
+          # the merge button and discovers it on main, where it blocks everyone rather than the
+          # author. So the suite is never trimmed. It is either owed in full or not owed.
+          #
+          # It is not owed when nothing executable changed. A prose-only pull request cannot
+          # break a behavioural test, and on a platform that reviews as many documents as this
+          # one that is a large share of all pull requests.
+          #
+          # The classification errs toward running: an unrecognised path is treated as code, and
+          # any failure to compute a diff runs the suite. A gate that skips when it is confused
+          # is the fail-open shape this pipeline exists to eliminate.
+          if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+            echo "${GITHUB_EVENT_NAME}: running the full suite without change analysis"
+            exit 0
+          fi
+
+          if [[ -z "${BASE_SHA}" ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+            echo "base commit unavailable; running the suite rather than guessing"
+            exit 0
+          fi
+
+          changed="$(git diff --name-only "${BASE_SHA}...HEAD")" || {
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+            echo "could not diff against the base; running the suite"
+            exit 0
+          }
+
+          # docs/openapi.json is emphatically not documentation. It is the published contract,
+          # and a change to it is a change to what clients are promised, so it counts as code.
+          inert='^(docs/(?!openapi\.json)|\.github/ISSUE_TEMPLATE/|[^/]*\.md$|LICENSE|CODEOWNERS)'
+          if [[ -n "${changed}" ]] && ! grep -qvP "${inert}" <<<"${changed}"; then
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+            echo "documentation-only change; no executable path can differ:"
+            sed 's/^/  /' <<<"${changed}"
+            exit 0
+          fi
+
+          echo "present=true" >> "${GITHUB_OUTPUT}"
 
       - uses: actions/setup-go@v5
         if: steps.selection.outputs.present == 'true'
@@ -1405,7 +1465,7 @@ jobs:
           set -euo pipefail
           # The identical command `ihq e2e` runs. The stack is brought up and torn down by
           # TestMain, so a failure here reproduces locally with no extra setup.
-          GOWORK=off go test -tags e2e -count=1 -timeout 35m -v ./tests/e2e/...
+          GOWORK=off go test -tags e2e -count=1 -timeout 15m -v ./tests/e2e/...
 
   # ── documentation ───────────────────────────────────────────────────────────────────────────
   # Replaces the per-repo docs-lint.yml and stale-docs-check.yml, which both ran
