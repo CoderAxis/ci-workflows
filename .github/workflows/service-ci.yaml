@@ -1302,9 +1302,15 @@ jobs:
   # `go test` and nothing else - there is no sequence of compose commands here that could drift
   # from what a developer runs through `ihq e2e`.
   #
-  # Sibling checkouts come from the repository's own tests/e2e/dependencies.yaml rather than
-  # being hard-coded here, so a service that gains a dependency edits one file in its own repo
-  # and this workflow is untouched.
+  # Sibling checkouts are made by TestMain from the repository's own tests/e2e/dependencies.yaml,
+  # not by this job. That is a deliberate correction: this workflow used to parse the manifest and
+  # clone from a shell step, which meant the stack a developer got and the stack CI got were two
+  # implementations of one rule - free to disagree, and certain to eventually.
+  #
+  # What remains here is credentials and cache location, which genuinely are properties of the
+  # runner. Everything about what the stack CONTAINS lives in the repository under test, so a
+  # service that gains a dependency edits one file in its own repo, and a failure here reproduces
+  # on a workstation because the same code produced the checkout.
   e2e:
     name: End-to-end
     needs: resolve
@@ -1447,53 +1453,13 @@ jobs:
           scope: read
           configure-git: "true"
 
-      - name: Check out the stack's dependencies
-        if: steps.selection.outputs.present == 'true'
-        shell: bash
-        env:
-          MOD_TOKEN: ${{ steps.e2eauth.outputs.token }}
-        run: |
-          set -euo pipefail
-          manifest=tests/e2e/dependencies.yaml
-          [[ -f "${manifest}" ]] || { echo "no dependency manifest; stack builds this repo only"; exit 0; }
-
-          # Deliberately parsed with python rather than an action: the manifest is three fields
-          # and adding a YAML action here would put a second parser between the repository's
-          # declaration and the checkout it drives.
-          python3 - "${manifest}" <<'PY' > "${RUNNER_TEMP}/deps.tsv"
-          import re, sys
-          repo = ref = env = None
-          rows = []
-          for line in open(sys.argv[1]):
-              line = line.split('#', 1)[0].rstrip()
-              if (m := re.match(r'\s*-\s*repository:\s*(\S+)', line)):
-                  if repo: rows.append((repo, ref, env))
-                  repo, ref, env = m.group(1), 'main', None
-              elif (m := re.match(r'\s*ref:\s*(\S+)', line)):   ref = m.group(1)
-              elif (m := re.match(r'\s*env:\s*(\S+)', line)):   env = m.group(1)
-          if repo: rows.append((repo, ref, env))
-          for r in rows:
-              if not r[2]:
-                  sys.exit(f"dependency {r[0]} declares no env variable")
-              print('\t'.join(r))
-          PY
-
-          while IFS=$'\t' read -r repo ref var; do
-            [[ -n "${repo}" ]] || continue
-            dest="${RUNNER_TEMP}/e2e-deps/$(basename "${repo}")"
-            echo "::group::checkout ${repo}@${ref}"
-            git clone --depth 1 --branch "${ref}" \
-              "https://x-access-token:${MOD_TOKEN}@github.com/${repo}.git" "${dest}"
-            echo "::endgroup::"
-            echo "${var}=${dest}" >> "${GITHUB_ENV}"
-          done < "${RUNNER_TEMP}/deps.tsv"
-
       - name: Run the end-to-end suite
         if: steps.selection.outputs.present == 'true'
         shell: bash
         env:
-          # Both service images fetch private modules during their build. TestMain writes this
-          # into the compose build secret; it is not exposed to the running containers.
+          # Serves two purposes, both TestMain's: it is written into the compose build secret so
+          # the images can resolve private modules, and it is what clones the sibling repositories
+          # the manifest declares. Neither is exposed to the running containers.
           GH_TOKEN: ${{ steps.e2eauth.outputs.token }}
           # Where the layer cache lives. TestMain turns this into a compose override; unset, as
           # it is on a workstation, the build behaves exactly as it did before. The workflow
