@@ -203,6 +203,156 @@ jobs:
             --capabilities http-api \
             --fail-on major
 
+      # DS-0003 spent its whole life so far asserting nothing, and the step above could not
+      # tell: the detector skipped any tag written as `${ARG}`, the template writes its tags
+      # that way, so the self-check passed a Dockerfile it had declined to examine. It then
+      # printed the matrix's EXPECTED tags in the success line, which is how a green result
+      # came to read as confirmation.
+      #
+      # A positive fixture cannot catch that class of defect - it passes either way, which is
+      # precisely the problem. So the template is mutated here and the control is REQUIRED to
+      # fail. If someone reintroduces a skip, or points the checker at a tag the matrix does
+      # not name, this goes red instead of going quiet.
+      #
+      # Both mutations matter. The wrong-value case proves the comparison happens at all. The
+      # missing-default case proves an unresolvable ARG is rejected rather than waved through:
+      # a tag with no default has no version to check, and treating "cannot tell" as "fine" is
+      # the same mistake in a different costume.
+      - name: Mutation test - DS-0003 must reject a base image the matrix does not name
+        run: |
+          set -euo pipefail
+
+          assert_ds0003_fails() {
+            local what="$1" file="$2"
+            local out rc
+            set +e
+            out="$(python3 scripts/check-dockerfile-standard.py "$file" \
+                     --capabilities http-api --fail-on major 2>&1)"
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              echo "::error::$what: the checker passed. DS-0003 is not comparing base image"
+              echo "::error::tags, so every service's bases are unverified while it reports green."
+              echo "$out"
+              exit 1
+            fi
+            if ! grep -q 'DS-0003' <<<"$out"; then
+              echo "::error::$what: the run failed, but not on DS-0003 - so this proves nothing"
+              echo "::error::about base-image pinning. Output follows."
+              echo "$out"
+              exit 1
+            fi
+            echo "  ok - $what rejected by DS-0003"
+          }
+
+          # 1. An ARG default the version matrix does not name.
+          sed 's/^ARG BUILDER_IMAGE_TAG=.*/ARG BUILDER_IMAGE_TAG=1.20-alpine3.11/' \
+            /tmp/Dockerfile.instantiated > /tmp/Dockerfile.wrongtag
+          assert_ds0003_fails "an unpinned go/alpine pair (1.20-alpine3.11)" /tmp/Dockerfile.wrongtag
+
+          # 2. An ARG with no default at all: nothing in the file says what gets built.
+          sed 's/^ARG BUILDER_IMAGE_TAG=.*/ARG BUILDER_IMAGE_TAG/' \
+            /tmp/Dockerfile.instantiated > /tmp/Dockerfile.nodefault
+          assert_ds0003_fails "a BUILDER_IMAGE_TAG ARG with no default" /tmp/Dockerfile.nodefault
+
+          # 3. And the literal spelling is still checked, so the fix did not narrow the control
+          #    to only the ARG form.
+          # \$ keeps ${BUILDER_IMAGE_TAG} literal: the pattern matches that text in the
+          # Dockerfile and must not expand to this shell's (empty) value of it.
+          sed "s|golang:\${BUILDER_IMAGE_TAG}|golang:1.21-alpine3.15|" \
+            /tmp/Dockerfile.instantiated > /tmp/Dockerfile.literal
+          assert_ds0003_fails "a literal non-matrix tag (1.21-alpine3.15)" /tmp/Dockerfile.literal
+
+      # Capability gates must read INSTRUCTIONS, not the file as text. DS-0012 used to grep
+      # df.all_text() for `cmd/seed`, and all_text() includes comments — so a Dockerfile that
+      # merely mentioned the path in prose certified that the image ships a seed binary.
+      # inboxxhq-event-gateway passed that way for real: `seed` declared, no cmd/seed anywhere,
+      # green because an explanatory comment contained the string.
+      #
+      # DS-0013 is the paired assertion and had no `seed` case at all, so neither direction of
+      # the mismatch was caught by anything. The omission direction is the worse one: a repo
+      # that quietly ships a seeding binary without declaring the capability sits outside the
+      # seeding standard's gates entirely, because those gates key off the declaration.
+      - name: Mutation test - a comment must not satisfy a capability gate
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+
+          # A minimal repo that DECLARES seed, mentions ./cmd/seed only in a comment, and has
+          # no cmd/seed on disk. Under the old detector this passed.
+          mkdir -p "$work/repo/cmd/server"
+          printf 'module example\n\ngo 1.26\n' > "$work/repo/go.mod"
+          sed -e 's/__SERVICE_NAME__/example/g' \
+              -e 's/__REPO_NAME__/inboxxhq-example-service/g' \
+              -e 's/__CAPABILITY_LIST__/http-api,seed/g' \
+              -e 's/__SERVICE_PORT__/4000/g' \
+              templates/Dockerfile.service > "$work/repo/Dockerfile"
+          echo '# NOTE: this service intentionally has no ./cmd/seed binary.' >> "$work/repo/Dockerfile"
+
+          set +e
+          out="$(python3 scripts/check-dockerfile-standard.py "$work/repo/Dockerfile" \
+                   --repo-root "$work/repo" --capabilities http-api,seed --fail-on major 2>&1)"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::a repo declaring 'seed' with no cmd/seed passed. A capability gate that"
+            echo "::error::a comment can satisfy certifies nothing about what the image ships."
+            echo "$out"
+            exit 1
+          fi
+          grep -q 'DS-0013' <<<"$out" || {
+            echo "::error::DS-0013 did not fire on 'seed declared but cmd/seed absent'."; echo "$out"; exit 1; }
+          echo "  ok - a declared-but-absent seed capability is rejected"
+
+          # The other direction: cmd/seed on disk, capability NOT declared.
+          mkdir -p "$work/repo/cmd/seed"
+          set +e
+          out="$(python3 scripts/check-dockerfile-standard.py "$work/repo/Dockerfile" \
+                   --repo-root "$work/repo" --capabilities http-api --fail-on major 2>&1)"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ] || ! grep -q 'DS-0013' <<<"$out"; then
+            echo "::error::a repo shipping cmd/seed without declaring 'seed' was accepted. Such a"
+            echo "::error::repo is outside the seeding standard's gates, which key off the declaration."
+            echo "$out"
+            exit 1
+          fi
+          echo "  ok - an undeclared seed binary is rejected"
+          rm -rf "$work"
+
+      # The matrix is only meaningful if the tags it names can actually be pulled. It named
+      # `golang:1.26-alpine3.19` for days; that tag has never been published, so the control's
+      # own primary remediation produced an image that 404s on its base. Nothing anywhere
+      # checked, because every other gate reads the matrix as the source of truth rather than
+      # as a claim about a registry.
+      #
+      # Advisory on purpose: this is the one step here that needs the network, and a registry
+      # blip must not fail an unrelated pull request. It prints loudly enough to act on.
+      - name: Do the pinned base images exist in the registry? (advisory)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          check() {
+            local repo="$1" tag="$2" tok code
+            tok="$(curl -sf "https://public.ecr.aws/token/?scope=repository:docker/library/${repo}:pull" \
+                   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')" || {
+              echo "  ?? could not obtain a registry token for ${repo}; skipping"; return 0; }
+            code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${tok}" \
+                     -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+                     "https://public.ecr.aws/v2/docker/library/${repo}/manifests/${tag}")"
+            if [ "$code" = "200" ]; then
+              echo "  ok - ${repo}:${tag} resolves"
+            else
+              echo "::warning::${repo}:${tag} returns HTTP ${code} - the pinned base image does not"
+              echo "::warning::resolve. Any Dockerfile obeying DS-0003 literally cannot pull its base."
+            fi
+          }
+          builder="$(python3 -c 'import re,pathlib;print(re.search(r"EXPECTED_BUILDER_TAG = \"([^\"]+)\"",pathlib.Path("scripts/check-dockerfile-standard.py").read_text()).group(1))')"
+          runtime="$(python3 -c 'import re,pathlib;print(re.search(r"EXPECTED_RUNTIME_TAG = \"([^\"]+)\"",pathlib.Path("scripts/check-dockerfile-standard.py").read_text()).group(1))')"
+          echo "matrix says builder=golang:${builder}, runtime=alpine:${runtime}"
+          check golang "${builder}"
+          check alpine "${runtime}"
+
   # ── docs governance (was docs-governance-guard.yaml) ────────────────────────────────────────
   # Governance for the docs-governance control catalog + checker themselves: validates the catalog
   # schema, keeps the README control table in sync with the catalog, and smoke-runs the checker
@@ -290,13 +440,38 @@ jobs:
           done
           [ "${missing}" -eq 0 ] && echo "all resolver outputs are exposed by the action"
 
-      # Globs `.yaml`, not `.yml`. This step spent the whole `.yml` -> `.yaml` migration matching
-      # zero files and reporting success, which is the same shape of silent pass the rest of this
-      # suite exists to catch: a lint that lints nothing cannot fail.
+      # This step spent the whole `.yml` -> `.yaml` migration matching zero files and reporting
+      # success, which is the same shape of silent pass the rest of this suite exists to catch:
+      # a lint that lints nothing cannot fail. The comment recording that is not a fix, so the
+      # count is now asserted here and the glob covers both spellings.
+      - name: At least one workflow file is actually linted
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(.github/workflows/*.yaml .github/workflows/*.yml)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::the workflow lint matched no files, so it would report success without"
+            echo "having checked anything. Either the glob is wrong or the workflows moved."
+            exit 1
+          fi
+          echo "linting ${#files[@]} workflow file(s)"
+
+      # No `files` glob on purpose. Supplying one is what caused the silent pass above, and the
+      # input is comma-separated, so the obvious two-extension fix is easy to get subtly wrong.
+      # With no glob, actionlint discovers `.github/workflows` itself and covers both spellings,
+      # which makes that failure structurally impossible rather than corrected. Discovery is
+      # scoped to that directory, so the deliberately-invalid fixtures under scripts/testdata
+      # stay out of scope.
+      #
+      # Version pinned for the same reason service-ci.yaml pins its image by digest: an unpinned
+      # linter turns a hard-fail gate red on an upstream release rather than on a change here,
+      # and stops a developer's local run from reproducing CI. Keep this in step with the digest
+      # pinned in service-ci.yaml so the fleet and this repo judge by the same rules.
       - name: Workflows lint clean
         uses: raven-actions/actionlint@v2
         with:
-          files: ".github/workflows/*.yaml"
+          version: "1.7.12"
 
   # ── workflow centralization (was workflow-centralization-guard.yaml) ────────────────────────
   # Governance for the workflow-centralization control catalog + checker themselves: validates the
