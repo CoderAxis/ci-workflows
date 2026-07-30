@@ -269,11 +269,23 @@ runs:
       run: |
         set -euo pipefail
 
+        # Both the account's canonical spelling and its lower-case form, because git matches
+        # insteadOf as a literal string prefix while GitHub routes an owner case-insensitively.
+        # So `InboxxHQ-CoderAxis` and `inboxxhq-coderaxis` are one account to GitHub and two
+        # unrelated prefixes to git, and a rewrite registered under one spelling silently does
+        # not apply to a URL written in the other.
+        #
+        # That is not a hypothetical spelling preference: github.repository_owner yields the
+        # canonical case, while a go.mod path or a hand-written manifest is conventionally
+        # lower-case, so the two forms genuinely arrive from different places in one job.
         configure() {
-          git config --global \
-            url."https://x-access-token:${2}@github.com/${1}/".insteadOf \
-            "https://github.com/${1}/"
-          echo "Configured short-lived App token for github.com/${1}/ (expires ~1h)"
+          local owner="${1}" token="${2}"
+          for spelling in "${owner}" "${owner,,}"; do
+            git config --global \
+              url."https://x-access-token:${token}@github.com/${spelling}/".insteadOf \
+              "https://github.com/${spelling}/"
+          done
+          echo "Configured short-lived App token for github.com/${owner}/ (expires ~1h)"
         }
 
         configure "${OWNER}" "${MOD_TOKEN}"
