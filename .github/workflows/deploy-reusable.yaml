@@ -587,5 +587,68 @@ jobs:
             echo "push race lost (attempt ${attempt}); rebasing on latest main"
             sleep $(( (RANDOM % 6) + 2 ))
           done
-          test -n "${pushed}" || { echo "::error::failed to pin dev overlay within deadline"; exit 1; }
-          echo "Argo CD reconciles dev; on Synced+Healthy it triggers promotion of this exact digest to staging."
+            test -n "${pushed}" || { echo "::error::failed to pin dev overlay within deadline"; exit 1; }
+            echo "Argo CD reconciles dev; on Synced+Healthy it triggers promotion of this exact digest to staging."
+
+  # Delivery had no failure notification of any kind, across every repository that calls this
+  # workflow. A failed deploy simply left the previous digest pinned and said nothing, so the fleet
+  # degraded to "somebody eventually notices the site is stale". The recorded instance is web-docs
+  # on 2026-07-29: the canonical build failed, the run went red, nobody was told, and the documentation
+  # site silently served the previous day's content until an unrelated commit rebuilt it.
+  #
+  # It lives here rather than in each caller for the ordinary reason everything else does — one
+  # change, rolled out by moving @v1 — but also because a caller CANNOT hold this credential. Slack
+  # is reached through ci-slack-notify, which proves the job's identity with GitHub OIDC and lets AWS
+  # decide whether that identity may read the bot token, so no repository forwards a secret and no
+  # repository needs a Slack lane of its own to get alerted.
+  notify-failure:
+    name: Report a failed delivery
+    needs: [resolve, contract-gate, build-and-pin]
+    # `always()` so this runs even though the jobs it watches failed, and the explicit result test so
+    # it stays silent on success and on a cancellation. A cancelled deploy is somebody's deliberate
+    # act; paging for it trains people to ignore the channel.
+    if: >-
+      always()
+      && (needs.resolve.result == 'failure'
+          || needs.contract-gate.result == 'failure'
+          || needs.build-and-pin.result == 'failure')
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Name the stage that failed
+        id: stage
+        shell: bash
+        env:
+          RESOLVE: ${{ needs.resolve.result }}
+          CONTRACT: ${{ needs.contract-gate.result }}
+          BUILD: ${{ needs.build-and-pin.result }}
+        run: |
+          set -euo pipefail
+          # Report the earliest failure rather than every downstream skip: the later stages did not
+          # fail, they never ran, and listing them sends the reader looking for a second fault.
+          if [[ "${RESOLVE}" == "failure" ]]; then
+            stage="resolving the service identity"
+          elif [[ "${CONTRACT}" == "failure" ]]; then
+            stage="the contract gate (breaking-change detection)"
+          else
+            stage="the canonical build / dev pin"
+          fi
+          echo "stage=${stage}" >> "${GITHUB_OUTPUT}"
+
+      - uses: coderaxis/github-actions/ci-slack-notify@v1
+        with:
+          status: failure
+          title: Deploy failed
+          text: >-
+            ${{ needs.resolve.outputs.service || github.repository }} did not deploy: failed at
+            ${{ steps.stage.outputs.stage }}. dev is still pinned to the previous digest.
+          fields: |
+            [
+              {"title": "Service", "value": "${{ needs.resolve.outputs.service || github.repository }}", "short": true},
+              {"title": "Trigger", "value": "${{ github.event_name }}", "short": true},
+              {"title": "Commit", "value": "${{ github.sha }}", "short": true},
+              {"title": "Run", "value": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}", "short": false}
+            ]
