@@ -169,37 +169,36 @@ jobs:
         with:
           args: -color
 
-      # PAUSED — non-blocking, deliberately and temporarily.
+      # The scanner binary, not the Action wrapper. gitleaks itself is MIT and has no licence
+      # gate; gitleaks-action has been licence-gated for organization-owned repos since v2.0.0,
+      # which made every InboxxHQ-CoderAxis repository fail this step with "missing gitleaks
+      # license" while coderaxis (a personal account) scanned free. No licence key covers 48
+      # org repos on the free tier, and buying one to run an MIT scanner through a proprietary
+      # wrapper is the wrong trade.
       #
-      # gitleaks-action has been licence-gated for organization-owned repositories since v2.0.0.
-      # `coderaxis` is a personal account, so its 71 repos scan free; `InboxxHQ-CoderAxis` is an
-      # organization, so all 48 of its repos fail here with "missing gitleaks license". No
-      # GITLEAKS_LICENSE exists at org or repo scope, and the free tier covers a single repo, so
-      # a free key would not clear 48.
+      # Pinned by version + sha256. A floating "latest" would let an upstream release change the
+      # gate under the fleet with nothing to review — the same reason actionlint is pinned by
+      # digest above. The binary reads each repo's .gitleaks.toml automatically.
       #
-      # Paused rather than resolved, and that has a cost worth stating: gitleaks is the ONLY
-      # scanner watching for committed credentials, because Trivy's secret scanner is switched
-      # off below for reading past .gitleaks.toml. While this is paused, nothing enforces.
-      #
-      # The resolution is to drop the wrapper and run the scanner: gitleaks itself is MIT and
-      # carries no licence gate — only the Action does. Verified locally at v8.30.1 against
-      # inboxxhq-auth-service, where it reads the repo's .gitleaks.toml and reports correctly.
+      # This is the only scanner watching for committed credentials: Trivy's secret scanner is
+      # switched off below because it cannot read .gitleaks.toml and re-flags what that file
+      # deliberately allowlists.
       - name: Scan for committed secrets
-        id: gitleaks
-        continue-on-error: true
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-
-      # A gate that has stopped enforcing has to say so out loud. Without this the step's failure
-      # reads as noise and the job's green tick reads as "no secrets committed" — which is the
-      # exact misreading that DOC-0001, core-guard and the outbox conformance gate each cost this
-      # fleet before.
-      - name: Warn that secret scanning did not run
-        if: steps.gitleaks.outcome == 'failure'
         shell: bash
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          # sha256 of gitleaks_${VERSION}_linux_x64.tar.gz from the release checksums file.
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
         run: |
-          echo "::warning title=Secret scanning paused::gitleaks did not run, so this commit was NOT scanned for committed credentials. The step is non-blocking while the org licence issue is resolved; a green run is not evidence that no secret was committed."
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          curl -sSfL -o "${RUNNER_TEMP}/${archive}" "${url}"
+          echo "${GITLEAKS_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" gitleaks
+          # Full history (fetch-depth: 0 above). A shallow scan cannot see a secret that was
+          # committed and later deleted, which is exactly the case a secret scan exists to catch.
+          "${RUNNER_TEMP}/gitleaks" git . --redact --no-banner
 
   # ── language pipeline ───────────────────────────────────────────────────────────────────────
   build-test:
