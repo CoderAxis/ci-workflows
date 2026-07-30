@@ -1,0 +1,642 @@
+name: Content fan-out
+
+# Tell every consumer of a shared CONTENT artifact that the artifact moved, so the consumer
+# rebuilds. This is the non-Go sibling of module-release.yaml and it deliberately does far less: a
+# content artifact has no tag, no version and no pin, so there is nothing to release and nothing to
+# bump. The commit that was pushed IS the release identifier.
+#
+# A content repository contains ONE workflow, and it declares nothing about who consumes it:
+#
+#   jobs:
+#     fan-out:
+#       permissions:
+#         contents: read
+#         actions: read
+#         id-token: write
+#       uses: coderaxis/github-actions/.github/workflows/content-fanout.yaml@v1
+#
+# WHAT THIS FIXES. The documentation site image is composed from two repositories: the client's
+# platform-docs and the shared core-docs, declared in the client's .platform/build-inputs.json.
+# ADR-0051 §8 already guarantees that a core-docs change produces a NEW image whenever a build
+# runs, because the cache key must cover every declared input ("any change that can change the
+# artifact must change the key"). That half works. The missing half was the build: nothing anywhere
+# started one when core-docs moved.
+#
+# inboxxhq-platform-docs has carried `repository_dispatch: types: [core-docs-updated]` in its
+# deploy lane since the hub was built. A search of the whole repository hub finds exactly ONE
+# occurrence of that event type - the listener itself. No sender has ever existed anywhere. A dead
+# listener cannot report itself, which is why it survived: the absence of an event produces no run,
+# no log and no annotation, so the only observable symptom was a docs site that was silently a day
+# behind. Only the sending side can detect a broken wire, so the sending side checks it (see the
+# listener assertion in `notify`).
+#
+# WHY NOT JUST KEEP POLLING. The consumer's only automatic path today is a daily `schedule` at
+# `17 4 * * *`. Its own comment argues polling is correct rather than merely convenient, and on
+# cost that is right - a run where core-docs has not moved finds its cache key already published,
+# skips the build and commits nothing. Cost was never the problem; latency and observability are:
+#
+#   - GitHub does not honour the time. The two scheduled runs before this was written started at
+#     06:41 and 06:45 UTC against a 04:17 cron - roughly two and a half hours of queue delay on top
+#     of a 24-hour period. "When does a docs change reach the site?" therefore has no answer anyone
+#     can give, which is not a property you can build a review process on.
+#   - A run that fires whether or not anything changed destroys the signal that a run MATTERS. The
+#     2026-07-29 scheduled run failed in its CodeBuild step and nobody was told, because a failed
+#     scheduled poll is indistinguishable from a scheduled poll that had nothing to do.
+#
+# WHY THE CONSUMER LIST IS NOT IN core-docs. core-docs is shared across clients, and ADR-0052 makes
+# a client a hard boundary with its own delivered codebase and infrastructure. A trigger naming
+# InboxxHQ-CoderAxis therefore does not belong in a repository every future client also receives -
+# which is the stated reason the hub polls instead of being pushed to. Resolving the consumer list
+# from the platform catalog dissolves that objection rather than overriding it: the caller in
+# core-docs names no client, and onboarding the second brand is a catalog edit, not a change to a
+# shared repository.
+#
+# UNCONDITIONAL, and there is no enable variable. module-release.yaml's header records what an
+# opt-out cost the Go cascade: ENABLE_CORE_RELEASE_AUTOMATION was true in 38 core repos, false in
+# 15 and unset in 12, so a release either notified its consumers or silently did not, decided by a
+# variable outside the reviewed code. A fan-out whose consumers are optional is not a fan-out. The
+# only question asked here is whether the commit is green.
+#
+# Policy SSOT: ADR-0051 §8 (declared inputs, provenance, cache key), ADR-0052 (multi-client
+# boundaries), ADR-0081 (central workflow + thin caller pattern).
+
+on:
+  workflow_call:
+    inputs:
+      catalog_owner:
+        description: >-
+          Account owning the catalog repo. Kept separate from catalog_repo because GitHub
+          expressions have no string-split function and the App token is minted per owner.
+        required: false
+        type: string
+        default: coderaxis
+      catalog_repo:
+        description: "Repository holding the service catalog (the SSOT for who consumes this artifact)."
+        required: false
+        type: string
+        default: coderaxis/core-docs
+      catalog_ref:
+        description: "Ref of the catalog repo to resolve against."
+        required: false
+        type: string
+        default: main
+
+# No `secrets:` block, deliberately. Both credentials this workflow needs - the catalog reader and
+# the bot that dispatches into consumer repositories - are minted from this job's own OIDC identity
+# through ci-app-token. A caller forwards nothing, so adding a credential here does not mean editing
+# every repository that calls it.
+
+permissions:
+  contents: read
+  # Read THIS repository's own workflow runs, so ci-gate can establish that CI passed for the exact
+  # commit being fanned out. Declared at workflow level rather than only on the job that uses it
+  # because that is the surface WFC-0004 compares a caller against: a called workflow's token is
+  # capped by its caller and the cap is fixed when GitHub LOADS the workflow, so a caller that does
+  # not grant this gets `startup_failure` with no job, no log and no annotation.
+  actions: read
+
+concurrency:
+  # Serialised and never cancelled. A cancelled run leaves some consumers notified and some not,
+  # and it reports as `cancelled` rather than as a failure - so the partial fan-out that
+  # fan-out-report exists to catch would be exactly the case it never sees. Superseding runs are
+  # cheap to let finish: by ADR-0051 §8 a rebuild whose inputs have not moved finds its cache key
+  # already published and reuses the existing digest.
+  group: content-fanout-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  # ── consumers ─────────────────────────────────────────────────────────────────────────────
+  resolve:
+    name: Resolve consumers from the catalog
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      artifact: ${{ steps.consumers.outputs.artifact }}
+      event_type: ${{ steps.consumers.outputs.event_type }}
+      consumers: ${{ steps.consumers.outputs.consumers }}
+      count: ${{ steps.consumers.outputs.count }}
+    steps:
+      # Scoped to the catalog repository alone: resolution reads the catalog and nothing else, so an
+      # installation-wide token here would be reach this job has no use for.
+      - name: Mint a catalog-read token
+        id: catalog_token
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ inputs.catalog_owner }}
+          repositories: ${{ inputs.catalog_repo }}
+
+      - name: Check out the catalog
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.catalog_repo }}
+          ref: ${{ inputs.catalog_ref }}
+          token: ${{ steps.catalog_token.outputs.token }}
+          path: .content-fanout-catalog
+          sparse-checkout: |
+            catalog/services
+            generated/artifact-graph
+
+      - name: Resolve the consumer list
+        id: consumers
+        env:
+          CATALOG_ROOT: .content-fanout-catalog
+          CATALOG_REPO: ${{ inputs.catalog_repo }}
+        run: |
+          set -euo pipefail
+          # The artifact key is this repository's NAME, because that is how the artifact graph keys
+          # its nodes and its consumer map. Taken from the environment rather than interpolated, so
+          # nothing a caller writes reaches a shell.
+          ARTIFACT="${GITHUB_REPOSITORY##*/}"
+          export ARTIFACT
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --upgrade PyYAML
+          python3 - <<'PY'
+          import json, os, pathlib, sys
+
+          import yaml
+
+          root = pathlib.Path(os.environ["CATALOG_ROOT"])
+          catalog_repo = os.environ["CATALOG_REPO"]
+          artifact = os.environ["ARTIFACT"]
+
+          GRAPH = "generated/artifact-graph/artifact-graph.generated.json"
+          SERVICES = "catalog/services"
+
+
+          def fail(*lines: str) -> None:
+              print(f"::error::{lines[0]}")
+              for line in lines[1:]:
+                  print(line)
+              raise SystemExit(1)
+
+
+          graph_path = root / GRAPH
+          if not graph_path.is_file():
+              fail(f"{catalog_repo} has no {GRAPH}, so there is no record of who consumes "
+                   f"{artifact!r}.",
+                   "The consumer list is derived, never declared per-repository: that is what "
+                   "stopped the Go cascade's hand-maintained fan-out matrices from drifting apart "
+                   "in 65 repositories. Regenerate the graph in the catalog repo.")
+
+          try:
+              graph = json.loads(graph_path.read_text(encoding="utf-8"))
+          except json.JSONDecodeError as exc:
+              fail(f"{GRAPH} in {catalog_repo} is not valid JSON: {exc}",
+                   "Refusing to guess at a consumer list; a fan-out that reaches the wrong set is "
+                   "worse than one that stops.")
+
+          consumers_map = graph.get("consumers")
+          if not isinstance(consumers_map, dict):
+              fail(f"{GRAPH} has no top-level `consumers` object mapping artifact name -> consumer "
+                   "names.")
+
+          # "Not modelled" and "modelled with nobody attached" are different defects with different
+          # fixes, and collapsing them into one message would send the next reader looking in the
+          # wrong file. The first means the dependency edge was never added; the second means it was
+          # added and resolves to nothing.
+          if artifact not in consumers_map:
+              fail(f"{artifact!r} has no entry under `consumers` in {GRAPH}, so this fan-out has "
+                   "nobody to notify.",
+                   f"The catalog is the SSOT for who consumes {artifact!r} and it currently does "
+                   "not model that edge. Add it in the catalog repo and regenerate the graph; the "
+                   "shape read here is:",
+                   f'  consumers: {{ "{artifact}": ["<consumer-artifact-name>", ...] }}',
+                   "Each consumer name must also be the `deployable_repository.name` of a service "
+                   f"in {SERVICES}/*.yaml, which is where this resolves it to a repository.")
+
+          names = sorted({n for n in (consumers_map.get(artifact) or []) if n})
+          if not names:
+              fail(f"{artifact!r} is modelled in {GRAPH} but lists ZERO consumers, so this run "
+                   "would notify nobody and report success.",
+                   "That is the exact failure this workflow exists to remove - a docs site went a "
+                   "day stale behind a listener no sender ever reached - so it fails instead. "
+                   "Either the dependency edge is missing from the catalog, or nothing consumes "
+                   f"{artifact!r} any more and this workflow should stop being called.")
+
+          services_dir = root / SERVICES
+          if not services_dir.is_dir():
+              fail(f"{catalog_repo} has no {SERVICES}, so a consumer name cannot be resolved to a "
+                   "repository.")
+
+          # Resolution goes through the catalog rather than through the graph node's own repository
+          # block, and never through a guess at the repository name. The service catalog is where a
+          # human states which GitHub repository a deployable actually is; the graph is a projection
+          # of it. Reading the source means a consumer the graph names but the catalog cannot place
+          # fails here as drift, instead of resolving to a plausible-looking repository that does not
+          # exist.
+          deployables: dict[str, tuple[str, str, str]] = {}
+          other_kinds: dict[str, str] = {}
+          for path in sorted(services_dir.glob("*.yaml")):
+              try:
+                  entry = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+              except yaml.YAMLError as exc:
+                  fail(f"{SERVICES}/{path.name} is not valid YAML: {exc}")
+              if not isinstance(entry, dict):
+                  continue
+              service = str(entry.get("name") or path.stem)
+              block = entry.get("deployable_repository") or {}
+              name, org = block.get("name"), block.get("organization")
+              if name and org:
+                  previous = deployables.get(name)
+                  if previous and previous[0] != org:
+                      fail(f"two services claim the deployable repository {name!r} under different "
+                           f"organizations ({previous[0]} and {org}).",
+                           "A consumer must resolve to exactly one repository; fix the catalog.")
+                  deployables.setdefault(str(name), (str(org), service, path.name))
+              # Recorded only to make the failure below actionable. A content consumer is a site
+              # that gets built and deployed, so it is a deployable; naming the block a near-miss
+              # was found under saves the next reader a hunt through the catalog.
+              for key in ("repository", "schema_repository"):
+                  near = entry.get(key) or {}
+                  if near.get("name"):
+                      other_kinds.setdefault(str(near["name"]), key)
+
+          targets, missing = [], []
+          for name in names:
+              placed = deployables.get(name)
+              if placed is None:
+                  found_as = other_kinds.get(name)
+                  missing.append(
+                      f"  {name}: bound as `{found_as}`, not `deployable_repository`"
+                      if found_as else f"  {name}: not found in {SERVICES}/*.yaml"
+                  )
+                  continue
+              org, service, source = placed
+              targets.append({"repository": f"{org}/{name}", "name": name, "service": service})
+
+          if missing:
+              fail(f"{GRAPH} names {len(missing)} consumer(s) of {artifact!r} that "
+                   f"{SERVICES}/*.yaml cannot resolve to a repository:",
+                   *missing,
+                   "The graph and the service catalog disagree about what exists. Every consumer "
+                   "must be the `deployable_repository` of a catalog service:",
+                   "  deployable_repository:",
+                   "    organization: <github org>",
+                   "    name: <consumer-artifact-name>")
+
+          # Derived once, here, rather than written into each step that needs it: two hardcoded
+          # copies of an event name in one file drift the moment somebody edits one of them, and the
+          # symptom would be a dispatch nothing listens for. `<artifact>-updated` is the content
+          # counterpart of the `<module>-released` convention WFC-0005 already encodes, so a second
+          # content artifact needs no input here - and the listener assertion in `notify` refuses to
+          # dispatch a name the consumer does not subscribe to, so a wrong derivation fails loudly
+          # rather than silently.
+          event_type = f"{artifact}-updated"
+
+          targets.sort(key=lambda t: t["repository"])
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"artifact={artifact}\n")
+              fh.write(f"event_type={event_type}\n")
+              fh.write(f"consumers={json.dumps(targets, separators=(',', ':'))}\n")
+              fh.write(f"count={len(targets)}\n")
+
+          print(f"{artifact} moves are announced as {event_type!r}", file=sys.stderr)
+          print(f"{artifact} has {len(targets)} consumer(s) in the catalog:", file=sys.stderr)
+          for t in targets:
+              print(f"  {t['repository']}  (service: {t['service']})", file=sys.stderr)
+          PY
+
+      - name: Drop the catalog checkout
+        if: always()
+        run: rm -rf .content-fanout-catalog
+
+  # ── CI gate ───────────────────────────────────────────────────────────────────────────────
+  # A fan-out is a request to rebuild and redeploy from this commit, so it must not go out on a
+  # commit whose own CI is red. module-release.yaml records why this cannot be assumed: it tagged
+  # modules with no relationship to the repository's CI, both fire on the same push to main, and
+  # they raced. platform-contracts 3288b41 is the instance - on 2026-07-28 at 12:21:45Z `ci` failed
+  # and `Release contracts` succeeded at the same timestamp on the same commit.
+  #
+  # The mechanism below is that workflow's, not a new one, down to which answers are refusals: no
+  # run for the commit, an unreachable API, a run still going past the timeout, and any non-success
+  # conclusion all stop the fan-out. There is no input or variable that turns it off.
+  #
+  # WHAT THIS GATE CAN AND CANNOT PROMISE, because the difference is easy to misread. It establishes
+  # that CI passed for the SHA that was pushed. It does not establish that the consumer will build
+  # that SHA: the consumer resolves `ref: "main"` at build time (ADR-0051 §8 - the moving ref is the
+  # input SPECIFICATION, the resolved SHA is the input), so a later push can land first and the
+  # consumer builds that instead. That is inherent to the moving-ref design and is the reason the
+  # resolved SHA is recorded in provenance rather than pinned in source. The gate's real job is
+  # narrower and still worth having: it stops a fan-out from being TRIGGERED by a red commit.
+  ci-gate:
+    name: Gate - repository CI passed for this commit
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    # Generous, because it is waiting for the repository's full CI lane rather than doing work. The
+    # timeout is a refusal, not a pass: running out of time fails the gate.
+    timeout-minutes: 45
+    steps:
+      - name: Require a successful ci.yaml run for the exact commit being fanned out
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The commit that moved the artifact, and therefore the exact tree whose CI result is the
+          # one that matters - a green run on a later or earlier commit says nothing about this one.
+          SHA: ${{ github.sha }}
+          # Addressed by FILE PATH, not by the `name:` field. WFC-0006 permits exactly ci.yaml and
+          # release.yaml, so the path is fixed by control while the display name is cosmetic and
+          # already varies across the fleet ("ci" and "CI" both occur).
+          CI_WORKFLOW: ci.yaml
+        run: |
+          set -euo pipefail
+
+          api="repos/${GITHUB_REPOSITORY}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=${SHA}&per_page=100"
+          deadline=$(( SECONDS + 40 * 60 ))
+
+          while :; do
+            # An API error and "no runs yet" must never collapse into the same answer. Both refuse
+            # here, but they refuse for different reasons and the message has to say which, or the
+            # next person debugging a blocked fan-out cannot tell a broken token from missing CI.
+            if ! payload="$(gh api "${api}" 2>/tmp/ci-gate.err)"; then
+              if grep -qi 'Not Found' /tmp/ci-gate.err; then
+                echo "::error::${GITHUB_REPOSITORY} has no .github/workflows/${CI_WORKFLOW}, so there"
+                echo "is no CI result to fan out against. A content repository that notifies its"
+                echo "consumers must hold a ci.yaml (WFC-0006)."
+                exit 1
+              fi
+              echo "::error::cannot reach the GitHub Actions API to determine whether CI passed for"
+              echo "${SHA}. Refusing to trigger a rebuild on an unverified commit."
+              awk '{ print "  " $0 }' /tmp/ci-gate.err
+              exit 1
+            fi
+
+            total="$(jq -r '.total_count' <<<"${payload}")"
+            running="$(jq -r '[.workflow_runs[] | select(.status != "completed")] | length' <<<"${payload}")"
+            bad="$(jq -r '[.workflow_runs[] | select(.status == "completed")
+                          | select(.conclusion == "failure" or .conclusion == "timed_out"
+                                   or .conclusion == "startup_failure")] | length' <<<"${payload}")"
+            good="$(jq -r '[.workflow_runs[] | select(.conclusion == "success")] | length' <<<"${payload}")"
+
+            # Decided before "still running", so a red run stops the fan-out immediately instead of
+            # waiting out a concurrent one that can no longer change the answer.
+            if [[ "${bad}" -gt 0 ]]; then
+              echo "::error::CI for ${SHA} has ${bad} failing run(s), so this commit must not be"
+              echo "fanned out. Fix CI on this commit and push again; nothing is lost by notifying"
+              echo "consumers from the fix instead, because there is no version to reissue."
+              jq -r '.workflow_runs[] | select(.status == "completed")
+                     | select(.conclusion != "success")
+                     | "  \(.conclusion)  \(.html_url)"' <<<"${payload}"
+              exit 1
+            fi
+
+            if [[ "${running}" -gt 0 || "${total}" -eq 0 ]]; then
+              if [[ ${SECONDS} -ge ${deadline} ]]; then
+                if [[ "${total}" -eq 0 ]]; then
+                  # The likeliest cause on a content repository, and the one worth naming. core-docs'
+                  # ci.yaml carries `paths:` filters on its push trigger, so a commit touching only
+                  # files outside them (an image, a non-markdown asset) produces no run at all - and
+                  # a commit CI declines to judge cannot authorise anything. The fix belongs in the
+                  # content repository's CI, not here: a lane that can skip a commit cannot gate it.
+                  echo "::error::no ${CI_WORKFLOW} run exists for ${SHA} after waiting. There is no"
+                  echo "CI result for this commit, so there is nothing to verify against. If CI's"
+                  echo "path filters excluded it, widen them - every commit that can reach a"
+                  echo "consumer has to be judged by the lane that gates the fan-out."
+                else
+                  echo "::error::CI for ${SHA} was still running when this gate timed out. Refusing"
+                  echo "to notify consumers against an unfinished verification."
+                fi
+                exit 1
+              fi
+              echo "waiting for CI on ${SHA} (${total} run(s), ${running} still going)..."
+              sleep 20
+              continue
+            fi
+
+            # Every run is complete and none failed. A success must still exist: a commit whose only
+            # runs were cancelled or skipped has not been verified, and "nothing said no" is not the
+            # same as "CI passed".
+            if [[ "${good}" -eq 0 ]]; then
+              echo "::error::${CI_WORKFLOW} produced no successful run for ${SHA} - every run was"
+              echo "cancelled, skipped or neutral. That is not a pass, so it cannot authorise a"
+              echo "rebuild of every consumer."
+              jq -r '.workflow_runs[] | "  \(.status)/\(.conclusion)  \(.html_url)"' <<<"${payload}"
+              exit 1
+            fi
+
+            echo "CI passed for ${SHA} (${good} successful run(s), no failures)."
+            jq -r '.workflow_runs[] | select(.conclusion == "success") | "  \(.html_url)"' <<<"${payload}"
+            exit 0
+          done
+
+  # ── fan-out ───────────────────────────────────────────────────────────────────────────────
+  notify:
+    name: Notify ${{ matrix.repository }}
+    needs: [resolve, ci-gate]
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      # One unreachable consumer must not suppress the others; a partial fan-out is recoverable by
+      # re-running, whereas a cancelled fan-out hides which targets were reached.
+      fail-fast: false
+      # The dispatch itself is one API call and needs no throttle. The token does: every consumer
+      # job performs an STS web-identity exchange, a Secrets Manager read and three GitHub App calls
+      # to mint a repository-scoped token. Across a brand fleet that is expected to grow, that burst
+      # is what trips secondary rate limits - and a rate-limited mint is indistinguishable from a
+      # broken one.
+      max-parallel: 8
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.consumers) }}
+    steps:
+      - name: Split the target into owner and repo
+        id: t
+        env:
+          TARGET: ${{ matrix.repository }}
+        run: |
+          set -euo pipefail
+          {
+            echo "owner=${TARGET%%/*}"
+            echo "repo=${TARGET##*/}"
+          } >> "${GITHUB_OUTPUT}"
+
+      # Scoped to the single target repository, so a fan-out holds write on exactly the consumer it
+      # is notifying and not on the fleet.
+      - name: Mint release-bot token for this target
+        id: bottoken
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: publish
+          owner: ${{ steps.t.outputs.owner }}
+          repositories: ${{ steps.t.outputs.repo }}
+
+      # POST /dispatches answers 204 whether or not anything is listening, so a successful call
+      # proves only that GitHub accepted the request. That is precisely the shape of the bug being
+      # fixed - a listener with no sender - and shipping the mirror image of it would be worse,
+      # because a fan-out that reports success into a repository that cannot hear it is undetectable
+      # from either end.
+      #
+      # The listener is PARSED, not grepped. ci.yaml's Dockerfile controls record what text matching
+      # costs: DS-0012 grepped a Dockerfile's full text for `cmd/seed`, so a repo that merely
+      # mentioned the path in a COMMENT certified that its image shipped a seed binary, and
+      # inboxxhq-event-gateway passed that way for real.
+      - name: Require the consumer to be listening for this event
+        env:
+          GH_TOKEN: ${{ steps.bottoken.outputs.token }}
+          TARGET: ${{ matrix.repository }}
+          EVENT_TYPE: ${{ needs.resolve.outputs.event_type }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+
+          if ! names="$(gh api "repos/${TARGET}/contents/.github/workflows" \
+                          --jq '.[] | select(.type == "file") | .name' 2>/tmp/listener.err)"; then
+            echo "::error::cannot read .github/workflows in ${TARGET}, so it is not possible to tell"
+            echo "whether the fan-out event would reach anything."
+            awk '{ print "  " $0 }' /tmp/listener.err
+            exit 1
+          fi
+
+          # No ref is passed on purpose: the contents API defaults to the DEFAULT branch, and a
+          # repository_dispatch only ever triggers a workflow that is on the default branch. Reading
+          # any other ref would assert something about a file GitHub will not consult.
+          while IFS= read -r name; do
+            [[ -n "${name}" ]] || continue
+            case "${name}" in
+              *.yaml|*.yml) ;;
+              *) continue ;;
+            esac
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/${TARGET}/contents/.github/workflows/${name}" > "${work}/${name}"
+          done <<< "${names}"
+
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --upgrade PyYAML
+          WORK="${work}" python3 - <<'PY'
+          import os, pathlib, sys
+
+          import yaml
+
+          work = pathlib.Path(os.environ["WORK"])
+          event = os.environ["EVENT_TYPE"]
+          target = os.environ["TARGET"]
+
+          listeners = []
+          for path in sorted(work.iterdir()):
+              try:
+                  doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+              except yaml.YAMLError:
+                  continue
+              if not isinstance(doc, dict):
+                  continue
+              # A bare `on:` key parses as the boolean True under YAML 1.1, so both spellings have to
+              # be read or half the fleet's workflows look triggerless.
+              on = doc.get("on") or doc.get(True)
+              if not isinstance(on, dict) or "repository_dispatch" not in on:
+                  continue
+              block = on.get("repository_dispatch") or {}
+              types = block.get("types") if isinstance(block, dict) else None
+              if isinstance(types, str):
+                  types = [types]
+              # An empty `repository_dispatch:` subscribes to every type, so it is a listener too.
+              if types is None or event in types:
+                  listeners.append(path.name)
+
+          if not listeners:
+              print(f"::error::{target} has no workflow on its default branch subscribing to the "
+                    f"{event!r} repository_dispatch event, so this notification would be accepted "
+                    "with HTTP 204 and reach nothing.")
+              print("Add the trigger to the consumer's deploy lane:")
+              print("  on:")
+              print("    repository_dispatch:")
+              print(f"      types: [{event}]")
+              sys.exit(1)
+
+          print(f"{target} listens for {event} in: {', '.join(listeners)}")
+          PY
+          rm -rf "${work}"
+
+      # WHY A DISPATCH HERE, WHEN module-release.yaml DELETED ITS DISPATCH. Anyone who knows the Go
+      # cascade will read this as the anti-pattern that workflow removed at its fan-out, and will be
+      # tempted to "fix" it back into a direct edit. It is not the same thing.
+      #
+      # There, the dispatch woke a 41-line workflow in the consumer whose only act was to call
+      # straight back into the central repository the event came from. The central job already held
+      # the consumer list, a write token for the target and the version to pin, so it could make the
+      # edit itself; the round trip bought nothing and cost 138 files across 91 repositories
+      # (WFC-0005).
+      #
+      # Here there is no edit for this job to make. ADR-0051 §8 settles it: a moving ref is a
+      # legitimate input SPECIFICATION and the resolved SHA is the input, recorded in the artifact's
+      # provenance - so .platform/build-inputs.json keeps `ref: "main"` and there is no pin to bump.
+      # What has to happen is a BUILD, and the same ADR makes the build hermetic and repository
+      # scoped: it runs in the consumer, from the consumer's own tree, under the consumer's own OIDC
+      # identity, and it is the build executor that derives the cache key because it is the only
+      # component that knows every contributor. None of that is work this job could take over. The
+      # event is the entire deliverable, not a wake-up call for code that lives here.
+      - name: Dispatch the content-updated event
+        env:
+          GH_TOKEN: ${{ steps.bottoken.outputs.token }}
+          TARGET: ${{ matrix.repository }}
+          EVENT_TYPE: ${{ needs.resolve.outputs.event_type }}
+          ARTIFACT: ${{ needs.resolve.outputs.artifact }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Enough for an operator to answer "why did this image rebuild?" from the consumer's run
+          # alone, months later. `ref` is carried as well as `sha` because the consumer resolves the
+          # moving ref at build time, so which branch moved decides whether this notification is even
+          # relevant to what it will build.
+          jq -n \
+            --arg event "${EVENT_TYPE}" \
+            --arg artifact "${ARTIFACT}" \
+            --arg source_repository "${SOURCE_REPOSITORY}" \
+            --arg sha "${SHA}" \
+            --arg ref "${REF_NAME}" \
+            --arg run_url "${RUN_URL}" \
+            '{event_type: $event,
+              client_payload: {artifact: $artifact,
+                               source_repository: $source_repository,
+                               sha: $sha,
+                               ref: $ref,
+                               run_url: $run_url}}' > "${RUNNER_TEMP}/dispatch.json"
+
+          if ! gh api "repos/${TARGET}/dispatches" --method POST \
+                 --input "${RUNNER_TEMP}/dispatch.json" 2>"${RUNNER_TEMP}/dispatch.err"; then
+            echo "::error::could not dispatch ${EVENT_TYPE} to ${TARGET}, so it has NOT been told"
+            echo "that ${ARTIFACT} moved to ${SHA} and will keep serving the previous content until"
+            echo "something else rebuilds it."
+            awk '{ print "  " $0 }' "${RUNNER_TEMP}/dispatch.err"
+            exit 1
+          fi
+          echo "::notice::${TARGET} notified: ${ARTIFACT} moved to ${SHA} (${RUN_URL})"
+
+  # A notification that silently fails to land is how a consumer ends up serving week-old content
+  # without anyone noticing - which is the state this workflow was written to end, so an incomplete
+  # fan-out is surfaced rather than left in the log.
+  fan-out-report:
+    name: Report fan-out result
+    needs: [resolve, ci-gate, notify]
+    # Only meaningful once there was something to fan out. When resolve or the gate failed, the run
+    # is already red for a reason those jobs stated precisely, and repeating it here would put a
+    # second, vaguer error on the same fault.
+    if: always() && needs.resolve.result == 'success' && needs.ci-gate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any consumer was not notified
+        env:
+          RESULT: ${{ needs.notify.result }}
+          CONSUMERS: ${{ needs.resolve.outputs.consumers }}
+          COUNT: ${{ needs.resolve.outputs.count }}
+          ARTIFACT: ${{ needs.resolve.outputs.artifact }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "${ARTIFACT} moved to ${SHA}"
+          echo "consumers: ${CONSUMERS}"
+
+          if [[ "${RESULT}" != "success" ]]; then
+            echo "::error::fan-out result was '${RESULT}'. ${ARTIFACT} moved to ${SHA} but at least" \
+                 "one consumer was not notified, so it will keep building against the content it" \
+                 "already has. Re-run this job to retry the notification."
+            exit 1
+          fi
+          echo "every consumer the catalog declares was notified (${COUNT})"
