@@ -11,9 +11,10 @@
 # Contract with the workflow (all via environment):
 #   TEST_DATABASE_URL     (required) DSN of an ephemeral, empty postgres.
 #   DATABASE_URL          (optional) defaults to TEST_DATABASE_URL.
-#   OUTBOX_TABLE          (optional) if set, the canonical outbox verifier runs
-#                                    against this table; if empty, only the
-#                                    migration apply/validate runs.
+#   OUTBOX_TABLE          (optional) verify exactly this table. Normally unset:
+#                                    the verifier discovers every *_outbox table
+#                                    the migrated schema owns, so a repo cannot
+#                                    skip conformance by declaring nothing.
 #   OUTBOX_VERIFY_VERSION (optional) platform-shared-go version providing
 #                                    cmd/outbox-verify (the contract). Pinned
 #                                    centrally so the contract is bumped
@@ -254,22 +255,71 @@ apply_migrations() {
   static_lint
 }
 
-verify_outbox() {
-  if [[ -z "${TABLE}" ]]; then
-    log "OUTBOX_TABLE not set; skipping canonical outbox conformance"
-    return
-  fi
-  log "verifying ${TABLE} against canonical outbox contract (verifier@${VERIFY_VERSION})"
+# discover_outbox_tables — list the outbox tables the migrated DB actually owns.
+#
+# The table name is DISCOVERED, not configured. Requiring each repo to declare
+# `table:` made the gate fail open: the caller in every one of the ~27
+# core-postgres repos is service-ci's `schema` job, which passes no inputs at
+# all, so OUTBOX_TABLE was empty everywhere and conformance never ran once. A
+# gate whose enforcement depends on ~27 repos each remembering to opt in is a
+# gate that is off.
+#
+# Partition children are excluded (relispartition): the canonical tables are
+# declared `PARTITION BY RANGE (created_at)` with a `<name>_default` child, and
+# the child inherits the parent's shape — verifying it adds nothing and its name
+# is not the contract's name.
+discover_outbox_tables() {
+  psql "${TEST_DATABASE_URL}" -tAc "
+    SELECT c.relname
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relkind IN ('r', 'p')
+      AND NOT c.relispartition
+      AND c.relname LIKE '%\_outbox'
+    ORDER BY 1"
+}
+
+# run_verifier <table> — introspect one live table against the canonical contract.
+run_verifier() {
+  local table="$1" wd
   # Run from an empty dir so the caller's go.mod never influences the pinned
   # verifier version. The verifier depends only on outboxverify + pgx.
-  local wd
   wd="$(mktemp -d)"
   (
     cd "${wd}"
     GOWORK=off go run \
       "github.com/coderaxis/platform-shared-go/cmd/outbox-verify@${VERIFY_VERSION}" \
-      -table "${TABLE}" -dsn "${TEST_DATABASE_URL}"
+      -table "${table}" -dsn "${TEST_DATABASE_URL}"
   )
+}
+
+verify_outbox() {
+  if [[ -n "${TABLE}" ]]; then
+    log "verifying ${TABLE} against canonical outbox contract (verifier@${VERIFY_VERSION})"
+    run_verifier "${TABLE}"
+    return
+  fi
+
+  if ! command -v psql >/dev/null 2>&1; then
+    echo "::error::psql is required to discover outbox tables; set OUTBOX_TABLE to name one explicitly"
+    exit 1
+  fi
+
+  local tables=() t
+  while IFS= read -r t; do
+    [[ -n "${t}" ]] && tables+=("${t}")
+  done < <(discover_outbox_tables)
+
+  if [[ "${#tables[@]}" -eq 0 ]]; then
+    log "no *_outbox table in the migrated schema; nothing to verify for this repo"
+    return
+  fi
+
+  log "discovered ${#tables[@]} outbox table(s); verifying against canonical contract (verifier@${VERIFY_VERSION})"
+  for t in "${tables[@]}"; do
+    log "verifying ${t}"
+    run_verifier "${t}"
+  done
 }
 
 check_schema_layout
