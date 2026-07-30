@@ -112,27 +112,23 @@ on:
       image_digest:
         description: "Immutable @sha256 digest of the canonical artifact pinned into the dev overlay (the deployment identity promoted unchanged to staging/preprod/prod)."
         value: ${{ jobs.build-and-pin.outputs.image_digest }}
-    secrets:
-      # Cross-org callers MUST pass this explicitly. `secrets: inherit` only works
-      # within the same org/enterprise; service repos live in a different org than
-      # this central workflow, so inherit silently forwards zero secrets. AWS auth is
-      # pure GitHub OIDC (no static keys) — this is the only secret delivery needs:
-      # private Go module fetch in the canonical build + pinning the digest into the
-      # infra GitOps repo.
-      CROSS_REPO_TOKEN:
-        description: "Cross-repo token (PAT or GitHub App token) for private module fetch and GitOps digest pinning."
-        required: false
-      GH_PAT:
-        description: "Optional fallback for CROSS_REPO_TOKEN."
-        required: false
-      # CODERAXIS_APP_ID / CODERAXIS_APP_PRIVATE_KEY were declared here to mint a short-lived
-      # installation token for checking out declared build inputs. They are gone: that token is
-      # now minted from this job's OIDC identity via ci-app-token, so no caller forwards a key.
-      #
-      # CROSS_REPO_TOKEN and GH_PAT remain because they are still READ below, and they are the
-      # last long-lived credentials in the delivery path. They should follow the same route — the
-      # blocker is that the GitOps push targets a repository outside the App's installation, not
-      # anything about this workflow.
+    # No secrets. Delivery now mints every credential it needs from this job's own OIDC identity
+    # through ci-app-token, so a caller forwards nothing and holds nothing.
+    #
+    # This block used to declare CROSS_REPO_TOKEN and GH_PAT, and their removal is the fix for a
+    # real outage rather than tidying. service-ci.yaml calls this workflow with no `secrets:`
+    # block by design — the platform decides what a caller may mint rather than each caller
+    # holding the credential that decides it — so those secrets were always empty, and a preflight
+    # step failed every deploy on the absence of something that was never going to arrive.
+    #
+    # Worse, the contract breaking-change gate treated the same absence as a reason to SKIP with a
+    # warning. Since the token was always absent, that gate had never run: a breaking API change
+    # would have shipped with the job green.
+    #
+    # What replaced them, and why three rather than one: `read` for the contract registry and the
+    # builder's private modules, and `gitops` for the digest pin. A single credential broad enough
+    # for all of them is what a PAT was, and rebuilding that with a shorter lifetime would have
+    # missed the point.
 
 permissions:
   contents: read
@@ -179,34 +175,54 @@ jobs:
       - name: Checkout service repo
         uses: actions/checkout@v4
 
-      - name: Preflight (contract + token availability)
+      - name: Preflight (is a contract owed?)
         id: preflight
         shell: bash
         env:
-          CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
+          CONTRACT_REPO: ${{ inputs.contract_repo }}
         run: |
           set -euo pipefail
+
+          # The registry slug is split here rather than in the `with:` block below because
+          # GitHub's expression language has no split(): `owner/name` can only be taken apart
+          # by a shell.
+          echo "registry_owner=${CONTRACT_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "registry_name=${CONTRACT_REPO##*/}" >> "$GITHUB_OUTPUT"
           # The gate only applies to OpenAPI services. Gateways/frontends without a
           # committed spec are skipped rather than failed.
+          #
+          # Token availability used to be the other half of this condition, and a missing token
+          # downgraded the gate to a warning. That is the fail-open shape: a breaking API change
+          # would ship while the job reported success, and the only trace was a warning nobody
+          # reads. The token is now minted from this job's own OIDC identity, so it is either
+          # there or the step fails — there is no state in which the gate silently does nothing.
           if [[ ! -f docs/openapi.json ]]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "No docs/openapi.json — not an OpenAPI service; skipping contract gate"
-          elif [[ -z "${CROSS_REPO_TOKEN}" ]]; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::module token unavailable — skipping contract breaking-change check"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
+
+      # Scoped to the registry alone. The gate reads one published contract, so an
+      # installation-wide token would be broader than the one call it makes.
+      - name: Mint a token for the contract registry
+        id: registry_token
+        if: steps.preflight.outputs.run == 'true'
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ steps.preflight.outputs.registry_owner }}
+          repositories: ${{ steps.preflight.outputs.registry_name }}
 
       - name: Fetch published contract from registry
         if: steps.preflight.outputs.run == 'true'
         shell: bash
         env:
-          CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
+          REGISTRY_TOKEN: ${{ steps.registry_token.outputs.token }}
         run: |
           set -euo pipefail
           curl -sSL \
-            -H "Authorization: Bearer ${CROSS_REPO_TOKEN}" \
+            -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
             -H "Accept: application/vnd.github.raw" \
             "https://api.github.com/repos/${{ inputs.contract_repo }}/contents/${{ needs.resolve.outputs.service }}/latest.json" \
             -o /tmp/published-contract.json
@@ -433,22 +449,6 @@ jobs:
             echo "No scripts/check_core_module_versions.sh — skipping core module release policy"
           fi
 
-      - name: Check required deploy secrets
-        shell: bash
-        env:
-          CROSS_REPO_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          # AWS auth is GitHub OIDC (no long-lived keys). A cross-repo token is
-          # still needed for private Go module fetch in the build and to pin the
-          # digest into the infra repo.
-          if [[ -z "${CROSS_REPO_TOKEN:-${GH_PAT:-}}" ]]; then
-            echo "::error::Missing required secret: CROSS_REPO_TOKEN or GH_PAT"
-            exit 1
-          fi
-          echo "Required deploy secrets are present"
-
       # OIDC (no long-lived keys): assume the ci-build ORCHESTRATOR identity
       # (environments/management/ci-identity). It may only upload the source
       # tarball and start/read the canonical build — it cannot push images,
@@ -497,6 +497,16 @@ jobs:
           aws s3 cp "${TMP_TARBALL}" "${SOURCE_URI}" >/dev/null
           echo "source_uri=${SOURCE_URI}" >> "${GITHUB_OUTPUT}"
 
+      # The image build resolves private github.com/coderaxis modules, so the builder needs a
+      # read credential. This is minted separately from the declared-inputs token above because
+      # that one only exists when a build-inputs manifest declares something, which most services
+      # do not — the modules, by contrast, are fetched by every Go build there is.
+      - name: Mint module-read token for the builder
+        id: module_token
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+
       - name: Run canonical build (build once -> central registry -> signed digest)
         id: build
         shell: bash
@@ -504,7 +514,7 @@ jobs:
           AWS_REGION: ${{ inputs.aws_region }}
           BUILD_PROJECT: ${{ inputs.build_project }}
           SERVICE_NAME: ${{ needs.resolve.outputs.service }}
-          GITHUB_TOKEN: ${{ secrets.CROSS_REPO_TOKEN || secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ steps.module_token.outputs.token }}
         run: |
           set -euo pipefail
           SERVICE_DIR="${{ github.event.repository.name }}"
@@ -551,10 +561,42 @@ jobs:
           echo "image_digest=${IMAGE_DIGEST}" >> "${GITHUB_OUTPUT}"
           echo "Canonical artifact: ${IMAGE_REF}"
 
+      # Same reason as the registry slug above: the expression language cannot split `owner/name`.
+      - name: Split the infra repository slug
+        id: infra
+        shell: bash
+        env:
+          INFRA_REPO: ${{ inputs.infra_repo }}
+        run: |
+          set -euo pipefail
+          echo "owner=${INFRA_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${INFRA_REPO##*/}" >> "$GITHUB_OUTPUT"
+
+      # The one write this pipeline performs outside its own repository, and it has an identity of
+      # its own rather than borrowing one. The obvious alternative was the release bot, which can
+      # already write across the estate — and that is exactly why it was not used: a deploy that
+      # can tag releases and open pull requests anywhere is a much larger thing to have subverted
+      # than a deploy that can commit a digest to one overlay.
+      #
+      # The bound is enforced twice over. Terraform decides who may READ this App's key, and only
+      # this workflow may; the App's own installation decides what the key is GOOD FOR, and it
+      # selects inboxxhq-infra alone. Narrowing `repositories` here is the third, weakest layer -
+      # useful, but it is not what makes this safe.
+      #
+      # environments/management/ci-identity must list this workflow in gitops_workflows_v1 or the
+      # mint fails with AccessDenied, and renaming this file revokes the grant silently.
+      - name: Mint a token that may pin the digest
+        id: pin_token
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: gitops
+          owner: ${{ steps.infra.outputs.owner }}
+          repositories: ${{ steps.infra.outputs.name }}
+
       - name: Pin digest into dev overlay (first consumer)
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.CROSS_REPO_TOKEN || secrets.GH_PAT }}
+          GH_TOKEN: ${{ steps.pin_token.outputs.token }}
           SERVICE_NAME: ${{ needs.resolve.outputs.service }}
           INFRA_REPO: ${{ inputs.infra_repo }}
         run: |
