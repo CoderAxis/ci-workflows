@@ -106,12 +106,14 @@ jobs:
         if: always()
         run: |
           {
-            echo '## CI identity — GitHub-OIDC `sub` patterns'
-            echo ''
-            echo 'Source-level check (CID-0001..CID-0004). A pass means the Terraform is right, not'
-            echo 'that the live AWS policy matches it.'
-            echo ''
-            echo '```'
+            cat <<'SUMMARY'
+          ## CI identity — GitHub-OIDC `sub` patterns
+
+          Source-level check (CID-0001..CID-0004). A pass means the Terraform is right, not
+          that the live AWS policy matches it.
+
+          ```
+          SUMMARY
             cat ci-identity.log 2>/dev/null || echo '(no output — the check did not run)'
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
