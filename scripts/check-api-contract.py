@@ -40,6 +40,12 @@ except ModuleNotFoundError:  # pragma: no cover - environment problem, not a pol
 SELF_REPO = Path(__file__).resolve().parents[1]
 DEFAULT_CONTROLS = SELF_REPO / "controls" / "api-contract.yaml"
 BASELINE_FILE = ".api-contract-baseline.json"
+# Byte-identical to baselineComment in the ihq CLI's internal/cli/baseline.go. Both tools write
+# this key, so a difference would make the file flip between two texts as each ran, turning
+# every alternate run into a spurious diff on a line neither tool actually disagreed about.
+BASELINE_COMMENT = ("Frozen api-contract debt for this service. The gate fails if any count "
+                    "RISES; lower it by fixing violations, then re-run --write-baseline. "
+                    "Raising a number here is a reviewable, deliberate act.")
 
 # The proto projection API-0007 compares against. Generated, never hand-written:
 #   go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components
@@ -510,27 +516,62 @@ def build_report(repo: ServiceRepo, results: list, policy_ssot: list, fail_on: s
 
 
 def write_baseline(repo: ServiceRepo, results: list) -> int:
+    """Freeze this catalog's per-control counts, leaving the rest of the file alone.
+
+    THE FILE IS CO-OWNED. `controls` belongs to this script. `ihq validate --repo` freezes its
+    own per-check counts in a sibling `checks` key, because the pre-push hook has to reach the
+    same verdict this gate does and could not without the same ratchet.
+
+    Both destructive habits this function used to have were therefore silent data loss. It
+    rebuilt the payload as {_comment, controls} from scratch, so any sibling key was dropped;
+    and it deleted the whole file when this catalog had nothing to freeze, taking the other
+    tool's counts with it. Either one unfreezes several hundred findings in a repository whose
+    developer just ran a flag that is supposed to be a no-op on the gate - and it would surface
+    as a push blocked on violations nobody introduced, which is precisely the failure the
+    ratchet exists to prevent.
+
+    So the write is member-by-member, and the file is retired only when this catalog's key was
+    the only thing of substance in it. ihq's retireBaselineChecks is the mirror of this.
+    """
     counts = {r["control"]: r["count"] for r in results if r["count"]}
     path = repo.root / BASELINE_FILE
-    # A compliant service carries no debt artifact. Removing the file rather than writing an
-    # empty one keeps "no baseline means held to zero" the visible default, and makes the
-    # last baseline deletion in a repo the moment its migration is provably finished.
+
+    existing = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (OSError, json.JSONDecodeError):
+            # An unreadable baseline is refused by baseline_problems() on every path except
+            # this one, which is the documented way to recover from it. Overwriting is the
+            # point here, so there is nothing to preserve and nothing to report.
+            existing = {}
+    # Ordered so a rewrite is a no-op diff: _comment, this catalog's counts, then whatever
+    # else already lived in the file, in the order it was written.
+    others = {k: v for k, v in existing.items() if k not in ("_comment", "controls")}
+
     if not counts:
-        if path.is_file():
+        # A compliant service carries no debt artifact, and the last deletion in a repo is the
+        # moment its migration is provably finished. That only holds while this catalog is the
+        # sole owner of the file.
+        if others:
+            payload = {"_comment": BASELINE_COMMENT, **others}
+            path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            print(f"api-contract: {repo.name} is clean - dropped 'controls' and kept "
+                  f"{', '.join(sorted(others))} for the tool that owns it")
+        elif path.is_file():
             path.unlink()
             print(f"api-contract: {repo.name} is clean - removed {BASELINE_FILE}")
         else:
             print(f"api-contract: {repo.name} is clean - no baseline needed")
         return 0
-    payload = {
-        "_comment": "Frozen api-contract debt for this service. The gate fails if any count "
-                    "RISES; lower it by fixing violations, then re-run --write-baseline. "
-                    "Raising a number here is a reviewable, deliberate act.",
-        "controls": counts,
-    }
+
+    payload = {"_comment": BASELINE_COMMENT, "controls": counts, **others}
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    kept = f", preserved {', '.join(sorted(others))}" if others else ""
     print(f"api-contract: wrote {path} ({sum(counts.values())} violation(s) frozen "
-          f"across {len(counts)} control(s))")
+          f"across {len(counts)} control(s){kept})")
     return 0
 
 
