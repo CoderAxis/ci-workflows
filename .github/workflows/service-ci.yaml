@@ -155,8 +155,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Pinned by digest, not `:latest`. This one step is the workflow-lint gate for 97
+      # repositories, so a floating tag means an upstream release can turn the entire fleet red
+      # with no change in any repository, and means a developer's local actionlint cannot
+      # reproduce what CI decided. Measured 2026-07-30: 1.7.7/shellcheck-0.10.0 reports 18
+      # findings in inboxxhq-infra where 1.7.12/shellcheck-0.11.0 reports 15, on identical
+      # source. Digest, not tag, because a tag can be re-pushed onto different content.
+      #
+      # Bumping this is a deliberate act: raise the pin, run the fleet scan, fix what the new
+      # version finds, then land both together.
       - name: Lint workflow definitions
-        uses: docker://rhysd/actionlint:latest
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
         with:
           args: -color
 
