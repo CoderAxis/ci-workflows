@@ -1405,6 +1405,40 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      # Compiling the services into images is the larger half of this job's cost, and a runner
+      # starts with nothing, so without this every run pays for every dependency to be fetched
+      # and built from scratch. Measured on one workstation: a cold stack is ~163s of build
+      # against ~60s of start-up and tests; with the layer cache restored the build falls to
+      # ~42s, taking the whole suite from ~223s to ~102s.
+      #
+      # Two things follow from that measurement and are worth stating, because both contradict
+      # what seems obvious. Caching this is worth more than any amount of tuning the suite. And
+      # once it is cached, EXECUTION is the larger half - so whoever optimises next should be
+      # looking at container start-up, not at the compiler.
+      #
+      # The default docker driver cannot export build cache, only buildx's container driver can,
+      # which is the whole reason this step exists.
+      - name: Set up a builder that can export layer cache
+        if: steps.selection.outputs.present == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      # Keyed on the dependency manifests rather than the commit, which is deliberate. The layer
+      # this cache exists to preserve is `go mod download`, and that layer is invalidated by
+      # go.sum and by the Dockerfile - never by a source edit. Keying on the commit instead would
+      # write a fresh gigabyte on every push to preserve a layer that had not changed.
+      #
+      # The final build layer is not cacheable in any useful sense: it contains the source that
+      # just changed, so it misses by definition. That is expected, and it is why the cached
+      # build is ~42s rather than ~0s.
+      - name: Restore the image layer cache
+        if: steps.selection.outputs.present == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/e2e-build-cache
+          key: e2e-build-${{ runner.os }}-${{ hashFiles('go.sum', 'Dockerfile') }}
+          restore-keys: |
+            e2e-build-${{ runner.os }}-
+
       - name: Mint module-read token
         id: e2eauth
         if: steps.selection.outputs.present == 'true'
@@ -1461,6 +1495,11 @@ jobs:
           # Both service images fetch private modules during their build. TestMain writes this
           # into the compose build secret; it is not exposed to the running containers.
           GH_TOKEN: ${{ steps.e2eauth.outputs.token }}
+          # Where the layer cache lives. TestMain turns this into a compose override; unset, as
+          # it is on a workstation, the build behaves exactly as it did before. The workflow
+          # states the location and nothing else - it does not know that a cache becomes
+          # cache_from, or that compose is involved at all.
+          E2E_BUILD_CACHE: local:${{ runner.temp }}/e2e-build-cache
         run: |
           set -euo pipefail
           # The identical command `ihq e2e` runs. The stack is brought up and torn down by
