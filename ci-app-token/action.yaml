@@ -27,7 +27,12 @@ inputs:
       Which credential to mint. `read` is the module reader: private Go modules
       and the service catalog. `publish` is the release bot: tags, releases and
       pull requests — assumable only from the publishing workflows, so ordinary
-      CI cannot reach a credential that writes to other repositories.
+      CI cannot reach a credential that writes to other repositories. `gitops`
+      commits the built digest into the infra overlay and can do nothing else,
+      assumable only from deploy-reusable; it exists so a deploy never needs to
+      hold the release bot, which is what it used to do through a forwarded PAT.
+      Each scope is a distinct App with a distinct installation, so the bound on
+      what a token can do is enforced by GitHub, not only by who may mint it.
     required: false
     default: read
   owner:
@@ -96,7 +101,9 @@ runs:
                    SECRET="inboxxhq/ci/github-app/module-reader" ;;
           publish) ROLE="arn:aws:iam::063088900996:role/inboxxhq-ci-app-token-publish"
                    SECRET="inboxxhq/ci/github-app/release-bot" ;;
-          *) echo "::error::unknown scope '${SCOPE}' (expected read or publish)"; exit 1 ;;
+          gitops)  ROLE="arn:aws:iam::063088900996:role/inboxxhq-ci-app-token-gitops"
+                   SECRET="inboxxhq/ci/github-app/gitops-pin" ;;
+          *) echo "::error::unknown scope '${SCOPE}' (expected read, publish or gitops)"; exit 1 ;;
         esac
 
         if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
