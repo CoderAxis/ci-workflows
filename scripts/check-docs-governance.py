@@ -562,6 +562,16 @@ def frontmatter_structure(repo: DocsRepo) -> Finding:
             violations.append(f"{d.rel}: {d.fm_error}")
             continue
         if d.fm_lines is None:
+            # A document with no frontmatter at all was skipped here in silence, so the one
+            # control whose job is to require frontmatter was the one control that could not
+            # see its own worst case: 12 documents in core-docs - among them ADR-0030,
+            # ADR-0031, RFC-0030 and PRD-0030 - were never validated by anything, and their
+            # ids duplicated governed ones while DOC-0013 and DOC-0014 both reported green.
+            # Templates are the one exemption; their frontmatter is placeholder by design.
+            if is_template_doc(d.rel):
+                continue
+            violations.append(f"{d.rel}: no frontmatter block - every governed document opens "
+                              f"with a fenced YAML frontmatter block")
             continue
         checked += 1
         for offset, line in enumerate(d.fm_lines, start=d.first_line):
@@ -1413,7 +1423,6 @@ def platform_concern_core_authority(repo: "DocsRepo") -> "Finding":
 
 DETECTORS = {
     "decision_domain_vocabulary": decision_domain_vocabulary,
-    "platform_concern_core_authority": platform_concern_core_authority,
     "platform_concern_core_authority": platform_concern_core_authority,
     "document_id_convention": document_id_convention,
     "document_id_frontmatter": document_id_frontmatter,
