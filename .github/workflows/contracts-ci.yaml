@@ -63,16 +63,29 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Codegen drift - health/safety net, deliberately NOT a PR gate.
+  # Codegen drift - health/safety net. It asks one question after the fact: did the post-merge
+  # SSOT -> SDK sync actually land? It is therefore scheduled and dispatchable ONLY, and must not
+  # run on pull_request or on push.
   #
-  # The SSOT -> SDK sync happens AFTER merge (release.yaml -> reusable-sdk-publish.yaml), so on a PR
-  # that changes a .proto the SDK repos are correctly still on the old generated output; asserting
-  # parity there would fail every proto PR by construction. This confirms the post-merge sync
-  # actually landed, and alerts when it did not.
+  # NOT ON PULL REQUEST: the sync happens after merge (release.yaml -> reusable-sdk-publish.yaml),
+  # so on a PR that changes a .proto the SDK repos are correctly still on the old generated output.
+  # Asserting parity there would fail every proto PR by construction.
+  #
+  # NOT ON PUSH, and this one is a deadlock rather than a nuisance. The push to main that changes a
+  # .proto is the push that triggers the release, and the release is what performs the sync - but
+  # release.yaml's ci-gate refuses to tag unless the ci.yaml run for that exact commit concluded
+  # successfully, and it reads the RUN-level conclusion, so this job failing fails the gate. That
+  # closes a loop with no exit: the SDKs cannot be synced until a release runs, and a release cannot
+  # run until the SDKs are already synced. platform-contracts sat unreleased from v0.4.0 behind
+  # exactly this, and while the two token failures masked it the loop was invisible - fixing those
+  # is what exposed it. A check that can only be satisfied by the thing it blocks is not a gate.
+  #
+  # The daily schedule is where this check does its real work: by then the release has either synced
+  # the SDKs or it has not, and only in the second case is there something to report.
   # ---------------------------------------------------------------------------
   codegen-drift:
     name: Codegen drift (Go + TS SDKs)
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
