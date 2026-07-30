@@ -42,9 +42,9 @@ domain: module-floors
 
 floors:
   github.com/coderaxis/platform-contracts-go:
-    min: v0.4.0
+    min: v0.7.0
     reason: >-
       Carries the common.v1 envelope, Meta, PaginationMeta, ProblemDetails and the ErrorCode
-      enum that every service's OpenAPI components are projected from. v0.4.0 is the vintage
+      enum that every service's OpenAPI components are projected from. v0.7.0 is the vintage
       controls/common-v1-components.json is generated from, so a pin below it cannot produce
       components matching the reference and will fail API-0007.
