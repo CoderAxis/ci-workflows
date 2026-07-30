@@ -65,8 +65,13 @@ DOCS_BEGIN = "<!-- BEGIN dockerfile-standard-controls (generated: scripts/check-
 DOCS_END = "<!-- END dockerfile-standard-controls -->"
 
 # --- centrally pinned expectations (mirrors dockerfile-version-matrix.yaml) -----------
-EXPECTED_BUILDER_TAG = "1.26-alpine3.19"
-EXPECTED_RUNTIME_TAG = "3.19"
+# Mirrors dockerfile-version-matrix.yaml in core-docs, which is the policy SSOT. Kept as
+# literals here because that file lives in another repository and this checker must run with
+# no network and no sibling checkout; the matrix records the same values and the reason they
+# changed. `1.26-alpine3.19` was previously named here and does not exist as a published
+# tag - see version_matrix_pinned for what that cost.
+EXPECTED_BUILDER_TAG = "1.26-alpine3.24"
+EXPECTED_RUNTIME_TAG = "3.24"
 ALLOWED_VERSION_ARGS = {"BUILDER_IMAGE_TAG", "RUNTIME_IMAGE_TAG", "GO_LANG_VERSION",
                         "TARGETARCH", "RUNTIME_UID", "RUNTIME_GID", "IMAGE_REVISION",
                         "IMAGE_CREATED", "GO_BUILD_TAGS"}
@@ -203,21 +208,92 @@ def cross_compile_builder(df: Dockerfile) -> Finding:
     return Finding(True, "builder cross-compiles via BUILDPLATFORM/TARGETARCH")
 
 
+def _arg_defaults(df: Dockerfile) -> dict[str, str]:
+    """ARG name -> declared default, across every stage.
+
+    A bare `ARG FOO` (no default) is recorded as an empty string, which is treated as
+    unresolvable below rather than as the value "".
+    """
+    out: dict[str, str] = {}
+    for i in df.instrs("ARG"):
+        for decl in i.args.split():
+            name, _, default = decl.partition("=")
+            out[name.strip()] = default.strip().strip('"').strip("'")
+    return out
+
+
+_ARG_REF = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+
+
+def _resolve_tag(tag: str, args: dict[str, str]) -> tuple[str | None, str | None]:
+    """Substitute ARG defaults into a tag. Returns (resolved, unresolved_arg_name).
+
+    Only the DEFAULT is available to a static checker - a build may override any ARG with
+    --build-arg. The default is nonetheless the value that must match the matrix: it is
+    what a plain `docker build` produces, and it is the only version any reviewer or
+    scanner reading the file will ever see.
+    """
+    missing: str | None = None
+
+    def sub(m: re.Match) -> str:
+        nonlocal missing
+        name = m.group(1) or m.group(2)
+        val = args.get(name)
+        if not val:
+            missing = name
+            return m.group(0)
+        return val
+
+    resolved = _ARG_REF.sub(sub, tag)
+    return (None, missing) if missing else (resolved, None)
+
+
 def version_matrix_pinned(df: Dockerfile) -> Finding:
+    """DS-0003. Compares the EFFECTIVE base-image tags against the version matrix.
+
+    This used to skip any tag beginning with `${`, which made the control unenforceable in
+    exactly the configuration every migrated service uses. Worse, it then reported success
+    with the EXPECTED tags interpolated into the message, so a Dockerfile resolving to
+    something else entirely printed a line reading `builder=<matrix tag>` - the check
+    appeared to have confirmed the very thing it had declined to look at.
+
+    That is not a hypothetical: the matrix pinned `1.26-alpine3.19`, a tag that does not
+    exist, so obeying DS-0003 literally produced an unbuildable image and every service
+    routed the tag through an ARG instead. The whole fleet sat in the unchecked branch
+    while the gate reported green. Resolving the ARG default costs a dictionary lookup and
+    is the difference between this control meaning something and meaning nothing.
+    """
     if not df.stage_froms:
         return Finding(False, "no FROM found")
-    errs = []
-    builder_tag = _extract_tag(df.stage_froms[0].args, "golang")
-    if builder_tag and builder_tag != EXPECTED_BUILDER_TAG and not builder_tag.startswith("${"):
-        errs.append(f"builder tag {builder_tag!r} != expected {EXPECTED_BUILDER_TAG!r}")
+    args = _arg_defaults(df)
+    errs, observed = [], []
+
+    checks = [(0, "golang", EXPECTED_BUILDER_TAG, "builder")]
     if len(df.stage_froms) > 1:
-        runtime_tag = _extract_tag(df.stage_froms[1].args, "alpine")
-        if runtime_tag and runtime_tag != EXPECTED_RUNTIME_TAG and not runtime_tag.startswith("${"):
-            errs.append(f"runtime tag {runtime_tag!r} != expected {EXPECTED_RUNTIME_TAG!r}")
+        checks.append((1, "alpine", EXPECTED_RUNTIME_TAG, "runtime"))
+
+    for idx, image, expected, what in checks:
+        raw = _extract_tag(df.stage_froms[idx].args, image)
+        if not raw:
+            continue
+        if "$" in raw:
+            resolved, missing = _resolve_tag(raw, args)
+            if missing:
+                errs.append(f"{what} tag {raw!r} references ARG {missing!r}, which has no "
+                            f"default - the effective version cannot be determined from the "
+                            f"Dockerfile, so it is neither pinned nor reviewable")
+                continue
+            observed.append(f"{what}={resolved} (via {raw})")
+        else:
+            resolved = raw
+            observed.append(f"{what}={resolved}")
+        if resolved != expected:
+            errs.append(f"{what} tag resolves to {resolved!r} != matrix {expected!r}"
+                        + (f" (from {raw})" if raw != resolved else ""))
+
     if errs:
         return Finding(False, "; ".join(errs))
-    return Finding(True, f"builder={EXPECTED_BUILDER_TAG}, runtime={EXPECTED_RUNTIME_TAG} "
-                          "(or version-matrix ARGs)")
+    return Finding(True, ", ".join(observed) + " - matches the version matrix")
 
 
 def _extract_tag(from_args: str, image_hint: str) -> str | None:
@@ -328,26 +404,50 @@ def stopsignal_declared(df: Dockerfile) -> Finding:
     return Finding(True, "STOPSIGNAL SIGTERM declared explicitly")
 
 
+# These read INSTRUCTIONS, never df.all_text(). The distinction is load-bearing: all_text()
+# includes comments, so a detector grepping it for `cmd/seed` is satisfied by a line of prose
+# that happens to mention the path. That is not hypothetical - inboxxhq-event-gateway declares
+# the `seed` capability, has no cmd/seed at all, and passed DS-0012 because an explanatory
+# comment in its Dockerfile contained the literal string. A capability gate that a comment can
+# satisfy is a capability gate that certifies nothing.
+#
+# The marker-comment assertions below are the deliberate exception, and still use raw text:
+# there the comment IS the artifact being checked.
+def _builds_cmd(df: Dockerfile, name: str) -> bool:
+    """True if some RUN actually compiles ./cmd/<name>."""
+    pat = re.compile(rf"go\s+build\b[^\n]*\./cmd/{re.escape(name)}(?:\s|$|&|;)")
+    return any(pat.search(i.args) for i in df.instrs("RUN"))
+
+
+def _copies_binary(df: Dockerfile, needle: str) -> bool:
+    """True if some COPY --from=builder brings a path containing `needle` into the image."""
+    return any("--from=builder" in i.args and needle in i.args for i in df.instrs("COPY"))
+
+
 def dbowner_ships_dbtool(df: Dockerfile) -> Finding:
-    text = df.all_text()
-    if "cmd/dbtool" not in text:
-        return Finding(False, "no `go build ... ./cmd/dbtool` found; db-owner capability "
-                                "requires shipping a dbtool binary (ADR-0062)")
-    if not re.search(r"#\s*dbtool binary path:\s*/app/\S+", text):
+    if not _builds_cmd(df, "dbtool"):
+        return Finding(False, "no `go build ... ./cmd/dbtool` in any RUN instruction; db-owner "
+                                "capability requires shipping a dbtool binary (ADR-0062)")
+    # Raw text on purpose - the artifact under test here is a comment.
+    if not re.search(r"#\s*dbtool binary path:\s*/app/\S+", df.all_text()):
         return Finding(False, "dbtool is built but the required marker comment "
                                 "'# dbtool binary path: /app/<binary>' is missing")
-    if not re.search(r"COPY\s+--from=builder.*dbtool", text):
+    if not _copies_binary(df, "dbtool"):
         return Finding(False, "dbtool binary is built but never COPY'd into the runtime "
                                 "stage")
     return Finding(True, "dbtool built, copied, and marked")
 
 
 def seed_ships_seed_binary(df: Dockerfile) -> Finding:
-    text = df.all_text()
-    if "cmd/seed" not in text:
-        return Finding(False, "no `go build ... ./cmd/seed` found (informational only - "
-                                "seed-contract-check.yaml is the authoritative gate)")
-    return Finding(True, "seed binary built (authoritative check: seed-contract-check.yaml)")
+    if not _builds_cmd(df, "seed"):
+        return Finding(False, "no `go build ... ./cmd/seed` in any RUN instruction; the seed "
+                                "capability requires shipping a seed binary (authoritative "
+                                "gate: seed-contract-check.yaml)")
+    if not _copies_binary(df, "seed"):
+        return Finding(False, "a seed binary is built but never COPY'd into the runtime stage, "
+                                "so the image does not actually ship it")
+    return Finding(True, "seed binary built and copied "
+                          "(authoritative check: seed-contract-check.yaml)")
 
 
 def capability_declaration_matches_reality(df: Dockerfile, capabilities: set[str]) -> Finding:
@@ -359,7 +459,14 @@ def capability_declaration_matches_reality(df: Dockerfile, capabilities: set[str
     if not real_db_owner and "db-owner" in capabilities:
         mismatches.append("'db-owner' is declared but go.mod requires no *-core-postgres "
                           "module")
-    for cap, cmd in (("backfill", "backfill"), ("canary", "canary")):
+    # `seed` was absent from this loop, and DS-0012 could be satisfied by a comment, so a
+    # capability could be declared or omitted with nothing anywhere objecting. Both directions
+    # were live in the fleet: inboxxhq-device-service ships cmd/seed and a seed Job while
+    # declaring no `seed`, and inboxxhq-event-gateway declared `seed` with only cmd/server.
+    # The omission is the more dangerous of the two - a repo that quietly ships a seeding
+    # binary is outside the seeding standard's gates entirely, because those gates key off the
+    # declared capability.
+    for cap, cmd in (("backfill", "backfill"), ("canary", "canary"), ("seed", "seed")):
         real = repo_has_cmd(df.repo_root, cmd)
         if real and cap not in capabilities:
             mismatches.append(f"cmd/{cmd} exists but '{cap}' is not declared")
@@ -368,7 +475,7 @@ def capability_declaration_matches_reality(df: Dockerfile, capabilities: set[str
     if mismatches:
         return Finding(False, "; ".join(mismatches))
     return Finding(True, "declared capabilities match repo structure "
-                          "(db-owner/backfill/canary)")
+                          "(db-owner/backfill/canary/seed)")
 
 
 def no_build_time_codegen(df: Dockerfile) -> Finding:
