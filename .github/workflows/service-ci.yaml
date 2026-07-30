@@ -596,6 +596,57 @@ jobs:
             exit 1
           fi
 
+      # ── architecture conformance ──────────────────────────────────────────────────────────
+      # The steps above assert that a directory exists. This asserts that the import graph agrees
+      # with it, which is what a directory listing cannot see: a repository can have a textbook
+      # tree and a graph that ignores it, and that is the failure the layout standards exist to
+      # catch.
+      #
+      # The engine is coderaxis/inboxxhq-architecture-check, not a script in this repository and
+      # not a command in ihq. CI and `ihq arch` run the same binary from the same tag, so a green
+      # run on a workstation means a green gate here. The last time this platform had one gate
+      # with two implementations, the second silently destroyed the first's baseline data.
+      #
+      # Pinned to @v1 exactly as this repository is pinned by its callers. Tracking main would
+      # change the gate under every service with nothing to review.
+      - name: Mint checker-read token
+        id: archauth
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+
+      - name: Check out the architecture checker
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/inboxxhq-architecture-check
+          ref: v1
+          path: .archcheck
+          token: ${{ steps.archauth.outputs.token }}
+
+      - name: Architecture conformance
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Built in its own module directory so the service's go.mod and go.sum are untouched.
+          # A gate that mutates the repository it is checking cannot be trusted to report on it.
+          ( cd .archcheck && go build -o "${RUNNER_TEMP}/architecture-check" ./cmd/architecture-check )
+
+          # Ratchet, not a cliff. Frozen counts live under the `arch` key of
+          # .api-contract-baseline.json; a count that rises fails, a count that falls passes and
+          # prints the gain. A repository with no baseline is held to zero, which is where most
+          # of the fleet already is.
+          #
+          # Exit 2 means the checker could not run and is deliberately not swallowed: a gate that
+          # cannot run must not be indistinguishable from one that found nothing.
+          "${RUNNER_TEMP}/architecture-check" --repo . --details
+
+      - name: Remove the checker checkout
+        if: always()
+        shell: bash
+        # The checker is not part of the repository under test. Leaving it behind would put its
+        # sources in reach of any later step that walks the tree.
+        run: rm -rf .archcheck
+
   # ── workflow lanes (WFC-0006) ────────────────────────────────────────────────────────────────
   # Absorbed from the per-repo pipeline-policy.yml, which asserted that thirteen named workflow
   # files EXISTED in the repository - quality-check.yml, security-scan.yml, codeql.yml,
