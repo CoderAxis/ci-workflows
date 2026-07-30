@@ -541,6 +541,14 @@ jobs:
     name: Repository structure
     needs: resolve
     if: needs.resolve.outputs.language == 'go'
+    permissions:
+      contents: read
+      # The architecture-check step mints a module-read token from this job's OIDC identity to
+      # check out the private coderaxis/inboxxhq-architecture-check repo. A called/composite
+      # action is capped by what the job grants; without id-token: write, ci-app-token fails with
+      # "No OIDC token available" and the gate never runs. Same omission, same failure mode, that
+      # WFC-0004 already caught on the schema job.
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
