@@ -1445,12 +1445,22 @@ jobs:
           restore-keys: |
             e2e-build-${{ runner.os }}-
 
+      # Two owners, because an end-to-end stack spans two kinds of input. The images resolve
+      # private Go modules from `coderaxis`, and the sibling services the stack builds from source
+      # live beside this repository — a different GitHub account, so a different App installation
+      # and therefore a different token.
+      #
+      # Minting only the first is what the first run of this job did, and it failed on
+      # `git clone ... exit status 128`, which names the repository and not the reason. The extra
+      # owner is derived rather than written down, so this holds for whichever account a service
+      # repository lives in.
       - name: Mint module-read token
         id: e2eauth
         if: steps.selection.outputs.present == 'true'
         uses: coderaxis/github-actions/ci-app-token@v1
         with:
           scope: read
+          extra-owners: ${{ github.repository_owner }}
           configure-git: "true"
 
       - name: Run the end-to-end suite

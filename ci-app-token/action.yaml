@@ -265,9 +265,26 @@ runs:
       env:
         MOD_TOKEN: ${{ steps.mint.outputs.token }}
         OWNER: ${{ inputs.owner }}
+        TOKENS_FILE: ${{ steps.mint.outputs.tokens_file }}
       run: |
         set -euo pipefail
-        git config --global \
-          url."https://x-access-token:${MOD_TOKEN}@github.com/${OWNER}/".insteadOf \
-          "https://github.com/${OWNER}/"
-        echo "Configured short-lived App token for github.com/${OWNER}/ (expires ~1h)"
+
+        configure() {
+          git config --global \
+            url."https://x-access-token:${2}@github.com/${1}/".insteadOf \
+            "https://github.com/${1}/"
+          echo "Configured short-lived App token for github.com/${1}/ (expires ~1h)"
+        }
+
+        configure "${OWNER}" "${MOD_TOKEN}"
+
+        # Every owner that was minted, not just the primary one. This step used to configure
+        # only `owner`, which made extra-owners half a feature: a caller spanning two accounts
+        # got two tokens and one of them reachable, so `go mod download` or a clone from the
+        # second owner failed with a 128 that named the repository and not the cause.
+        if [[ -n "${TOKENS_FILE}" && -f "${TOKENS_FILE}" ]]; then
+          while IFS=$'\t' read -r extra_owner extra_token; do
+            [[ "${extra_owner,,}" == "${OWNER,,}" ]] && continue
+            configure "${extra_owner}" "${extra_token}"
+          done < <(jq -r 'to_entries[] | "\(.key)\t\(.value)"' "${TOKENS_FILE}")
+        fi
