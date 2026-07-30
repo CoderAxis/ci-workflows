@@ -135,18 +135,29 @@ jobs:
             exit 0
           fi
 
-          msgs="$(git log --format=%B "${latest}..HEAD")"
+          # Subjects and bodies are read separately because the two breaking-change markers live in
+          # different places, and matching either one anywhere in the message is how a commit that
+          # merely DISCUSSES breaking changes gets released as one. This workflow's own first run
+          # refused itself for exactly that: its body contained the words BREAKING CHANGE while
+          # explaining that a BREAKING CHANGE footer is refused.
+          subjects="$(git log --format=%s "${latest}..HEAD")"
+          bodies="$(git log --format=%b "${latest}..HEAD")"
 
           # Refused rather than bumped. See the header: a major is a migration, not a side effect of
           # a commit subject, and v1 must never be moved onto one.
-          if grep -qiE '^[a-z]+(\([^)]+\))?!:' <<<"${msgs}" || grep -qE 'BREAKING[ -]CHANGE' <<<"${msgs}"; then
+          #
+          # `!` is part of the type/scope, so it is only meaningful on a SUBJECT line. A footer is
+          # only a footer at the start of a line and followed by a colon (Conventional Commits
+          # v1.0.0, "BREAKING CHANGE: <description>"); anywhere else it is prose.
+          if grep -qiE '^[a-z]+(\([^)]+\))?!:' <<<"${subjects}" \
+            || grep -qE '^BREAKING[ -]CHANGE:' <<<"${bodies}"; then
             echo "::error::a breaking change is on main, which cannot be released automatically."
             echo "Moving v1 onto it would break every consumer without anyone choosing to take it."
             echo "Cut v2 by hand and migrate consumers deliberately."
             exit 1
           fi
 
-          if grep -qE '^feat(\([^)]+\))?:' <<<"${msgs}"; then
+          if grep -qE '^feat(\([^)]+\))?:' <<<"${subjects}"; then
             bump="minor"
           else
             # Everything else is a patch, including ci/chore/docs. Not releasing them would re-open
