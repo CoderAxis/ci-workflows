@@ -1399,7 +1399,7 @@ jobs:
           if [[ -n "${changed}" ]] && ! grep -qvP "${inert}" <<<"${changed}"; then
             echo "present=false" >> "${GITHUB_OUTPUT}"
             echo "documentation-only change; no executable path can differ:"
-            sed 's/^/  /' <<<"${changed}"
+            while IFS= read -r path; do echo "  ${path}"; done <<<"${changed}"
             exit 0
           fi
 
