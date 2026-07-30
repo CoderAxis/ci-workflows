@@ -80,18 +80,31 @@ controls:
     severity: major
     applies_to_capabilities: []
     policy: >-
-      The builder image tag and runtime image tag MUST equal the values pinned in
-      dockerfile-version-matrix.yaml (currently `1.26-alpine3.19` / `3.19`). A Dockerfile
-      MUST NOT pin a different version independently, and MUST NOT use a floating tag
-      that omits the Alpine sub-version (e.g. bare `golang:1.26-alpine`).
+      The builder and runtime image tags MUST resolve to the values pinned in
+      dockerfile-version-matrix.yaml (currently `1.26-alpine3.24` / `3.24`). The tag may be
+      written literally or threaded through the sanctioned BUILDER_IMAGE_TAG /
+      RUNTIME_IMAGE_TAG ARGs, but if an ARG is used it MUST carry a default, because an ARG
+      with no default has no version to check. A Dockerfile MUST NOT pin a different
+      version independently, and MUST NOT use a floating tag that omits the Alpine
+      sub-version (e.g. bare `golang:1.26-alpine`).
     rationale: >-
       Centralized version control is the entire point: a fleet-wide bump must be a one-line
       change to the version matrix, not ~40 individual Dockerfile edits, and every image
-      must be built from the exact same, reproducible base.
+      must be built from the exact same, reproducible base. Two failures shaped the current
+      wording. The matrix named `1.26-alpine3.19`, which has never been published - go 1.26
+      does not exist against alpine 3.19 - so the literal form produced an image that could
+      not pull its own base, and every service used the ARG form instead. The detector
+      skipped any tag beginning with `${`, so the entire fleet then sat in the branch this
+      control does not examine while it reported green, and its pass message printed the
+      matrix's expected tags rather than the ones it had found. A control that cannot be
+      satisfied by the route it recommends will be satisfied by the route it cannot see.
     remediation: >-
-      Pin `FROM ...golang:1.26-alpine3.19 AS builder` and `FROM ...alpine:3.19` exactly, or
-      thread them through the ARGs in templates/Dockerfile.service with the matrix's
-      defaults - never a hand-picked value.
+      Thread the tags through the ARGs in templates/Dockerfile.service, giving each a
+      default taken verbatim from the matrix - `ARG BUILDER_IMAGE_TAG=1.26-alpine3.24` and
+      `ARG RUNTIME_IMAGE_TAG=3.24`. Writing the tags literally in the FROM lines is equally
+      valid and equally checked. Never hand-pick a value, and when changing the matrix,
+      verify the tag actually resolves in the registry first - that single unmade check is
+      what put this control in an impossible state.
     detector: version_matrix_pinned
     refs: [ADR-0072]
 

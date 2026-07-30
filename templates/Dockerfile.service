@@ -27,8 +27,8 @@
 # Private modules are fetched with a BuildKit secret so the token is never baked into any
 # image layer. Build from this service directory as the Docker context.
 
-ARG BUILDER_IMAGE_TAG=1.26-alpine3.19
-ARG RUNTIME_IMAGE_TAG=3.19
+ARG BUILDER_IMAGE_TAG=1.26-alpine3.24
+ARG RUNTIME_IMAGE_TAG=3.24
 ARG GO_LANG_VERSION=1.25
 ARG TARGETARCH=arm64
 
