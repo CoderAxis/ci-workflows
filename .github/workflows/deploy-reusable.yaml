@@ -59,7 +59,10 @@ on:
         description: "Logical service name (overlay dir + image repo suffix), e.g. auth-service."
         required: true
         type: string
-      contract_version:
+      # Named api_ deliberately: build-and-pin already outputs `contract_version`, meaning the
+      # behavioural contract version of THIS WORKFLOW. Two unrelated things called the same name
+      # in one file is how the wrong one gets wired up.
+      api_contract_version:
         description: >-
           Registry version of the API contract this build serves, recorded in the release
           catalogue so an environment can say which contract it is running. Empty means the
@@ -223,35 +226,115 @@ jobs:
           owner: ${{ steps.preflight.outputs.registry_owner }}
           repositories: ${{ steps.preflight.outputs.registry_name }}
 
-      - name: Fetch published contract from registry
+      # Which contract dev is serving right now, from the release catalogue. This job pins dev,
+      # so dev is the environment whose consumers a breaking change would reach.
+      - name: Mint a token for the release catalogue
+        id: infra_token
+        if: steps.preflight.outputs.run == 'true'
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          owner: InboxxHQ-CoderAxis
+          repositories: inboxxhq-infra
+
+      - name: Resolve the contract released in dev
+        id: released
+        if: steps.preflight.outputs.run == 'true'
+        shell: bash
+        env:
+          INFRA_TOKEN: ${{ steps.infra_token.outputs.token }}
+          SERVICE: ${{ needs.resolve.outputs.service }}
+        run: |
+          set -euo pipefail
+          # Sparse and blobless: the catalogue is a few hundred small files in a repository that
+          # also carries every environment's Terraform, and this job needs one directory of it.
+          git clone --quiet --depth 1 --filter=blob:none --sparse \
+            "https://x-access-token:${INFRA_TOKEN}@github.com/InboxxHQ-CoderAxis/inboxxhq-infra.git" /tmp/infra
+          git -C /tmp/infra sparse-checkout set releases >/dev/null
+
+          # Most recently promoted release of this service that dev actually has. `last_promoted_at`
+          # rather than file order, because promotion rewrites entries in place and a rollback moves
+          # an older release forward.
+          #
+          # Releases with no recorded version are skipped rather than treated as "unknown, give up",
+          # and that is correct rather than merely convenient: once publication is enabled, a build
+          # records no version precisely when it published nothing, and it publishes nothing exactly
+          # when the spec did not change. So the last recorded version is still what dev serves. The
+          # case this would get wrong is a service whose publication was switched off midway, which
+          # is a configuration change rather than something a deploy can infer.
+          version="$(jq -rs '
+            map(select(.service == $svc and (.deployed_envs // [] | index("dev"))))
+            | map(select(.contract_version))
+            | sort_by(.last_promoted_at // .created_at)
+            | last // {}
+            | .contract_version // ""' --arg svc "${SERVICE}" /tmp/infra/releases/*.json 2>/dev/null || echo "")"
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          if [ -n "${version}" ]; then
+            echo "dev is serving ${SERVICE} contract ${version}"
+          else
+            echo "No contract version recorded for ${SERVICE} in dev."
+          fi
+
+      - name: Fetch the baseline to compare against
+        id: baseline
         if: steps.preflight.outputs.run == 'true'
         shell: bash
         env:
           REGISTRY_TOKEN: ${{ steps.registry_token.outputs.token }}
+          RELEASED: ${{ steps.released.outputs.version }}
+          PUBLISHED_THIS_RUN: ${{ inputs.api_contract_version }}
+          SERVICE: ${{ needs.resolve.outputs.service }}
         run: |
           set -euo pipefail
-          curl -sSL \
-            -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
-            -H "Accept: application/vnd.github.raw" \
-            "https://api.github.com/repos/${{ inputs.contract_repo }}/contents/${{ needs.resolve.outputs.service }}/latest.json" \
-            -o /tmp/published-contract.json
-          echo "Downloaded published contract ($(wc -c < /tmp/published-contract.json) bytes)"
+          # Which document is a fair baseline depends on whether this run just moved latest.json.
+          #
+          #  - dev has a recorded contract  -> compare against exactly that. The question a deploy
+          #    asks is whether it breaks what THIS environment's consumers see.
+          #  - it does not, and this run published nothing -> latest.json is still someone else's
+          #    document and remains a real comparison, which is the behaviour that existed before
+          #    any of this and is worth keeping while the catalogue fills up.
+          #  - it does not, and this run DID publish -> latest.json is now a copy of the very spec
+          #    being judged. Comparing them would pass for every possible change. Report that the
+          #    comparison did not happen instead of reporting that it passed.
+          if [ -n "${RELEASED}" ]; then
+            path="${SERVICE}/${RELEASED}.json"
+            label="the contract released in dev (${RELEASED})"
+          elif [ -z "${PUBLISHED_THIS_RUN}" ]; then
+            path="${SERVICE}/latest.json"
+            label="the published contract (nothing released recorded for dev yet)"
+          else
+            echo "compare=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::${SERVICE} has no contract recorded for dev, and this run published ${PUBLISHED_THIS_RUN}, so latest.json is this same document. The breaking-change comparison is SKIPPED, not passed; it starts working once dev has one recorded deploy."
+            exit 0
+          fi
+
+          if ! curl -sSL --fail \
+                 -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
+                 -H "Accept: application/vnd.github.raw" \
+                 "https://api.github.com/repos/${{ inputs.contract_repo }}/contents/${path}" \
+                 -o /tmp/published-contract.json; then
+            echo "::error::${path} is recorded as released in dev but is not in the registry. A release pointer that resolves to nothing means the catalogue and the registry disagree."
+            exit 1
+          fi
+          echo "compare=true" >> "${GITHUB_OUTPUT}"
+          echo "Comparing against ${label} ($(wc -c < /tmp/published-contract.json) bytes)"
 
       - name: Set up Go (for oasdiff)
-        if: steps.preflight.outputs.run == 'true'
+        if: steps.baseline.outputs.compare == 'true'
         uses: actions/setup-go@v5
         with:
           go-version: "1.25.0"
           cache: false
 
       - name: Install oasdiff
-        if: steps.preflight.outputs.run == 'true'
+        if: steps.baseline.outputs.compare == 'true'
         run: |
           go install github.com/oasdiff/oasdiff@v1.11.7
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Detect breaking changes
-        if: steps.preflight.outputs.run == 'true'
+        if: steps.baseline.outputs.compare == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -624,7 +707,7 @@ jobs:
             git fetch --quiet origin main
             git reset --hard --quiet origin/main
             bash scripts/gitops-set-image.sh "${SERVICE_NAME}" dev "${{ steps.build.outputs.image_ref }}"
-            CONTRACT_VERSION="${{ inputs.contract_version }}" \
+            CONTRACT_VERSION="${{ inputs.api_contract_version }}" \
               bash scripts/write-release-metadata.sh "${SERVICE_NAME}" dev "${{ steps.build.outputs.image_ref }}" "${GITHUB_SHA}"
             git add -A
             if git diff --cached --quiet; then
