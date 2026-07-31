@@ -67,7 +67,7 @@ RUN --mount=type=secret,id=gh_token \
  GH_TOKEN="$(cat /run/secrets/gh_token)" && \
  git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/" && \
  go mod download && \
- git config --global --unset url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf || true
+ { git config --global --unset url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf || true; }
 
 COPY . .
 
