@@ -31,6 +31,11 @@ inputs:
       commits the built digest into the infra overlay and can do nothing else,
       assumable only from deploy-reusable; it exists so a deploy never needs to
       hold the release bot, which is what it used to do through a forwarded PAT.
+      `contracts` writes a service's generated OpenAPI into the contract
+      registry and can do nothing else, assumable only from openapi-contract.
+      It is separate from `gitops` despite both being one-repository writes,
+      because they write different repositories: sharing either App would hand
+      one pipeline the other's reach.
       Each scope is a distinct App with a distinct installation, so the bound on
       what a token can do is enforced by GitHub, not only by who may mint it.
     required: false
@@ -103,7 +108,9 @@ runs:
                    SECRET="inboxxhq/ci/github-app/release-bot" ;;
           gitops)  ROLE="arn:aws:iam::063088900996:role/inboxxhq-ci-app-token-gitops"
                    SECRET="inboxxhq/ci/github-app/gitops-pin" ;;
-          *) echo "::error::unknown scope '${SCOPE}' (expected read, publish or gitops)"; exit 1 ;;
+          contracts) ROLE="arn:aws:iam::063088900996:role/inboxxhq-ci-app-token-contracts"
+                   SECRET="inboxxhq/ci/github-app/contract-publish" ;;
+          *) echo "::error::unknown scope '${SCOPE}' (expected read, publish, gitops or contracts)"; exit 1 ;;
         esac
 
         if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then

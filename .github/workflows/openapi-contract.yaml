@@ -20,14 +20,23 @@ name: OpenAPI contract
 #                     platform generates OpenAPI from the Go reflection engine with authored
 #                     operationIds, so porting the annotation scanner would reinstate the approach
 #                     that replaced it.
-#   breaking-change   oasdiff against the published registry baseline.
-#   publish-contract  publication of latest.json / vX.Y.Z.json back into the registry.
 #   publish-sdk       a stub whose only step printed "not implemented".
-# The three registry stages read and write a private repository in another organisation, which the
-# OIDC credential model does not currently reach, and every caller left all four off - so none has
-# ever run for any service. Porting them with an invented credential path would produce a gate
-# that cannot authenticate, which is worse than an absent one: it reports green on a skip. They
-# stay unported until the cross-organisation registry credential exists.
+#
+# WHAT CAME BACK, 2026-07-31. breaking-change and publish-contract were held back because they
+# read and write a private repository in another organisation, which the OIDC model could not
+# reach. It can now: `contracts` is a dedicated App installed on inboxxhq-api-contracts alone
+# with contents:write, mintable only from this workflow.
+#
+# They return together, and that pairing is the load-bearing part. Publishing on merge moves the
+# published baseline automatically, and the deploy-time Contract Gate compares a service's spec
+# against that baseline - so auto-publishing alone would leave the gate comparing the new spec to
+# a baseline just refreshed from it, green for every possible change. The gate has to move
+# EARLIER than the thing that moves the baseline, which is why oasdiff runs on the pull request
+# and publication only on main.
+#
+# The absence of these stages is what let auth-service document a response envelope it had
+# stopped returning for two weeks: the registry only changed when a human remembered
+# `make publish-contract PUSH=1`, and nothing anywhere went red when they did not.
 #
 # CREDENTIALS. The original took coderaxis-app-id / coderaxis-app-private-key as forwarded
 # secrets, which the OIDC migration had already deleted - so every caller was passing a secret
@@ -59,6 +68,23 @@ on:
         required: false
         type: string
         default: '["ubuntu-latest"]'
+      service-name:
+        description: >-
+          The service's directory in the contract registry. Supply the catalog-derived name
+          rather than a literal: hand-written names are how a repository rename silently
+          pointed a service at another service's registry directory. Empty disables both
+          registry stages, and says so in the log rather than passing quietly.
+        required: false
+        type: string
+        default: ""
+      publish-contract:
+        description: >-
+          Publish the validated spec to the registry on pushes to the default branch. Opt-in
+          per service while this rolls out. Has no effect on a pull request, where publishing
+          would move the baseline the breaking-change gate compares against.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -187,3 +213,141 @@ jobs:
         env:
           CROSS_REPO_TOKEN: ${{ steps.modauth.outputs.token }}
         run: ${{ inputs['contract-test-command'] }}
+
+  # ── the registry stages ───────────────────────────────────────────────────────────────────
+  # Split from validation so that publication cannot run ahead of the checks that qualify it,
+  # and so a caller reading the run can see which of the two happened.
+  registry:
+    name: Contract registry (baseline + publish)
+    needs: validate-contract
+    if: inputs['service-name'] != ''
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ${{ fromJson(inputs.runner) }}
+    timeout-minutes: 15
+    env:
+      REGISTRY_REPO: InboxxHQ-CoderAxis/inboxxhq-api-contracts
+      SERVICE: ${{ inputs['service-name'] }}
+      SPEC_FILE: ${{ inputs['spec-file'] }}
+    steps:
+      - name: Check out the service repo
+        uses: actions/checkout@v4
+
+      - name: Mint a token that may read the registry
+        id: regread
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          owner: InboxxHQ-CoderAxis
+
+      - name: Fetch the published baseline
+        id: baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.regread.outputs.token }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${REGISTRY_REPO}/contents/${SERVICE}/latest.json" \
+               -H "Accept: application/vnd.github.raw" > baseline.json 2>/dev/null; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+            echo "Baseline fetched: $(wc -c < baseline.json) bytes"
+          else
+            # A service publishing for the first time has nothing to be compared against. That
+            # is not a pass: oasdiff against an absent baseline reports zero breaking changes
+            # for every possible change, which is the green-on-nothing result this whole file
+            # exists to avoid. Say which of the two it was.
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::${SERVICE} has no published baseline yet; the breaking-change comparison is skipped for this first publication, not passed."
+          fi
+
+      - name: Set up Go
+        if: steps.baseline.outputs.present == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: false
+
+      - name: Install oasdiff
+        if: steps.baseline.outputs.present == 'true'
+        shell: bash
+        run: go install github.com/oasdiff/oasdiff@v1.11.7
+
+      # The gate. It runs on pull requests as well as main, and it must: publication below moves
+      # the baseline, so main-only enforcement would compare a spec against a baseline refreshed
+      # from that same spec and pass unconditionally.
+      - name: Breaking-change check against the published baseline
+        if: steps.baseline.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if oasdiff breaking baseline.json "${SPEC_FILE}" --fail-on ERR; then
+            echo "No breaking changes against the published ${SERVICE} baseline."
+            exit 0
+          fi
+          echo "::error::${SPEC_FILE} breaks the published ${SERVICE} contract. An intentional break needs a major bump of ${SERVICE}/VERSION in ${REGISTRY_REPO}; an unintentional one needs the spec fixed here."
+          exit 1
+
+      - name: Mint a token that may write the registry
+        id: regwrite
+        if: >-
+          inputs['publish-contract'] &&
+          github.event_name == 'push' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: contracts
+          owner: InboxxHQ-CoderAxis
+
+      # Keyed off the mint's outcome rather than repeating its condition: two copies of the same
+      # three-part expression is how one of them ends up stale, and a publish step guarded by a
+      # condition that no longer matches its token step either fails on an empty token or, worse,
+      # runs when it should not.
+      - name: Publish the validated contract
+        if: steps.regwrite.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.regwrite.outputs.token }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REGISTRY_REPO}.git" /tmp/registry
+          spec="$(pwd)/${SPEC_FILE}"
+          cd /tmp/registry
+          git config user.email "ci-bot@inboxxhq.com"
+          git config user.name "inboxxhq-ci"
+
+          svc_dir="${SERVICE}"
+          [[ -d "${svc_dir}" ]] || { echo "::error::${SERVICE} has no directory in ${REGISTRY_REPO}. Create it with a VERSION file before enabling publish-contract."; exit 1; }
+
+          # Every service publishes into one repository, so two merges landing together race on
+          # the same push. Only this service's own files change, so rebasing on the freshest main
+          # and retrying is safe - the alternative is a lost publication reported as success.
+          pushed=""
+          deadline=$(( $(date +%s) + 300 ))
+          attempt=0
+          while [ "$(date +%s)" -lt "${deadline}" ]; do
+            attempt=$((attempt + 1))
+            git fetch --quiet origin main
+            git reset --hard --quiet origin/main
+
+            version="$(tr -d '[:space:]' < "${svc_dir}/VERSION" 2>/dev/null || echo 'v1.0.0')"
+            case "${version}" in v*) snap="${version}.json" ;; *) snap="v${version}.json" ;; esac
+            cp "${spec}" "${svc_dir}/latest.json"
+            cp "${spec}" "${svc_dir}/${snap}"
+
+            git add -A
+            if git diff --cached --quiet; then
+              echo "${SERVICE} baseline already matches this spec; nothing to publish."
+              pushed="noop"; break
+            fi
+            git commit -q -m "contracts(${SERVICE}): publish contract from ${COMMIT_SHA}"
+            if git push --quiet origin HEAD:main 2>/dev/null; then
+              echo "Published ${SERVICE}/latest.json and ${svc_dir}/${snap} (attempt ${attempt})."
+              pushed="yes"; break
+            fi
+            echo "push race lost (attempt ${attempt}); rebasing on latest main"
+            sleep $(( (RANDOM % 5) + 2 ))
+          done
+          test -n "${pushed}" || { echo "::error::could not publish ${SERVICE} within the deadline"; exit 1; }
+          echo "The registry push triggers the mirror publish, which every API portal reads."
