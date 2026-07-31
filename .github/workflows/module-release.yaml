@@ -341,7 +341,7 @@ jobs:
             V="${GITHUB_REF_NAME}"
             [[ "${V}" =~ ${semver} ]] || { echo "::error::tag ${V} is not vMAJOR.MINOR.PATCH"; exit 1; }
             gomajor_ok "${V}" || {
-              echo "::error::tag ${V} needs the module path to end in /v${V%%.*} - it is ${MODULE}." \
+              echo "::error::tag ${V} needs the module path to end in /${V%%.*} - it is ${MODULE}." \
                    "Go would refuse this version, so publishing it would produce a release nothing" \
                    "can import."; exit 1; }
             { echo "version=${V}"; echo "releasable=true"; echo "createtag=false"; } >> "${GITHUB_OUTPUT}"
@@ -359,7 +359,7 @@ jobs:
               echo "::error::${V} already exists; versions are immutable once published"; exit 1
             fi
             gomajor_ok "${V}" || {
-              echo "::error::${V} needs the module path to end in /v${V%%.*} - it is ${MODULE}." \
+              echo "::error::${V} needs the module path to end in /${V%%.*} - it is ${MODULE}." \
                    "Dispatching an explicit version does not exempt it: Go would refuse the" \
                    "result either way."; exit 1; }
             { echo "version=${V}"; echo "releasable=true"; echo "createtag=true"; } >> "${GITHUB_OUTPUT}"
