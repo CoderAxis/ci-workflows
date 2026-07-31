@@ -59,6 +59,15 @@ on:
         description: "Logical service name (overlay dir + image repo suffix), e.g. auth-service."
         required: true
         type: string
+      contract_version:
+        description: >-
+          Registry version of the API contract this build serves, recorded in the release
+          catalogue so an environment can say which contract it is running. Empty means the
+          caller did not publish one; the field is then omitted rather than guessed, because a
+          wrong pointer here is worse than an absent one - it would be followed.
+        required: false
+        type: string
+        default: ""
       aws_region:
         description: "AWS region of the canonical build + central registry."
         required: false
@@ -615,7 +624,8 @@ jobs:
             git fetch --quiet origin main
             git reset --hard --quiet origin/main
             bash scripts/gitops-set-image.sh "${SERVICE_NAME}" dev "${{ steps.build.outputs.image_ref }}"
-            bash scripts/write-release-metadata.sh "${SERVICE_NAME}" dev "${{ steps.build.outputs.image_ref }}" "${GITHUB_SHA}"
+            CONTRACT_VERSION="${{ inputs.contract_version }}" \
+              bash scripts/write-release-metadata.sh "${SERVICE_NAME}" dev "${{ steps.build.outputs.image_ref }}" "${GITHUB_SHA}"
             git add -A
             if git diff --cached --quiet; then
               echo "dev already pinned to ${{ steps.build.outputs.image_digest }}; nothing to commit"
