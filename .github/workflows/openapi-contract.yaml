@@ -85,6 +85,12 @@ on:
         required: false
         type: boolean
         default: false
+    outputs:
+      published-version:
+        description: >-
+          The registry version this run allocated, or empty if nothing was published. Empty
+          means "unknown", not "unchanged": publication is opt-in, so most callers get empty.
+        value: ${{ jobs.registry.outputs.published-version }}
 
 permissions:
   contents: read
@@ -221,6 +227,11 @@ jobs:
     name: Contract registry (baseline + publish)
     needs: validate-contract
     if: inputs['service-name'] != ''
+    outputs:
+      # Which version this run allocated, so the deploy side can record what an environment is
+      # about to serve. Empty when nothing was published, which callers must treat as "unknown"
+      # rather than "unchanged": publication is opt-in, so empty is the common case.
+      published-version: ${{ steps.publish.outputs.published_version }}
     permissions:
       contents: read
       id-token: write
@@ -304,6 +315,7 @@ jobs:
       # condition that no longer matches its token step either fails on an empty token or, worse,
       # runs when it should not.
       - name: Publish the validated contract
+        id: publish
         if: steps.regwrite.outcome == 'success'
         shell: bash
         env:
@@ -336,8 +348,54 @@ jobs:
             git fetch --quiet origin main
             git reset --hard --quiet origin/main
 
-            version="$(tr -d '[:space:]' < "${svc_dir}/VERSION" 2>/dev/null || echo 'v1.0.0')"
-            case "${version}" in v*) snap="${version}.json" ;; *) snap="v${version}.json" ;; esac
+            # Nothing to do if the published document already is this document. Checked before
+            # allocating a version so that a re-run, or a merge that did not touch the spec,
+            # cannot consume a version number for an identical document.
+            if [ -f "${svc_dir}/latest.json" ] && cmp -s "${spec}" "${svc_dir}/latest.json"; then
+              echo "${SERVICE} baseline already matches this spec; nothing to publish."
+              pushed="noop"; break
+            fi
+
+            current=""
+            [ -f "${svc_dir}/VERSION" ] && current="$(tr -d '[:space:]' < "${svc_dir}/VERSION")"
+            [ -n "${current}" ] || current="v1.0.0"
+            case "${current}" in v*) ;; *) current="v${current}" ;; esac
+
+            # Validated before it is used for anything, not inside the bump branch. A malformed
+            # VERSION whose snapshot happens not to exist would otherwise skip the check entirely
+            # and be published under its own malformed name.
+            num="${current#v}"
+            IFS=. read -r major minor patch extra <<<"${num}"
+            # The part count is checked separately from the digits. Splitting with ${x%%.*} alone
+            # accepts "v1.2", because the patch field re-reads the minor and the digit test then
+            # passes on a version that has no patch at all.
+            if [ -z "${patch}" ] || [ -n "${extra}" ] ||
+               { case "${major}${minor}${patch}" in *[!0-9]*) true ;; *) false ;; esac; }; then
+              echo "::error::${svc_dir}/VERSION is '${current}', which is not vMAJOR.MINOR.PATCH."
+              exit 1
+            fi
+
+            # The document changed, so it needs a version no published document already owns.
+            # Reusing the VERSION file as-is would overwrite v<X.Y.Z>.json with different bytes,
+            # which silently destroys the immutability the released-contract pointer depends on:
+            # an environment recorded as serving v1.0.0 would follow that pointer to whatever
+            # v1.0.0.json was last overwritten with. Allocation is automatic because the
+            # alternative is a manual bump in another repository, and a manual step in another
+            # repository is the exact thing whose omission started this.
+            #
+            # Minor, never major: a breaking change cannot reach here, because the pull-request
+            # gate above refuses it. So every published change is additive by construction, which
+            # is what a minor bump means.
+            if [ -e "${svc_dir}/${current}.json" ]; then
+              version="v${major}.$((minor + 1)).0"
+            else
+              # The VERSION on file was never published under that name, so it is free.
+              version="${current}"
+            fi
+            snap="${version}.json"
+            [ -e "${svc_dir}/${snap}" ] && { echo "::error::${svc_dir}/${snap} already exists; refusing to overwrite a published snapshot."; exit 1; }
+
+            printf '%s\n' "${version}" > "${svc_dir}/VERSION"
             cp "${spec}" "${svc_dir}/latest.json"
             cp "${spec}" "${svc_dir}/${snap}"
 
@@ -362,12 +420,16 @@ jobs:
 
             git add -A
             if git diff --cached --quiet; then
-              echo "${SERVICE} baseline already matches this spec; nothing to publish."
+              # Unreachable via the spec: an identical document breaks out above, and a differing
+              # one always allocates a new version. Kept so that a future edit which stops writing
+              # something cannot turn into an empty commit loop that never terminates.
+              echo "Nothing staged for ${SERVICE} despite a changed spec; treating as published."
               pushed="noop"; break
             fi
-            git commit -q -m "contracts(${SERVICE}): publish contract from ${COMMIT_SHA}"
+            git commit -q -m "contracts(${SERVICE}): publish ${version} from ${COMMIT_SHA}"
             if git push --quiet origin HEAD:main 2>/dev/null; then
               echo "Published ${SERVICE}/latest.json and ${svc_dir}/${snap} (attempt ${attempt})."
+              echo "published_version=${version}" >> "${GITHUB_OUTPUT}"
               pushed="yes"; break
             fi
             echo "push race lost (attempt ${attempt}); rebasing on latest main"
