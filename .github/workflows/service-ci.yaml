@@ -1297,6 +1297,17 @@ jobs:
     with:
       spec-file: docs/openapi.json
       contract-test-command: GOWORK=off go test ./tests/contracts/... -count=1 -v
+      # Two switches rather than one, because the two stages carry different risk. The
+      # breaking-change comparison only reads, but turning it on fleet-wide would redden every
+      # service whose spec has already drifted from its published baseline - which is worth
+      # knowing and is not worth learning as 38 simultaneous failures. Publication writes, and
+      # a service should have passed the comparison for a while before it moves its own baseline.
+      #
+      # The name is taken from the catalog rather than written here. Hand-written service names
+      # are why the per-repo contract workflows this replaced could point a service at another
+      # service's registry directory after a rename.
+      service-name: ${{ vars.CONTRACT_REGISTRY_ENABLED == 'true' && needs.resolve.outputs.service || '' }}
+      publish-contract: ${{ vars.CONTRACT_PUBLISH_ENABLED == 'true' }}
 
   # ── end-to-end (RFC-0037 stage 3) ───────────────────────────────────────────────────────────
   # The tier the platform did not have. inboxxhq-platform-bff and inboxxhq-org-bff both ship a
