@@ -1564,8 +1564,14 @@ jobs:
   # Argo CD reconciles from there, so nothing below this line touches a cluster.
   artifact:
     name: Canonical build and GitOps pin
+    # `contract` joins this list for two reasons. It carries the version the registry allocated,
+    # which the deploy records as what the environment will serve - and a value read from a job
+    # that has not finished is empty, which the catalog cannot distinguish from "not published".
+    # It also closes a gap that predates any of this: `contracts` (the ADR guard) blocked a
+    # deploy while `contract` (structural validation and the service's own contract tests) did
+    # not, so a service could ship with an OpenAPI document that fails to parse.
     needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
-            dockerfile, structure, vulnerabilities, sqlc, docs, contracts]
+            dockerfile, structure, vulnerabilities, sqlc, docs, contracts, contract]
     if: |
       always()
       && github.event_name == 'push'
@@ -1587,6 +1593,10 @@ jobs:
       # Previously each repo passed this literal in its own deploy.yaml, so a one-line edit to
       # `service_name:` was enough to publish one service's code under another's identity.
       service_name: ${{ needs.resolve.outputs.service }}
+      # What this deploy will make the environment serve. Empty whenever nothing was published -
+      # publication is opt-in, and a spec that did not change publishes nothing - so the release
+      # record omits the field rather than asserting a version it did not verify.
+      contract_version: ${{ needs.contract.outputs.published-version }}
 
   # ── notification ────────────────────────────────────────────────────────────────────────────
   # Centralised here, and this job is a REPLACEMENT rather than an addition. Each per-repo ci.yaml
