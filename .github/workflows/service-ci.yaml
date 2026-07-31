@@ -1596,7 +1596,7 @@ jobs:
       # What this deploy will make the environment serve. Empty whenever nothing was published -
       # publication is opt-in, and a spec that did not change publishes nothing - so the release
       # record omits the field rather than asserting a version it did not verify.
-      contract_version: ${{ needs.contract.outputs.published-version }}
+      api_contract_version: ${{ needs.contract.outputs.published-version }}
 
   # ── notification ────────────────────────────────────────────────────────────────────────────
   # Centralised here, and this job is a REPLACEMENT rather than an addition. Each per-repo ci.yaml
