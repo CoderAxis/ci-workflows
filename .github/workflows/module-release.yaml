@@ -320,9 +320,30 @@ jobs:
 
           # Pushing a tag by hand stays supported: the tag IS the decision, so it is validated
           # and used as-is rather than recomputed.
+          # Go encodes the major version in the import path from v2 onward, so a tag whose major
+          # does not match the module path publishes a version nothing can import. Checked on this
+          # path too, because a tag pushed by hand reaches here without passing the computation
+          # below.
+          # Separate statements on purpose: `local a=x b="${a}"` expands every right-hand side
+          # before it assigns any of them, so b reads the outer a and comes out empty. An empty
+          # major then satisfies `-lt 2` -- bash reads "" as 0 in an arithmetic comparison -- and
+          # the guard silently allows everything it exists to refuse.
+          gomajor_ok() {
+            local v major
+            v="${1#v}"
+            major="${v%%.*}"
+            [[ "${major}" =~ ^[0-9]+$ ]] || return 1
+            [[ "${major}" -lt 2 ]] && return 0
+            [[ "${MODULE}" == */v${major} ]]
+          }
+
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             V="${GITHUB_REF_NAME}"
             [[ "${V}" =~ ${semver} ]] || { echo "::error::tag ${V} is not vMAJOR.MINOR.PATCH"; exit 1; }
+            gomajor_ok "${V}" || {
+              echo "::error::tag ${V} needs the module path to end in /v${V%%.*} - it is ${MODULE}." \
+                   "Go would refuse this version, so publishing it would produce a release nothing" \
+                   "can import."; exit 1; }
             { echo "version=${V}"; echo "releasable=true"; echo "createtag=false"; } >> "${GITHUB_OUTPUT}"
             exit 0
           fi
@@ -337,6 +358,10 @@ jobs:
             if git rev-parse -q --verify "refs/tags/${V}" >/dev/null; then
               echo "::error::${V} already exists; versions are immutable once published"; exit 1
             fi
+            gomajor_ok "${V}" || {
+              echo "::error::${V} needs the module path to end in /v${V%%.*} - it is ${MODULE}." \
+                   "Dispatching an explicit version does not exempt it: Go would refuse the" \
+                   "result either way."; exit 1; }
             { echo "version=${V}"; echo "releasable=true"; echo "createtag=true"; } >> "${GITHUB_OUTPUT}"
             exit 0
           fi
@@ -438,6 +463,36 @@ jobs:
                  "deliberate stability commitment - dispatch this workflow with an explicit" \
                  "version to make it."
             bump="minor"
+          fi
+
+          # Go encodes the major version in the import path from v2 onward: a module released as
+          # v2.0.0 must declare `module example.com/m/v2`, or the toolchain refuses it outright
+          # with "module path must match major version". A tag alone is not a release - nothing can
+          # import it - so publishing one produces a version that exists, is signed, carries
+          # provenance, and cannot be consumed by anybody.
+          #
+          # That is not hypothetical. platform-shared-go released v2.0.0 this way: two honest
+          # `!` markers computed a major bump, the tag and the GitHub Release were published, and
+          # every one of the eighty downstream bump jobs then failed because `go get` rejected the
+          # version. The failure surfaced at the consumers rather than here, which is the wrong end.
+          #
+          # Refusing rather than quietly bumping the minor instead: the marker says the change is
+          # breaking, and silently publishing it as a minor would tell consumers the opposite. The
+          # two honest routes are to adopt the /vN path deliberately - a real migration, since every
+          # importer must be rewritten - or to dispatch an explicit version. Both are decisions, and
+          # this is the point at which someone has to make one.
+          if [[ "${bump}" == "major" ]]; then
+            NEXT=$((MA + 1))
+            if [[ "${MODULE}" != */v${NEXT} ]]; then
+              echo "::error::${MODULE} would release v${NEXT}.0.0, but Go requires the module path" \
+                   "to end in /v${NEXT} from v2 onward. The tag would publish and nothing could" \
+                   "import it. Either adopt the /v${NEXT} path and rewrite every importer, or" \
+                   "dispatch this workflow with an explicit version if the change is not in fact" \
+                   "breaking. Breaking commits in this range:"
+              git log --no-merges --format='  %h %s' "${range}" | grep -E '^\s+\w+ \w+(\(.+\))?!:' || true
+              git log --no-merges --format='%h%x09%s%x09%b' "${range}" | grep -i 'BREAKING CHANGE' | cut -f1,2 | sed 's/^/  /' || true
+              exit 1
+            fi
           fi
 
           case "${bump}" in
