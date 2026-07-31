@@ -62,6 +62,61 @@ ihq_guard_bin() {
   return 1
 }
 
+# --- the pin the CI resolves ------------------------------------------------------------------
+#
+# WHY THIS EXISTS
+# ---------------
+# A developer building in the multi-repo workspace resolves platform-shared-go and every core
+# module to the checkout beside them. CI sets GOWORK=off and resolves what go.mod pins. Those are
+# different builds, and nothing said so, which meant a change could compile perfectly for the
+# person writing it and not compile at all anywhere else.
+#
+# That is not hypothetical. A sweep moved the fleet onto a new servicetokenjwt.GenerateServiceToken
+# signature, envutil.IsDeployed and grpcauth.NewMapAuthorizer, released platform-shared-go, and
+# bumped no consumer. Every repository still built locally. Twenty-nine of ninety-nine did not
+# build in CI, including nine core modules -- and a core module whose CI is red cannot be released,
+# because the release workflow requires a green run for the exact commit. Consumers then could not
+# be bumped onto a fix that was never published. The workspace hid the break, and the break blocked
+# its own repair.
+#
+# The check is the same build CI runs, one push earlier. It is deliberately not clever: no parsing
+# of go.mod against symbol requirements, just the compiler, told to resolve modules the way the
+# machine that gates the merge will.
+ihq_guard_pins() {
+  local label="$1" repo_root="$2"
+
+  [[ -f "${repo_root}/go.mod" ]] || return 0
+  command -v go >/dev/null 2>&1 || return 0
+
+  echo "${label}: building with GOWORK=off, the way CI resolves modules…" >&2
+
+  local out
+  if out="$(cd "${repo_root}" && GOWORK=off go build ./... 2>&1)"; then
+    return 0
+  fi
+
+  echo "${label}: this repository does not build the way CI builds it." >&2
+  echo "" >&2
+  echo "${out}" | head -n 15 >&2
+  echo "" >&2
+
+  # An undefined symbol from a module this repo pins is the signature of a stale pin, and it is
+  # worth saying so outright: the compiler's own message names a symbol, not a version, so the
+  # reader is otherwise left to work out that the code is newer than the dependency.
+  if echo "${out}" | grep -qE 'undefined:|not enough arguments|too many arguments|does not implement'; then
+    echo "${label}: this usually means the code here is newer than a module it pins." >&2
+    echo "  It compiles for you because the workspace resolves that module to your checkout." >&2
+    echo "  CI has no workspace and resolves the pin, which does not carry the symbol yet." >&2
+    echo "" >&2
+    echo "  Fix the pin rather than the workspace:" >&2
+    echo "    GOWORK=off go get <module>@<version> && GOWORK=off go mod tidy" >&2
+    echo "" >&2
+    echo "  If the version carrying it was never released, that release comes first." >&2
+  fi
+
+  return 1
+}
+
 # --- entry point ------------------------------------------------------------------------------
 
 ihq_guard() {
@@ -103,5 +158,13 @@ ihq_guard() {
   fi
 
   echo "${label}: ✓ contract clean" >&2
+
+  # Only on push. A build is too slow to sit in front of every commit, and the divergence this
+  # catches only matters once the code leaves the machine that was hiding it.
+  if [[ "${mode}" == "full" ]]; then
+    ihq_guard_pins "${label}" "${repo_root}" || return 1
+    echo "${label}: ✓ builds against its pins" >&2
+  fi
+
   return 0
 }
