@@ -464,7 +464,18 @@ jobs:
             *"no analysis found"*|*"No analysis found"*)
               echo "available=true" >> "${GITHUB_OUTPUT}"
               ;;
-            *"must be enabled"*|*"Advanced Security"*|*"advanced security"*)
+            # Three phrasings for one condition, because GitHub has changed the wording and the
+            # older forms still appear. The current message names neither "Advanced Security"
+            # nor "must be enabled":
+            #
+            #   Code scanning is not enabled for this repository.
+            #   Please enable code scanning in the repository settings.
+            #
+            # so it fell through to the catch-all below and failed the job - correctly by the
+            # rule as written, and wrongly in fact, since this IS the unentitled case. Matching
+            # only the vocabulary of the day makes this gate red fleet-wide on a GitHub copy edit,
+            # which is what happened here.
+            *"must be enabled"*|*"Advanced Security"*|*"advanced security"*|*"ode scanning is not enabled"*)
               echo "available=false" >> "${GITHUB_OUTPUT}"
               echo "::warning::Code scanning is not enabled for ${GITHUB_REPOSITORY}; CodeQL analysis runs but results are not uploaded. Enabling Code Security is an org admin action, tracked as EX-0013 in the standard exception register."
               ;;
