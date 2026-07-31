@@ -1563,7 +1563,56 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
+      # Same entitlement problem as Code scanning, and the same answer. The action hard-fails on a
+      # repository without Dependency graph and Advanced Security, so this gate was red for reasons
+      # a contributor cannot fix and unrelated to the diff in front of it.
+      #
+      # It stayed hidden because this job is pull_request-only and the module repositories are
+      # pushed to directly. The first pull request any of them saw was an automated dependency bump
+      # opened by the release fan-out, which is where it surfaced -- a gate nobody could have been
+      # failing until the moment it blocked a release.
+      #
+      # Probe rather than assume, for the reason recorded on the Code scanning check: entitlement is
+      # not readable from the settings API under GITHUB_TOKEN, so ask the endpoint the action itself
+      # uses and let the answers agree by construction. It self-heals the day the feature is enabled.
+      - name: Detect Dependency graph availability
+        id: depgraph
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if probe="$(gh api "repos/${GITHUB_REPOSITORY}/dependency-graph/compare/${BASE}...${HEAD}" 2>&1)"; then
+            echo "available=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          case "${probe}" in
+            # 403 is the real answer for an unentitled private repository, and it arrives with no
+            # explanatory body at all - just "Forbidden". The prose forms are matched too because
+            # the Code scanning probe went red fleet-wide when GitHub reworded its message, and
+            # matching only the vocabulary of the day is what caused that.
+            #
+            # A 403 cannot be told apart from a token that lacks the scope. Neither can the action:
+            # it reads this same response and reports "not supported", so deferring to that reading
+            # leaves the gate no weaker than the tool it is guarding. What it does cost is the
+            # ability to notice a permissions regression here, which is why the warning names the
+            # entitlement explicitly rather than saying the check was skipped.
+            *"403"*|*"Forbidden"*|*"not supported"*|*"Advanced Security"*|*"advanced security"*|*"ependency graph is"*)
+              echo "available=false" >> "${GITHUB_OUTPUT}"
+              echo "::warning::Dependency graph is not enabled for ${GITHUB_REPOSITORY} (or this token cannot read it), so dependency review cannot run. Enabling Advanced Security on a private repository is an org admin action. The Vulnerabilities job still scans this commit, so the dependency surface is not unexamined."
+              ;;
+            # An unrecognised failure is not evidence of being unentitled. Reading it that way would
+            # retire this gate across the fleet on a token problem or an outage.
+            *)
+              echo "::error::could not determine Dependency graph availability for ${GITHUB_REPOSITORY}: ${probe}"
+              exit 1
+              ;;
+          esac
+
       - uses: actions/dependency-review-action@v4
+        if: steps.depgraph.outputs.available == 'true'
         with:
           fail-on-severity: high
 
