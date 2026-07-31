@@ -57,6 +57,40 @@ A hook that runs a generator or resolves a module pin must set `GOWORK=off`, bec
 CI resolves. The `ihq validate` guard is unaffected — it reads the committed spec and runs no
 generator — so this applies to service-specific hook steps, not to the shared guard.
 
+### The guard now checks this directly
+
+That rule was written down and nothing enforced it, so on push the shared guard runs
+`GOWORK=off go build ./...` and blocks if it fails. It is the build CI runs, one push earlier.
+
+The failure it exists for: a sweep moved the fleet onto a new
+`servicetokenjwt.GenerateServiceToken` signature, `envutil.IsDeployed` and
+`grpcauth.NewMapAuthorizer`, released `platform-shared-go`, and bumped no consumer. Every
+repository still compiled locally, because every workspace resolved the module to the checkout.
+Twenty-nine of ninety-nine did not compile in CI.
+
+Nine of those were core modules, and that is what made it expensive rather than merely annoying.
+A core module whose CI is red cannot be released — `module-release.yaml` requires a green run for
+the exact commit being tagged — so the fix could not be published, so consumers could not be
+bumped onto it. The workspace hid the break and the break blocked its own repair. Catching it
+before the push is what keeps that loop from forming.
+
+## Dependency bumps are still manual, and that is the next thing to fix
+
+The guard tells a developer their pin is stale. It does not bump anything, and it does not help
+the case that caused the outage above: a shared module releasing a change that dozens of
+consumers need. Today that is a person running `go get` in each repository in dependency order.
+
+The platform answer is fan-out on release — `platform-shared-go` publishing a version opens a bump
+pull request against every consumer, each carrying its own CI. `module-release.yaml` already has
+the fan-out machinery (`bump-module-pin`, and a `Bump ${{ matrix.kind }}` job), so the missing
+piece is coverage and sequencing rather than a new mechanism: cores before the services that
+consume them, and a release that is not considered done until its consumers are green.
+
+Two constraints to design against, both learned the hard way. A full fan-out costs two to three
+hours of runner time, so it belongs on release rather than on every push to a shared module. And
+a consumer bumped onto a version whose own CI never passed just moves the red, which is the
+argument for gating the fan-out on the release actually having been cut.
+
 ## What the guard used to need from the CLI
 
 CLI-1 through CLI-5 were the gaps this guard worked around in shell and Python. All five are now

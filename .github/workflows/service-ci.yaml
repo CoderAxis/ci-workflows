@@ -263,11 +263,20 @@ jobs:
 
       - name: Lint
         shell: bash
+        # GOWORK is set for the whole step rather than on the fallback command alone. `make lint`
+        # runs a repository's own Makefile, and no repository's Makefile sets it, so the one branch
+        # of this step that the fleet actually takes was the branch not pinned to CI's resolution.
+        # A runner has no workspace to find today, which is why nothing broke -- but that made the
+        # guarantee incidental, resting on the checkout's shape instead of being stated. Setting it
+        # here holds for make, for anything make shells out to, and for a runner that one day has a
+        # workspace on it.
+        env:
+          GOWORK: "off"
         run: |
           set -euo pipefail
           # `make lint` is the fleet convention; fall back to vet so a repo without a Makefile
           # target is still linted rather than silently skipped.
-          if grep -qE '^lint:' Makefile 2>/dev/null; then make lint; else GOWORK=off go vet ./...; fi
+          if grep -qE '^lint:' Makefile 2>/dev/null; then make lint; else go vet ./...; fi
 
       - name: Point the tests at the throwaway database
         shell: bash
