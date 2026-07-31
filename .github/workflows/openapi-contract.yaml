@@ -311,6 +311,11 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # Captured before the retry loop: a value regenerated per attempt would make the
+          # published timestamp report when the push finally won a race rather than when the
+          # contract was built.
+          PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export PUBLISHED_AT
           git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REGISTRY_REPO}.git" /tmp/registry
           spec="$(pwd)/${SPEC_FILE}"
           cd /tmp/registry
@@ -335,6 +340,25 @@ jobs:
             case "${version}" in v*) snap="${version}.json" ;; *) snap="v${version}.json" ;; esac
             cp "${spec}" "${svc_dir}/latest.json"
             cp "${spec}" "${svc_dir}/${snap}"
+
+            # Which commit produced these bytes. index.json already carries a sha256 of the
+            # published document, which answers "did this change"; it cannot answer "what
+            # produced it", so a contract that disagrees with a running service can only be
+            # traced by matching timestamps against merge history by hand - which is how the
+            # auth-service drift stayed unexplained as long as it did.
+            # jq rather than a heredoc'd script: a `<<EOF` body inside a YAML block keeps the
+            # block's indentation, and `<<-` strips only tabs, so an indentation-sensitive
+            # language would fail here at runtime and nowhere else.
+            jq -n \
+              --arg version "${version}" \
+              --arg spec_digest "sha256:$(sha256sum "${spec}" | cut -d' ' -f1)" \
+              --arg source_repo "${GITHUB_REPOSITORY}" \
+              --arg source_sha "${COMMIT_SHA}" \
+              --arg source_run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+              --arg published_at "${PUBLISHED_AT}" \
+              '{version: $version, spec_digest: $spec_digest, source_repo: $source_repo,
+                source_sha: $source_sha, source_run: $source_run, published_at: $published_at}' \
+              > "${svc_dir}/provenance.json"
 
             git add -A
             if git diff --cached --quiet; then
