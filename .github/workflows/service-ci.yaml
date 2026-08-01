@@ -1802,9 +1802,25 @@ jobs:
     # shape platform-shared-go already hit once, where an undeclared lane sat red while ci was
     # green and releases went out past it - and the reason its ci.yaml now calls generated-files
     # as a job rather than leaving it a lane of its own.
+    #
+    # `lanes`, `integration` and `e2e` join for that same reason, and their absence was the same
+    # defect this comment already describes - three more instances of it sitting directly beneath
+    # the paragraph explaining why it is wrong. A service could fail its integration suite, fail
+    # its end-to-end suite, and still have this job pin a digest for deploy.
+    #
+    # Adding them is safe because both suites are self-selecting rather than universal.
+    # `integration` and `e2e` run only for deployable Go repositories, and `e2e` additionally
+    # skips a service that owns no tests/e2e/docker-compose.yaml; a job that does not run reports
+    # `skipped`, which the failure check below tolerates. So this blocks the services that have a
+    # suite and are failing it, which is the entire point, and changes nothing for the rest.
+    #
+    # `dependency-review` is deliberately NOT here, and its absence is not the same defect. It
+    # runs only on `pull_request` while this job runs only on `push`, so on every run where
+    # `artifact` executes it is already skipped. Listing it would imply a protection that cannot
+    # exist rather than adding one.
     needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
             dockerfile, structure, vulnerabilities, sqlc, docs, contracts, contract,
-            openapi-generator]
+            openapi-generator, lanes, integration, e2e]
     if: |
       always()
       && github.event_name == 'push'
@@ -1842,9 +1858,12 @@ jobs:
   # forwards a Slack credential and there is no "unconfigured" state left to fail silently.
   notify:
     name: Notify on failure
+    # `e2e` was the one gate nothing watched. That mattered less while it could not block a
+    # deploy; now that it can, its omission would mean a release stopped by a suite nobody was
+    # told had failed.
     needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
             dockerfile, structure, lanes, vulnerabilities, sqlc, docs, contracts, dependency-review,
-            integration, contract, openapi-generator, artifact]
+            integration, e2e, contract, openapi-generator, artifact]
     # always() rather than failure(): several gates above are conditional, and a plain failure()
     # does not run once any needed job has been skipped - which is the normal shape here, so the
     # alert would have fired only on the subset of runs where every gate happened to be relevant.
