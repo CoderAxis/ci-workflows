@@ -1318,6 +1318,174 @@ jobs:
       service-name: ${{ vars.CONTRACT_REGISTRY_ENABLED == 'true' && needs.resolve.outputs.service || '' }}
       publish-contract: ${{ vars.CONTRACT_PUBLISH_ENABLED == 'true' }}
 
+  # ── openapi generator ───────────────────────────────────────────────────────────────────────
+  # The gate that did not exist. `contract` above validates the COMMITTED document; nothing in
+  # this fleet has ever run the thing that PRODUCES it, which is why every generator in the fleet
+  # was broken and no run went red:
+  #
+  #   - eleven repos sourced "${SCRIPT_DIR}/../../../scripts/lib/swagger.sh", resolving to
+  #     services/scripts/lib/swagger.sh, a file that has never existed. Under `set -euo pipefail`
+  #     the failed source aborted before swag ran, so those repos generated NOTHING and their
+  #     committed spec was whatever someone last produced by hand.
+  #   - six repos vendored the library, in three byte-different variants, and all six resolved the
+  #     shared normalizer to a directory not containing it. The caller discarded that with
+  #     `2>/dev/null` and `|| true`, so swag and swagger2openapi ran and only normalization was
+  #     skipped - silently, which is why it lasted.
+  #
+  # THE GATE IS IN TWO HALVES, and it needs both. The static half refuses the wiring that caused
+  # each shape, so neither can be reintroduced. The dynamic half RUNS the generator, because only
+  # running it proves it runs - a static check would have passed all six Category B repos, whose
+  # scripts were syntactically fine and simply did not do one of the things they claimed to.
+  #
+  # And it asserts that NORMALIZATION ACTUALLY EXECUTED, not merely that the script exited 0. That
+  # distinction is the entire lesson here: every Category B repo exited 0 for months while quietly
+  # skipping the step that decides field naming and the response envelope. A gate that accepts an
+  # exit code accepts exactly the failure this replaces.
+  #
+  # WHY NO PINNED CHECKOUT OF platform-shared-go. The generator resolves the library through the
+  # module graph, so the service is judged against the normalizer version it actually ships with,
+  # which is the version its users get. platform-shared-go carries no moving major tag to pin to,
+  # and how old a shared module a repo may pin is already governed centrally by
+  # controls/module-floors.yaml rather than re-decided here.
+  openapi-generator:
+    name: OpenAPI generator
+    needs: resolve
+    if: needs.resolve.outputs.repo_kind == 'deployable' && needs.resolve.outputs.has_rest == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+      GONOSUMDB: github.com/coderaxis/*
+    steps:
+      - name: Check out the service repo
+        uses: actions/checkout@v4
+
+      # Checked out from this repository, not run from the service, so a repo cannot weaken the
+      # policy it is judged by - the same reasoning as the api-contract guard above.
+      - name: Check out the central generator guard (SSOT)
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/github-actions
+          ref: v1
+          path: .central
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generator wiring (static)
+        shell: bash
+        run: python3 .central/scripts/check-openapi-generator.py .
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # swagger2openapi runs through npx.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Mint module-read token
+        id: modauth
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          configure-git: "true"
+
+      - name: Download private modules
+        shell: bash
+        env:
+          MOD_TOKEN: ${{ steps.modauth.outputs.token }}
+        run: |
+          set -euo pipefail
+          [[ -n "${MOD_TOKEN}" ]] || { echo "::error::module token required for private Go modules"; exit 1; }
+          git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
+          GOWORK=off go mod download
+
+      - name: Run the generator and require normalization to execute
+        id: generate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f scripts/swagger.sh ]]; then
+            # Category C: the openapicontract engine, which owns its own gate. The static guard
+            # above has already established that such an engine positively exists here, so this
+            # is a different generator rather than the absence of one.
+            echo "::notice::no scripts/swagger.sh; generation is gated by openapi-contract-check."
+            echo "ran=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # The generator writes into the working tree. That is fine and deliberate: the checkout
+          # is ephemeral, and it lets the drift step below compare against what is committed.
+          rc=0
+          bash scripts/swagger.sh > generator.log 2>&1 || rc=$?
+          # Echoed in full before any assertion, so a failure is diagnosable from this log alone.
+          cat generator.log
+
+          if [[ "${rc}" -ne 0 ]]; then
+            echo "::error::the OpenAPI generator failed (exit ${rc}). The committed spec cannot be reproduced from the source it claims to be generated from."
+            exit 1
+          fi
+
+          # Exit 0 is NOT sufficient, and this is the point of the whole job. Every Category B
+          # repo exited 0 while skipping normalization. Require the normalizer's own success line.
+          if ! grep -q '^Normalized ' generator.log; then
+            echo "::error::the generator succeeded but normalization did not run. -protojson sets field naming and -fix-envelope sets the response envelope, so an un-normalized document describes a different wire format from the one the service serves, and the frontends generate their clients from it."
+            exit 1
+          fi
+
+          # The library's local escape hatch must never be how CI goes green.
+          if grep -q 'PROCEEDING WITHOUT NORMALIZATION' generator.log; then
+            echo "::error::OPENAPI_ALLOW_UNNORMALIZED is set. That switch exists for an offline workstation and must not be used in CI."
+            exit 1
+          fi
+
+          echo "ran=true" >> "${GITHUB_OUTPUT}"
+          echo "Generator ran and normalization executed."
+
+      # Drift is REPORTED here, and blocking is opt-in per repo. The generators have only just
+      # been repaired, so every committed spec in the fleet predates working normalization and a
+      # blocking drift gate would redden all 17 repos at once for a backlog rather than for a
+      # regression. Each repo turns this on once its spec has been regenerated and the
+      # operationId and component-name churn reviewed - the same staged rollout, and for the same
+      # reason, as CONTRACT_REGISTRY_ENABLED on the contract job above.
+      #
+      # It is a `notice` rather than a silent skip: the state this fleet just came out of is one
+      # where a step that did not happen looked identical to one that passed.
+      - name: Committed spec drift
+        if: steps.generate.outputs.ran == 'true'
+        shell: bash
+        env:
+          DRIFT_BLOCKING: ${{ vars.OPENAPI_DRIFT_BLOCKING == 'true' }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- docs/; then
+            echo "Committed spec matches a fresh generation."
+            exit 0
+          fi
+          echo "Committed spec differs from a fresh generation:"
+          git diff --stat -- docs/
+          if [[ "${DRIFT_BLOCKING}" == "true" ]]; then
+            echo "::error::docs/ is out of date with respect to the generator. Run scripts/swagger.sh and commit the result."
+            exit 1
+          fi
+          echo "::notice::docs/ is out of date with respect to the generator. Not blocking: set the OPENAPI_DRIFT_BLOCKING repo variable to 'true' once this repo's spec has been regenerated and its operationId churn reviewed."
+
+      - name: Remove the guard checkout
+        if: always()
+        shell: bash
+        run: rm -rf .central
+
   # ── end-to-end (RFC-0037 stage 3) ───────────────────────────────────────────────────────────
   # The tier the platform did not have. inboxxhq-platform-bff and inboxxhq-org-bff both ship a
   # tests/e2e directory, and neither has ever executed: each test skips unless E2E=1, and no
@@ -1628,8 +1796,15 @@ jobs:
     # It also closes a gap that predates any of this: `contracts` (the ADR guard) blocked a
     # deploy while `contract` (structural validation and the service's own contract tests) did
     # not, so a service could ship with an OpenAPI document that fails to parse.
+    # `openapi-generator` joins this list, and being IN this list is the whole point of it.
+    # A job that is not needed here still colours the run, but `artifact` runs anyway and writes
+    # the GitOps digest pin, so the release proceeds from a tree whose gate was red. That is the
+    # shape platform-shared-go already hit once, where an undeclared lane sat red while ci was
+    # green and releases went out past it - and the reason its ci.yaml now calls generated-files
+    # as a job rather than leaving it a lane of its own.
     needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
-            dockerfile, structure, vulnerabilities, sqlc, docs, contracts, contract]
+            dockerfile, structure, vulnerabilities, sqlc, docs, contracts, contract,
+            openapi-generator]
     if: |
       always()
       && github.event_name == 'push'
@@ -1669,7 +1844,7 @@ jobs:
     name: Notify on failure
     needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
             dockerfile, structure, lanes, vulnerabilities, sqlc, docs, contracts, dependency-review,
-            integration, contract, artifact]
+            integration, contract, openapi-generator, artifact]
     # always() rather than failure(): several gates above are conditional, and a plain failure()
     # does not run once any needed job has been skipped - which is the normal shape here, so the
     # alert would have fired only on the subset of runs where every gate happened to be relevant.
