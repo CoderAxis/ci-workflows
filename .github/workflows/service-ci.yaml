@@ -1100,15 +1100,44 @@ jobs:
       # nothing, so the governance it defines had never once been enforced.
       - name: OperationId governance
         shell: bash
+        env:
+          HAS_REST: ${{ needs.resolve.outputs.has_rest }}
         run: |
           set -euo pipefail
+          spec=""
           for c in docs/openapi.json docs/openapi.yaml docs/openapi.yml; do
-            if [[ -f "${c}" ]]; then
-              python3 .central/scripts/check_operation_ids.py --check
-              exit $?
-            fi
+            [[ -f "${c}" ]] && { spec="${c}"; break; }
           done
-          echo "no committed OpenAPI contract; operationId governance does not apply"
+
+          if [[ -z "${spec}" ]]; then
+            echo "no committed OpenAPI contract; operationId governance does not apply"
+            exit 0
+          fi
+
+          # The catalog decides whether these identifiers are governed, exactly as it decides for
+          # the `contract` and `openapi-generator` jobs. operationIds are public identifiers only
+          # where HTTP is a published contract; for a gRPC-only service the document is an artefact
+          # of the generator, nothing consumes the names, and ADR-0093 rule 4 says the document
+          # should not be there at all.
+          #
+          # Keying this off the file alone made the gate demand a governance lock from services
+          # that owe no HTTP contract, and this job blocks `artifact` -- so those services could
+          # not deploy. ledger-service last reached dev on 2026-07-05 for this reason. Governing
+          # names nobody may call is not a safety property worth a stalled release train.
+          #
+          # This is not the "deleting the spec is how you pass" hole the OpenAPI contract step
+          # above guards against, because the answer comes from the catalog rather than the working
+          # tree: a service that declares REST is still required to commit a spec by that step, and
+          # declaring REST while publishing no operationIds still fails here. Removing the
+          # declaration is a CODEOWNERS-guarded catalog edit, not a file deletion.
+          if [[ "${HAS_REST}" != "true" ]]; then
+            echo "${spec} is committed but the catalog declares no REST interface, so its"
+            echo "operationIds are not public identifiers and are not governed."
+            echo "Per ADR-0093 rule 4 this document should be pruned rather than governed."
+            exit 0
+          fi
+
+          python3 .central/scripts/check_operation_ids.py --check
 
   # ── integration ─────────────────────────────────────────────────────────────────────────────
   # Absorbs the per-repo integration-tests.yml: 35 copies, of which 21 were byte-identical and the
