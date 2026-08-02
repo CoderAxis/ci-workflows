@@ -7,7 +7,11 @@ name: Reusable Deploy (canonical build + dev pin)
 #     deploy:
 #       uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yaml@v1
 #       with: { service_name: auth-service }
-#       secrets: inherit
+#
+# The caller passes NO secrets — see the `workflow_call` note below. This example used to end in
+# `secrets: inherit`, and four callers copied it into an explicit `CROSS_REPO_TOKEN:` forward when
+# the secrets block was removed here. Naming a secret this workflow does not declare fails the
+# caller's run at startup, so their Deploy had been dead since, in one second and with no log.
 #
 # Model (RFC-0020 / ADR-0051 — build once, deploy the digest):
 #   CI does NOT build. The self-hosted runners have no Docker daemon and are not
@@ -148,7 +152,19 @@ permissions:
 
 concurrency:
   group: inboxxhq-${{ github.repository }}-build-${{ github.ref }}
-  cancel-in-progress: true
+  # Queue the newer run; do NOT cancel the older one. Cancelling here does not cancel what the run
+  # has already started — the canonical build is a CodeBuild job launched by an API call, and it
+  # keeps running to completion after GitHub stops watching it. So cancel-in-progress produced the
+  # exact overlap the group exists to prevent, only with the surviving build now unsupervised:
+  #
+  #   web-docs, 2026-08-02. A push and a core-docs-updated dispatch fired two minutes apart for one
+  #   revision. GitHub cancelled the push run at 2m16s; its build ran on and published the shared
+  #   content-addressed tag at 13:38:30. The dispatch run had already probed for that tag before it
+  #   existed, so it built for twelve minutes and had its push rejected as immutable at 13:40:49.
+  #
+  # Waiting costs a queued run. The buildspec's build-once probe then finds the tag the first run
+  # published and skips the rebuild entirely, so the second run is short rather than duplicated.
+  cancel-in-progress: false
 
 jobs:
   # Identity is derived here, not accepted. Inside a reusable workflow GITHUB_REPOSITORY_ID is
@@ -607,6 +623,9 @@ jobs:
           BUILD_PROJECT: ${{ inputs.build_project }}
           SERVICE_NAME: ${{ needs.resolve.outputs.service }}
           GITHUB_TOKEN: ${{ steps.module_token.outputs.token }}
+          # Enough to carry a Docker build's failing step and its output, which is what the tail
+          # usually has to show; small enough that the step log stays readable.
+          BUILD_LOG_TAIL_LINES: "120"
         run: |
           set -euo pipefail
           SERVICE_DIR="${{ github.event.repository.name }}"
@@ -639,7 +658,40 @@ jobs:
             STATUS="$(printf '%s' "${BUILD_JSON}" | jq -r '.builds[0].buildStatus // empty')"
             case "${STATUS}" in
               SUCCEEDED) echo "Canonical build SUCCEEDED"; break ;;
-              FAILED|FAULT|STOPPED|TIMED_OUT) echo "::error::canonical build ${STATUS}"; exit 1 ;;
+              FAILED|FAULT|STOPPED|TIMED_OUT)
+                echo "::error::canonical build ${STATUS}"
+                # Everything below is the failure report. Without it this step's entire account of
+                # a failed build is the status word above and a console deeplink, and reading that
+                # deeplink needs AWS credentials for the management account — so the person looking
+                # at the red run is usually not the person who can find out why it is red.
+                #
+                # None of it may fail the step: the build has already failed and exit 1 below is the
+                # outcome. A missing permission or a rotated-away log stream must degrade to less
+                # detail, never to a different error than the real one.
+                printf '%s' "${BUILD_JSON}" | jq -r '
+                  .builds[0].phases[]?
+                  | select(.phaseStatus != null and .phaseStatus != "SUCCEEDED")
+                  | "failed phase: \(.phaseType) (\(.phaseStatus))"
+                    + (if (.contexts[0].message // "") != "" then "\n\(.contexts[0].message)" else "" end)
+                ' || true
+                LOG_GROUP="$(printf '%s' "${BUILD_JSON}" | jq -r '.builds[0].logs.groupName // empty')"
+                LOG_STREAM="$(printf '%s' "${BUILD_JSON}" | jq -r '.builds[0].logs.streamName // empty')"
+                if [[ -n "${LOG_GROUP}" && -n "${LOG_STREAM}" ]]; then
+                  echo "--- last ${BUILD_LOG_TAIL_LINES} lines of ${LOG_GROUP}/${LOG_STREAM} ---"
+                  # No --start-from-head, so this is the tail. The build's own error is the last
+                  # thing it printed, which is the part that names a broken step or a rejected push.
+                  aws logs get-log-events \
+                    --region "${AWS_REGION}" \
+                    --log-group-name "${LOG_GROUP}" \
+                    --log-stream-name "${LOG_STREAM}" \
+                    --limit "${BUILD_LOG_TAIL_LINES}" \
+                    --no-cli-pager \
+                    --query 'events[].message' \
+                    --output text 2>&1 \
+                    || echo "(build log unreadable from here; the deploy role may lack logs:GetLogEvents)"
+                fi
+                exit 1
+                ;;
               *) sleep 15 ;;
             esac
           done
