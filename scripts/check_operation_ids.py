@@ -31,9 +31,23 @@ Each entry carries `operationId`, `since` (the info.version that introduced it),
 regenerations. The registry is machine-readable and validated against
 `docs/openapi.operationids.schema.json`; the governance policy lives in ADR-0006.
 
+BOUNDED CONTEXTS ARE PER SERVICE, so the lock declares its own vocabulary in a
+top-level `boundedContexts` array and this script has no fleet-wide list of its
+own. There is no vocabulary that could be correct for every service: the prefix
+is the service's own domain language, so a single shared tuple is only ever right
+for whichever service it was drawn from and rejects every legitimate name
+everywhere else.
+
+Declaring it is mandatory rather than optional. Treating an absent vocabulary as
+"skip the prefix rule" would let a service pass this gate by deleting a line,
+which is the failure mode where a check reports success because it is no longer
+looking at anything. The lock is CODEOWNERS-guarded, so widening the vocabulary
+to admit a new prefix is a reviewable diff, exactly like adding an operationId.
+
 Usage:
     python3 scripts/check_operation_ids.py --check
     python3 scripts/check_operation_ids.py --write
+    python3 scripts/check_operation_ids.py --write --contexts order,catalog,pricing
 """
 from __future__ import annotations
 
@@ -47,8 +61,6 @@ SPEC_PATH = Path("docs/openapi.json")
 LOCK_PATH = Path("docs/openapi.operationids.lock.json")
 SCHEMA_REF = "./openapi.operationids.schema.json"
 
-# Bounded contexts allowed as the operationId prefix (ADR-0006).
-BOUNDED_CONTEXTS = ("auth", "token", "identity", "platform", "session")
 # Exposure tiers, from most to least exposed (ADR-0006). Carried in metadata, not
 # in the operationId itself — so names stay resource-first and consistent.
 VISIBILITIES = ("public", "partner", "admin", "internal")
@@ -76,7 +88,24 @@ def load_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def spec_operation_ids(spec: dict) -> dict[str, tuple[str, str]]:
+def lock_bounded_contexts(lock: dict) -> tuple[str, ...]:
+    """Return the service's declared operationId prefixes, refusing an absent one."""
+    raw = lock.get("boundedContexts")
+    if not raw:
+        die(
+            f"{LOCK_PATH} declares no boundedContexts. Add the domain prefixes this "
+            "service's operationIds may start with, e.g. "
+            '"boundedContexts": ["order", "catalog"] — see ADR-0006'
+        )
+    if not isinstance(raw, list) or not all(isinstance(c, str) for c in raw):
+        die("boundedContexts must be an array of strings")
+    bad = [c for c in raw if not NAME_RE.match(c)]
+    if bad:
+        die(f"boundedContexts entries must be lowerCamelCase: {bad}")
+    return tuple(raw)
+
+
+def spec_operation_ids(spec: dict, contexts: tuple[str, ...]) -> dict[str, tuple[str, str]]:
     """Return {operationId: (METHOD, path)} and validate structural rules."""
     out: dict[str, tuple[str, str]] = {}
     errors: list[str] = []
@@ -97,11 +126,11 @@ def spec_operation_ids(spec: dict) -> dict[str, tuple[str, str]]:
                 errors.append(f"operationId {oid!r} is not lowerCamelCase")
             elif not any(
                 oid == ctx or (oid.startswith(ctx) and oid[len(ctx)].isupper())
-                for ctx in BOUNDED_CONTEXTS
+                for ctx in contexts
             ):
                 errors.append(
                     f"operationId {oid!r} does not start with a bounded context "
-                    f"{BOUNDED_CONTEXTS}"
+                    f"{contexts}"
                 )
             out[oid] = (method.upper(), path)
     if errors:
@@ -155,7 +184,7 @@ def validate_lock_metadata(lock: dict) -> None:
 def do_check() -> None:
     spec = load_json(SPEC_PATH)
     lock = load_json(LOCK_PATH)
-    ids = set(spec_operation_ids(spec))
+    ids = set(spec_operation_ids(spec, lock_bounded_contexts(lock)))
     validate_lock_metadata(lock)
     lock_ids = set(lock_operations(lock))
     spec_version = str(spec.get("info", {}).get("version", ""))
@@ -182,13 +211,21 @@ def do_check() -> None:
     print(f"ok: {len(ids)} operationIds governed, lock in sync at v{spec_version}")
 
 
-def do_write() -> None:
+def do_write(contexts_arg: str | None) -> None:
     spec = load_json(SPEC_PATH)
-    spec_ops = spec_operation_ids(spec)
-    ids = set(spec_ops)
     spec_version = str(spec.get("info", {}).get("version", ""))
 
     prev = json.loads(LOCK_PATH.read_text(encoding="utf-8")) if LOCK_PATH.exists() else {}
+    # --contexts is how the vocabulary is set the first time and how it is widened
+    # afterwards; without it the existing declaration carries forward untouched, so
+    # regenerating the lock can never quietly broaden what names are permitted.
+    if contexts_arg:
+        prev = {**prev, "boundedContexts": [c.strip() for c in contexts_arg.split(",") if c.strip()]}
+    contexts = lock_bounded_contexts(prev)
+
+    spec_ops = spec_operation_ids(spec, contexts)
+    ids = set(spec_ops)
+
     prev_ops = lock_operations(prev)
     prev_ids = set(prev_ops)
     prev_version = str(prev.get("version", "0.0.0")) or "0.0.0"
@@ -232,6 +269,7 @@ def do_write() -> None:
     payload = {
         "$schema": SCHEMA_REF,
         "version": spec_version,
+        "boundedContexts": list(contexts),
         "operations": operations,
     }
     LOCK_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -247,11 +285,17 @@ def main() -> None:
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--check", action="store_true", help="CI gate: validate + freshness")
     g.add_argument("--write", action="store_true", help="regenerate the lockfile (semver-enforced)")
+    ap.add_argument(
+        "--contexts",
+        help="comma-separated operationId prefixes to declare, e.g. order,catalog (--write only)",
+    )
     args = ap.parse_args()
     if args.check:
+        if args.contexts:
+            die("--contexts applies to --write; the gate reads the declaration from the lock")
         do_check()
     else:
-        do_write()
+        do_write(args.contexts)
 
 
 if __name__ == "__main__":
