@@ -745,7 +745,39 @@ jobs:
           INFRA_REPO: ${{ inputs.infra_repo }}
         run: |
           set -euo pipefail
-          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${INFRA_REPO}.git" /tmp/platform-infra
+          # Retried because the token is seconds old, and a freshly minted installation token is not
+          # yet honoured by every GitHub replica that might serve this clone. The denial arrives as
+          # "Repository not found" -- byte for byte the 404 returned for a repository the App was
+          # never granted -- so a race reads as a misconfiguration and sends you looking at the App.
+          #
+          # web-docs, 2026-08-02: this step 404'd 0.24s after the mint, and an identical re-run
+          # eleven minutes later cloned first try, same slug, same App, same one-repo scope, nothing
+          # changed in between. What made it expensive is where it sits: the image was already built,
+          # pushed and signed, so a blip discarded the whole run and left the overlay unpinned for a
+          # build that had succeeded. The push below has been retried against races all along; the
+          # clone that has to happen first was the one unguarded call in the step.
+          cloned=""
+          for attempt in 1 2 3 4 5; do
+            if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${INFRA_REPO}.git" /tmp/platform-infra; then
+              cloned="yes"; break
+            fi
+            # A partial clone would make the next attempt fail on a non-empty target for a reason
+            # that has nothing to do with why this one failed.
+            rm -rf /tmp/platform-infra
+            if [ "${attempt}" -lt 5 ]; then sleep $(( attempt * 3 )); fi
+          done
+          if [ -z "${cloned}" ]; then
+            echo "::error::cannot clone ${INFRA_REPO} with the minted gitops token (5 attempts over 30s)"
+            # Worth stating what this is NOT, because the 404 invites the wrong search. The mint
+            # above already asked for a token scoped to this one repository, and GitHub refuses that
+            # request outright if the repository is not in the installation -- so reaching this line
+            # means the App does hold the grant. What is left is Contents dropped to read or revoked,
+            # the repository renamed or transferred out from under inputs.infra_repo, or an org IP
+            # allow list that does not admit GitHub-hosted runners.
+            echo "The grant itself is intact (the mint would have failed otherwise). Check Contents: write on the"
+            echo "inboxxhq-gitops-pin App, that ${INFRA_REPO} still resolves, and the org IP allow list."
+            exit 1
+          fi
           cd /tmp/platform-infra
           git config user.email "ci-bot@inboxxhq.com"
           git config user.name "inboxxhq-ci"
