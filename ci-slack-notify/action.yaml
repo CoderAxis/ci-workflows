@@ -46,9 +46,28 @@ inputs:
     default: ""
   channel:
     description: >-
-      Target channel. Defaults to the SLACK_ALERTS_CHANNEL variable when the
-      status is failure, otherwise SLACK_NOTIFICATIONS_CHANNEL, so routine
-      success traffic does not drown the channel people are paged from.
+      Target channel, overriding the two routed defaults below. Set this only
+      when one call site belongs somewhere other than the rest of CI.
+    required: false
+    default: ""
+  alerts-channel:
+    description: >-
+      Where failures go, so routine success traffic does not drown the channel
+      people are paged from.
+
+      Pass `${{ vars.SLACK_ALERTS_CHANNEL }}`. It has to arrive as an input: a
+      composite action cannot read the `vars` context at all — the runner rejects
+      the reference outright — and even the environment is no way round it,
+      because GitHub only ships a variable to the runner when the JOB's own YAML
+      names it. This was previously read straight from the environment here, which
+      is why it silently resolved to nothing and every message, of every status,
+      went to the fallback channel.
+    required: false
+    default: ""
+  notifications-channel:
+    description: >-
+      Where non-failure traffic goes. Pass `${{ vars.SLACK_NOTIFICATIONS_CHANNEL }}`;
+      same reasoning as alerts-channel.
     required: false
     default: ""
   aws-region:
@@ -67,6 +86,8 @@ runs:
         SLACK_TEXT: ${{ inputs.text }}
         SLACK_FIELDS: ${{ inputs.fields }}
         SLACK_CHANNEL: ${{ inputs.channel }}
+        SLACK_ALERTS_CHANNEL: ${{ inputs.alerts-channel }}
+        SLACK_NOTIFICATIONS_CHANNEL: ${{ inputs.notifications-channel }}
         AWS_REGION: ${{ inputs.aws-region }}
         AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
       run: |
