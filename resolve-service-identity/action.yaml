@@ -85,6 +85,11 @@ outputs:
   role:
     description: "Messaging role per ENTERPRISE_NOTIFICATION_PATTERN §7, derived not declared."
     value: ${{ steps.resolve.outputs.role }}
+  allowed_topics:
+    description: >-
+      Comma-separated topics a DK/Hybrid repo's direct producer may publish to, from the
+      catalog. Empty for every other role, which is what the compliance gate expects.
+    value: ${{ steps.resolve.outputs.allowed_topics }}
   capabilities:
     description: "Dockerfile capability set from the platform's capability matrix."
     value: ${{ steps.resolve.outputs.capabilities }}

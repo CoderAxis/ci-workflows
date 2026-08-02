@@ -101,6 +101,7 @@ jobs:
       has_events: ${{ steps.id.outputs.has_events }}
       coverage_threshold: ${{ steps.id.outputs.coverage_threshold }}
       role: ${{ steps.id.outputs.role }}
+      allowed_topics: ${{ steps.id.outputs.allowed_topics }}
       capabilities: ${{ steps.id.outputs.capabilities }}
     steps:
       # One shared implementation, used identically by deploy-reusable.yaml. Two copies of
@@ -524,6 +525,13 @@ jobs:
     uses: coderaxis/github-actions/.github/workflows/event-handling-compliance.yaml@v1
     with:
       role: ${{ needs.resolve.outputs.role }}
+      # Required whenever the role sanctions a direct producer, and passing it is what makes
+      # Hybrid reachable at all. The gate has always taken this input and the catalog has always
+      # been able to declare the role, but nothing carried the topics between them -- so a
+      # service in exactly the situation Hybrid describes (owns Postgres AND one latency-critical
+      # stream) could only ever fail, first for producing directly, then for producing to an
+      # undeclared topic. Empty for every other role, which is what the gate expects.
+      allowed_topics: ${{ needs.resolve.outputs.allowed_topics }}
 
   seeding:
     name: Seeding contract
