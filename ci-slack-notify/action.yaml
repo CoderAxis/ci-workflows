@@ -55,19 +55,28 @@ inputs:
       Where failures go, so routine success traffic does not drown the channel
       people are paged from.
 
-      Pass `${{ vars.SLACK_ALERTS_CHANNEL }}`. It has to arrive as an input: a
-      composite action cannot read the `vars` context at all — the runner rejects
-      the reference outright — and even the environment is no way round it,
-      because GitHub only ships a variable to the runner when the JOB's own YAML
-      names it. This was previously read straight from the environment here, which
-      is why it silently resolved to nothing and every message, of every status,
-      went to the fallback channel.
+      Pass the caller's SLACK_ALERTS_CHANNEL repository variable. It has to arrive
+      as an input: a composite action cannot read the vars context at all — the
+      runner rejects the reference outright — and even the environment is no way
+      round it, because GitHub only ships a variable to the runner when the JOB's
+      own YAML names it. This was previously read straight from the environment
+      here, which is why it silently resolved to nothing and every message, of
+      every status, went to the fallback channel.
+
+      Write that variable reference at the CALL SITE, never in this file. An
+      expression is evaluated wherever it appears, including inside a description,
+      and this action has no vars context to evaluate it against — so naming it
+      here fails to parse the whole file rather than documenting anything. That is
+      not hypothetical: spelling it out in this very paragraph took down every
+      Notify job in the fleet, each one dying at "Set up job" on an unrecognised
+      named-value long before it could reach a step.
     required: false
     default: ""
   notifications-channel:
     description: >-
-      Where non-failure traffic goes. Pass `${{ vars.SLACK_NOTIFICATIONS_CHANNEL }}`;
-      same reasoning as alerts-channel.
+      Where non-failure traffic goes. Pass the caller's
+      SLACK_NOTIFICATIONS_CHANNEL repository variable; same reasoning, and the
+      same parsing constraint, as alerts-channel.
     required: false
     default: ""
   aws-region:
