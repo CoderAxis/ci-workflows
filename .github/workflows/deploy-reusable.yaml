@@ -860,6 +860,11 @@ jobs:
       - uses: coderaxis/github-actions/ci-slack-notify@v1
         with:
           status: failure
+          # Forwarded because the action cannot reach `vars` itself, and in a reusable workflow
+          # these resolve against the CALLER, so a repository may route its own deploy alerts
+          # without the central workflow knowing anything about it.
+          alerts-channel: ${{ vars.SLACK_ALERTS_CHANNEL }}
+          notifications-channel: ${{ vars.SLACK_NOTIFICATIONS_CHANNEL }}
           title: Deploy failed
           text: >-
             ${{ needs.resolve.outputs.service || github.repository }} did not deploy: failed at

@@ -1996,6 +1996,10 @@ jobs:
       - uses: coderaxis/github-actions/ci-slack-notify@v1
         with:
           status: failure
+          # See the note at the deploy-reusable call site: the action cannot read `vars`, and
+          # these resolve against the calling repository rather than this one.
+          alerts-channel: ${{ vars.SLACK_ALERTS_CHANNEL }}
+          notifications-channel: ${{ vars.SLACK_NOTIFICATIONS_CHANNEL }}
           title: CI failed
           text: "Failed gates: ${{ steps.summary.outputs.failed }}"
           fields: |
