@@ -1410,6 +1410,49 @@ jobs:
           git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
           GOWORK=off go mod download
 
+      # ── the packaging preflight ──────────────────────────────────────────────────────────
+      # The canonical library reaches a lone-repo checkout through the Go module graph, and
+      # that mechanism is sound: a module zip ships non-Go files, so platform-shared-go's
+      # tooling/*.sh arrive in the module cache alongside cmd/openapi-normalize.
+      #
+      # But it only works for a pin whose RELEASE actually contains the library. A repo pinned
+      # to a version cut before it was added resolves the module fine, finds no library at
+      # tooling/openapi/lib/swagger.sh, and dies on the `source` line with bash's own
+      # "No such file or directory" - which reads as a broken script rather than a stale pin.
+      #
+      # This is the workstation/CI split that started the whole incident, in a new costume: a
+      # developer with a go.work resolves to the live checkout and sees the library, CI resolves
+      # to the pinned zip and does not. So it is asserted BEFORE the generator runs, and the
+      # failure names the pin, the resolved directory, and the fix.
+      - name: Preflight — the pinned platform-shared-go must carry the generator library
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -f scripts/swagger.sh ]] || { echo "::notice::no scripts/swagger.sh; nothing to preflight."; exit 0; }
+
+          MOD=github.com/coderaxis/platform-shared-go
+          LIB_REL=tooling/openapi/lib/swagger.sh
+
+          # GOWORK=off deliberately: it reproduces what CI resolves rather than what a
+          # workstation would, so this step cannot pass here for a reason that will not hold.
+          pinned="$(GOWORK=off go list -m -f '{{.Version}}' "${MOD}" 2>/dev/null || true)"
+          dir="$(GOWORK=off go list -m -f '{{.Dir}}' "${MOD}" 2>/dev/null || true)"
+
+          if [[ -z "${pinned}" ]]; then
+            echo "::error::this repo runs scripts/swagger.sh but does not require ${MOD}, so the generator library cannot be resolved. Add the dependency, or generate via the openapicontract engine."
+            exit 1
+          fi
+          if [[ -z "${dir}" || ! -d "${dir}" ]]; then
+            echo "::error::${MOD}@${pinned} is required but was not downloaded into the module cache."
+            exit 1
+          fi
+
+          if [[ ! -f "${dir}/${LIB_REL}" ]]; then
+            echo "::error::${MOD}@${pinned} does not contain ${LIB_REL}, so the generator cannot run in a single-repo checkout. The library is present on platform-shared-go's default branch but was not in this release. Cut a platform-shared-go release that includes it and bump this repo's pin to at least that version. Resolved module dir: ${dir}"
+            exit 1
+          fi
+          echo "Generator library present in ${MOD}@${pinned}."
+
       - name: Run the generator and require normalization to execute
         id: generate
         shell: bash
