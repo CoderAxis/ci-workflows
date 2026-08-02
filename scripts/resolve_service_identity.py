@@ -113,6 +113,24 @@ def resolve_role(entry: dict, *, has_events: bool, owns_db: bool) -> str:
     return "P" if owns_db else "DK"
 
 
+def resolve_allowed_topics(entry: dict) -> str:
+    """Topics a DK/Hybrid repo's direct producer may publish to, comma-separated.
+
+    Read from the same catalog block as the role, because the two are one decision: a role
+    that sanctions a direct producer is meaningless without saying what it may produce, and
+    the compliance gate refuses a DK/Hybrid repo that declares no allowlist.
+
+    Nothing supplied this before. The gate has always accepted an allowed_topics input and
+    the catalog has always been able to declare Hybrid, but no code carried one to the
+    other - so declaring Hybrid bought a repo a different failure rather than a pass, and
+    the exception the pattern document describes could not actually be taken.
+    """
+    topics = (entry.get("messaging") or {}).get("allowedTopics") or []
+    if isinstance(topics, str):
+        topics = [topics]
+    return ",".join(str(t).strip() for t in topics if str(t).strip())
+
+
 def resolve_capabilities(catalog_root: pathlib.Path, repo_name: str, *, deployable: bool) -> list[str]:
     """Read the platform's capability matrix. Keyed on the catalog's name, not GitHub's."""
     matrix_path = (
@@ -309,6 +327,7 @@ def resolve(catalog_root: pathlib.Path, repo_full: str, repo_id: int,
         "has_events": str(has_events).lower(),
         "coverage_threshold": coverage_override or TIER_COVERAGE.get(tier, DEFAULT_COVERAGE),
         "role": resolve_role(entry, has_events=has_events, owns_db=owns_db),
+        "allowed_topics": resolve_allowed_topics(entry),
         "capabilities": ",".join(
             resolve_capabilities(catalog_root, want or repo, deployable=deployable)
         ),
