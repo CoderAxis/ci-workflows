@@ -9,7 +9,7 @@ The invariant, in one line:
 Both halves matter, and only one of them was ever checked. service-ci.yaml gates the
 `contract` and `openapi-generator` jobs on `has_rest`, which is derived from the catalog -
 so a service that declares no REST interface has its spec validated by nothing, regenerated
-by nothing, and drift-checked by nothing. Twelve services in this fleet are in exactly that
+by nothing, and drift-checked by nothing. Thirteen services in this fleet are in exactly that
 position: they ship docs/openapi.json, they declare only gRPC (or nothing), and no CI lane
 has ever read the document they publish. The gate that would have caught it is the one
 nobody wrote, because `has_rest == false` reads as "not applicable" rather than as "this
