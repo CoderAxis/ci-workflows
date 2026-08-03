@@ -313,28 +313,54 @@ jobs:
           #  - it does not, and this run DID publish -> latest.json is now a copy of the very spec
           #    being judged. Comparing them would pass for every possible change. Report that the
           #    comparison did not happen instead of reporting that it passed.
+          # `dangling` separates the two reasons the fetch below can come back empty-handed, which
+          # are not the same failure and must not share a verdict. A version the catalogue names
+          # is a promise the registry is supposed to keep, so its absence is a genuine
+          # disagreement. latest.json is not promised by anything: publication is opt-in per
+          # service, so a service that never had it enabled has no baseline to be missing.
           if [ -n "${RELEASED}" ]; then
             path="${SERVICE}/${RELEASED}.json"
             label="the contract released in dev (${RELEASED})"
+            dangling=true
           elif [ -z "${PUBLISHED_THIS_RUN}" ]; then
             path="${SERVICE}/latest.json"
             label="the published contract (nothing released recorded for dev yet)"
+            dangling=false
           else
             echo "compare=false" >> "${GITHUB_OUTPUT}"
             echo "::notice::${SERVICE} has no contract recorded for dev, and this run published ${PUBLISHED_THIS_RUN}, so latest.json is this same document. The breaking-change comparison is SKIPPED, not passed; it starts working once dev has one recorded deploy."
             exit 0
           fi
 
-          if ! curl -sSL --fail \
-                 -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
-                 -H "Accept: application/vnd.github.raw" \
-                 "https://api.github.com/repos/${{ inputs.contract_repo }}/contents/${path}" \
-                 -o /tmp/published-contract.json; then
+          # Read the status rather than using --fail, because --fail collapses "the registry does
+          # not have this document" and "the registry did not answer" into one exit code. They
+          # need opposite handling: an absent baseline can be a legitimate state, an unusable
+          # registry never is, and reporting a revoked token as a missing contract sends whoever
+          # reads the run to the wrong repository.
+          status="$(curl -sSL -o /tmp/published-contract.json -w '%{http_code}' \
+                      -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
+                      -H "Accept: application/vnd.github.raw" \
+                      "https://api.github.com/repos/${{ inputs.contract_repo }}/contents/${path}")" \
+                    || status="000"
+
+          if [ "${status}" = "200" ]; then
+            echo "compare=true" >> "${GITHUB_OUTPUT}"
+            echo "Comparing against ${label} ($(wc -c < /tmp/published-contract.json) bytes)"
+            exit 0
+          fi
+
+          if [ "${status}" != "404" ]; then
+            echo "::error::Reading ${path} from ${{ inputs.contract_repo }} returned HTTP ${status}. The registry is unreachable or this job's token cannot read it; that is not a verdict on the contract, so the gate fails rather than assuming either answer."
+            exit 1
+          fi
+
+          if [ "${dangling}" = "true" ]; then
             echo "::error::${path} is recorded as released in dev but is not in the registry. A release pointer that resolves to nothing means the catalogue and the registry disagree."
             exit 1
           fi
-          echo "compare=true" >> "${GITHUB_OUTPUT}"
-          echo "Comparing against ${label} ($(wc -c < /tmp/published-contract.json) bytes)"
+
+          echo "compare=false" >> "${GITHUB_OUTPUT}"
+          echo "::notice::${SERVICE} has never published a contract to ${{ inputs.contract_repo }}, so there is no baseline to compare against and nothing this deploy can break for an existing consumer. The comparison is SKIPPED, not passed; it starts working on the first published spec."
 
       - name: Set up Go (for oasdiff)
         if: steps.baseline.outputs.compare == 'true'
