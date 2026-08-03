@@ -1841,9 +1841,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Checked out under the repository's real name, not a fixed "service" directory.
+      # check_service_docs.py chooses between two required trees by looking at the name of
+      # the directory it is given: a 22-item library profile for a `*-core` module, and the
+      # full 119-item deployable-service tree for everything else. A fixed path meant that
+      # name was always literally "service", so the library profile could never be selected
+      # for any repository in the fleet - it was unreachable code, and every domain core was
+      # being graded against runbooks, on-call procedures and SLOs it will never have.
       - uses: actions/checkout@v4
         with:
-          path: service
+          path: ${{ github.event.repository.name || 'service' }}
 
       - name: Mint a catalog-read token
         id: catalog_token
@@ -1866,7 +1873,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
-          python3 core-docs/scripts/check_service_docs.py --service-dir service
+          python3 core-docs/scripts/check_service_docs.py \
+            --service-dir "${{ github.event.repository.name || 'service' }}"
 
   dependency-review:
     name: Dependency review
