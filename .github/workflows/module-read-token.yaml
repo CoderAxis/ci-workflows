@@ -1,0 +1,81 @@
+name: Module read token
+
+# Mints a short-lived private-module read token for a caller whose job is NOT defined in a
+# central workflow, and hands it back as a workflow output.
+#
+# WHY THIS INDIRECTION IS NEEDED. inboxxhq-ci-app-token-read's trust policy admits an OIDC
+# job_workflow_ref of `coderaxis/github-actions/.github/workflows/*@refs/tags/v1` (plus a short
+# named-exception list) - see infra's ci-app-token.tf and app-token-selftest.yaml's header for the
+# same reasoning applied to this repository's own guard. job_workflow_ref names the workflow the
+# JOB IS DEFINED IN, not the entry point, together with the ref that definition was loaded from.
+# A job defined directly in a CONSUMER repository's own ci.yaml therefore presents
+# `<repo>/ci.yaml@refs/heads/main` (or `@refs/pull/N/merge`), which the wildcard cannot match -
+# and that is deliberate: a service repo must not be able to reach the broker by writing its own
+# workflow.
+#
+# The fleet's normal answer is to not have a local ci.yaml at all: a thin caller of
+# service-ci.yaml puts the actual mint inside a job DEFINED in this repository, so its claim
+# carries `@refs/tags/v1` and matches. That answer does not fit every repository. service-ci.yaml
+# resolves `repo_kind` from the service catalog and only knows the deployable/core/schema shapes,
+# each built around a service or a Go module published for other repos to import; a platform tool
+# with no service.contract.yaml and nothing to deploy has no shape there to resolve to, and
+# forcing it into the catalog to borrow a shape that does not describe it would be a worse fix
+# than the problem.
+#
+# This workflow is the same trick app-token-selftest.yaml already uses: put ONLY the mint in a
+# reusable workflow published from here, so a caller's job_workflow_ref becomes
+# `module-read-token.yaml@refs/tags/v1` regardless of what its own ci.yaml looks like. No change
+# to the trust policy, because the wildcard already admits any workflow file in this directory at
+# `@refs/tags/v1`.
+#
+# Scope is fixed at `read`. A caller that needs the write-scoped identities (publish, gitops,
+# contracts) is a different problem with a deliberately narrower allowlist; see ci-app-token.tf.
+#
+# The token is a workflow OUTPUT, which travels through the same workflow-command stream ordinary
+# step outputs do (masked, but visible to anyone who can read this run's API). That is the same
+# exposure ci-app-token's own `token` output already has for every job that mints inline; this
+# adds no new category of exposure, only a hop.
+
+on:
+  workflow_call:
+    inputs:
+      extra-owners:
+        description: >-
+          Passed through to ci-app-token's `extra-owners`. Space- or comma-separated account
+          names beyond the default `coderaxis` to also mint for.
+        required: false
+        type: string
+        default: ""
+      repositories:
+        description: >-
+          Passed through to ci-app-token's `repositories`, narrowing the token to specific repos
+          rather than the whole installation.
+        required: false
+        type: string
+        default: ""
+    outputs:
+      token:
+        description: "Short-lived module-read token (~1h) for github.com/coderaxis. Already masked in logs."
+        value: ${{ jobs.mint.outputs.token }}
+
+permissions:
+  contents: read
+
+jobs:
+  mint:
+    name: Mint module-read token
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      token: ${{ steps.modauth.outputs.token }}
+    steps:
+      - name: Mint module-read token
+        id: modauth
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          extra-owners: ${{ inputs.extra-owners }}
+          repositories: ${{ inputs.repositories }}
