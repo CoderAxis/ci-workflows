@@ -821,10 +821,19 @@ jobs:
                  "${WITHHELD}. They will not receive ${MODULE} ${VERSION} until the cycle is broken."
           fi
 
-          if [[ "${RESULT}" != "success" ]]; then
+          # No consumers is not a failure to bump - bump-consumers is deliberately skipped
+          # (needs.release.outputs.consumers != '[]') when the graph names none, so RESULT is
+          # 'skipped' in exactly the case where there was nothing to do. Conflating that with a
+          # bump that ran and failed is what made every zero-consumer core (a module scaffolded
+          # ahead of its first consumer, e.g. a fresh domain split) permanently red on every
+          # release, regardless of whether the release itself was fine.
+          if [[ "${CONSUMERS}" == "[]" ]]; then
+            echo "no consumers declared for ${MODULE} - nothing to bump"
+          elif [[ "${RESULT}" != "success" ]]; then
             echo "::error::fan-out result was '${RESULT}'. ${MODULE} ${VERSION} is published but at" \
                  "least one consumer was not bumped, so it will keep building against the old" \
                  "version. Re-run this job to retry the bump."
             exit 1
+          else
+            echo "every consumer the artifact graph declares was bumped"
           fi
-          echo "every consumer the artifact graph declares was bumped"
