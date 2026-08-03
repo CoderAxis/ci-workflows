@@ -1966,9 +1966,19 @@ jobs:
     needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
             dockerfile, structure, vulnerabilities, sqlc, docs, contracts, contract,
             openapi-generator, lanes, integration, e2e]
+    # workflow_dispatch counts alongside push, and deliberately so. A central pipeline change
+    # ships by moving @v1, which raises no event in a service repo, and `gh run rerun` replays
+    # the workflow definition the original run resolved rather than the current one. Without
+    # this, the only way to pick up a central fix in the deploy path was an empty commit to
+    # main - which is exactly what the manual trigger was added to every repo to avoid, and it
+    # left thirty repositories able to re-run their tests but never their delivery.
+    #
+    # It grants nothing new: the ref guard below still restricts this to main, dispatching
+    # requires write access, and the commit delivered is the same one a push of that ref would
+    # have delivered. pull_request stays excluded.
     if: |
       always()
-      && github.event_name == 'push'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && github.ref == 'refs/heads/main'
       && needs.resolve.outputs.deployable == 'true'
       && !contains(needs.*.result, 'failure')
