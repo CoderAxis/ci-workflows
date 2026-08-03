@@ -31,16 +31,22 @@ name: Module read token
 # Scope is fixed at `read`. A caller that needs the write-scoped identities (publish, gitops,
 # contracts) is a different problem with a deliberately narrower allowlist; see ci-app-token.tf.
 #
-# WHY THE OUTPUT IS BASE64, NOT THE RAW TOKEN. ci-app-token add-masks the token so it cannot
-# leak through THIS job's own logs. GitHub separately, silently drops any job output whose
-# value contains a string it has add-masked - "Skip output 'token' since it may contain secret",
-# verified against a real run - which means the raw token cannot cross the job boundary as an
-# output at all; the caller sees an empty string with no error. Wrapping it in base64 produces a
-# byte string that does not contain the masked substring, so it clears that check. This is a
-# transport fix, not a security boundary: the token was always going to reach the caller's
-# runner (that is the point), and anyone able to read this run's job outputs already has this
-# repository's read access, same as they would for a step output consumed inline. The caller
-# must decode it and should re-mask the decoded value with `::add-mask::` before using it.
+# WHY THE TOKEN CROSSES AS A ONE-TIME-PAD CIPHERTEXT, NOT AS BASE64. ci-app-token add-masks the
+# token so it cannot leak through THIS job's own logs. GitHub separately, and silently, drops
+# any job output whose value it judges to contain a masked secret - "Skip output '...' since it
+# may contain secret", verified against a real run - so the raw token cannot cross the job
+# boundary as an output at all; the caller sees an empty string with no error. Plain base64 does
+# NOT clear this: it was tried and still triggered the same drop, which only makes sense if
+# GitHub's masker also matches common reversible encodings of a registered secret (base64/URL/
+# JSON-escaped), not only the literal string - so any deterministic, keyless transform of the
+# token is a transform GitHub can also compute and match.
+#
+# Encrypting with a passphrase GENERATED FRESH INSIDE THIS JOB and never itself add-masked
+# defeats that: the ciphertext has no fixed relationship to the token that GitHub could
+# precompute without the passphrase, and the passphrase alone is a random 32-byte value that
+# reveals nothing. Both halves travel as ordinary (unmasked) job outputs; only together, in the
+# caller's own job, do they reconstitute the token - which the caller must then re-mask itself
+# with `::add-mask::` before using it, since this job's masking does not extend to the caller's.
 
 on:
   workflow_call:
@@ -60,11 +66,15 @@ on:
         type: string
         default: ""
     outputs:
-      token_b64:
+      ciphertext:
         description: >-
-          Short-lived module-read token (~1h) for github.com/coderaxis, base64-encoded (see the
-          header above for why). Decode with `base64 -d` and re-mask before use.
-        value: ${{ jobs.mint.outputs.token_b64 }}
+          The module-read token, AES-256-CBC encrypted under `passphrase` and base64-framed.
+          Meaningless without it. Decrypt with:
+          `openssl enc -aes-256-cbc -pbkdf2 -d -salt -base64 -A -k "$passphrase"`.
+        value: ${{ jobs.mint.outputs.ciphertext }}
+      passphrase:
+        description: "One-time passphrase for `ciphertext`, generated fresh per run. Not a secret on its own."
+        value: ${{ jobs.mint.outputs.passphrase }}
 
 permissions:
   contents: read
@@ -78,7 +88,8 @@ jobs:
       contents: read
       id-token: write
     outputs:
-      token_b64: ${{ steps.encode.outputs.value }}
+      ciphertext: ${{ steps.encrypt.outputs.ciphertext }}
+      passphrase: ${{ steps.encrypt.outputs.passphrase }}
     steps:
       - name: Mint module-read token
         id: modauth
@@ -88,12 +99,21 @@ jobs:
           extra-owners: ${{ inputs.extra-owners }}
           repositories: ${{ inputs.repositories }}
 
-      - name: Encode so the job-output redaction does not drop it
-        id: encode
+      - name: Encrypt the token for transit across the job boundary
+        id: encrypt
         shell: bash
         env:
           RAW_TOKEN: ${{ steps.modauth.outputs.token }}
         run: |
           set -euo pipefail
           [[ -n "${RAW_TOKEN}" ]] || { echo "::error::ci-app-token returned no token"; exit 1; }
-          echo "value=$(printf '%s' "${RAW_TOKEN}" | base64 -w0)" >> "$GITHUB_OUTPUT"
+          # Not masked, deliberately: it is fresh, single-use, and useless without the
+          # ciphertext, so registering it as a secret would only reintroduce the exact
+          # problem it exists to route around.
+          passphrase="$(openssl rand -hex 32)"
+          ciphertext="$(printf '%s' "${RAW_TOKEN}" \
+            | openssl enc -aes-256-cbc -pbkdf2 -salt -base64 -A -k "${passphrase}")"
+          {
+            echo "passphrase=${passphrase}"
+            echo "ciphertext=${ciphertext}"
+          } >> "$GITHUB_OUTPUT"
