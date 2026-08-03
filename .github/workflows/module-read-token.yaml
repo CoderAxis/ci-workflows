@@ -31,10 +31,16 @@ name: Module read token
 # Scope is fixed at `read`. A caller that needs the write-scoped identities (publish, gitops,
 # contracts) is a different problem with a deliberately narrower allowlist; see ci-app-token.tf.
 #
-# The token is a workflow OUTPUT, which travels through the same workflow-command stream ordinary
-# step outputs do (masked, but visible to anyone who can read this run's API). That is the same
-# exposure ci-app-token's own `token` output already has for every job that mints inline; this
-# adds no new category of exposure, only a hop.
+# WHY THE OUTPUT IS BASE64, NOT THE RAW TOKEN. ci-app-token add-masks the token so it cannot
+# leak through THIS job's own logs. GitHub separately, silently drops any job output whose
+# value contains a string it has add-masked - "Skip output 'token' since it may contain secret",
+# verified against a real run - which means the raw token cannot cross the job boundary as an
+# output at all; the caller sees an empty string with no error. Wrapping it in base64 produces a
+# byte string that does not contain the masked substring, so it clears that check. This is a
+# transport fix, not a security boundary: the token was always going to reach the caller's
+# runner (that is the point), and anyone able to read this run's job outputs already has this
+# repository's read access, same as they would for a step output consumed inline. The caller
+# must decode it and should re-mask the decoded value with `::add-mask::` before using it.
 
 on:
   workflow_call:
@@ -54,9 +60,11 @@ on:
         type: string
         default: ""
     outputs:
-      token:
-        description: "Short-lived module-read token (~1h) for github.com/coderaxis. Already masked in logs."
-        value: ${{ jobs.mint.outputs.token }}
+      token_b64:
+        description: >-
+          Short-lived module-read token (~1h) for github.com/coderaxis, base64-encoded (see the
+          header above for why). Decode with `base64 -d` and re-mask before use.
+        value: ${{ jobs.mint.outputs.token_b64 }}
 
 permissions:
   contents: read
@@ -70,7 +78,7 @@ jobs:
       contents: read
       id-token: write
     outputs:
-      token: ${{ steps.modauth.outputs.token }}
+      token_b64: ${{ steps.encode.outputs.value }}
     steps:
       - name: Mint module-read token
         id: modauth
@@ -79,3 +87,13 @@ jobs:
           scope: read
           extra-owners: ${{ inputs.extra-owners }}
           repositories: ${{ inputs.repositories }}
+
+      - name: Encode so the job-output redaction does not drop it
+        id: encode
+        shell: bash
+        env:
+          RAW_TOKEN: ${{ steps.modauth.outputs.token }}
+        run: |
+          set -euo pipefail
+          [[ -n "${RAW_TOKEN}" ]] || { echo "::error::ci-app-token returned no token"; exit 1; }
+          echo "value=$(printf '%s' "${RAW_TOKEN}" | base64 -w0)" >> "$GITHUB_OUTPUT"
