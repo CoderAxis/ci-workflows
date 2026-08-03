@@ -127,6 +127,22 @@ runs:
             # A warning, never an error. But never silence either: the whole point
             # of centralising this was that the old guard failed without saying so.
             print(f"::warning::Slack notification not sent: {msg}")
+
+        def run_aws(argv, *, env=None):
+            """Never let a slow AWS response turn a notification into a red job.
+
+            An uncaught TimeoutExpired here would exit non-zero with a traceback, so a
+            blip reading the bot token would report the notify step as broken - the very
+            false alarm this action exists to replace. A timeout is returned as an
+            ordinary failure so the caller's skip() path handles it like any other.
+            """
+            try:
+                return subprocess.run(argv, capture_output=True, text=True,
+                                      env=env, timeout=60)
+            except subprocess.TimeoutExpired:
+                class TimedOut:
+                    returncode, stdout, stderr = 1, "", "the AWS call timed out after 60s"
+                return TimedOut()
             sys.exit(0)
 
         status = os.environ.get("SLACK_STATUS", "info").lower()
@@ -164,12 +180,11 @@ runs:
         except Exception as e:
             skip(f"could not obtain an OIDC token ({e})")
 
-        sts = subprocess.run(
+        sts = run_aws(
             ["aws", "sts", "assume-role-with-web-identity",
              "--role-arn", ROLE, "--role-session-name", "ci-slack-notify",
              "--web-identity-token", id_token, "--duration-seconds", "900",
              "--query", "Credentials", "--output", "json"],
-            capture_output=True, text=True, timeout=60,
         )
         if sts.returncode != 0:
             skip("this job is not authorised to read the Slack bot token. Expected "
@@ -183,10 +198,10 @@ runs:
                "AWS_SESSION_TOKEN": creds["SessionToken"]}
 
         # 2. Read the token. Masked immediately so nothing downstream can echo it.
-        sm = subprocess.run(
+        sm = run_aws(
             ["aws", "secretsmanager", "get-secret-value", "--secret-id", SECRET,
              "--query", "SecretString", "--output", "text"],
-            capture_output=True, text=True, env=env, timeout=60,
+            env=env,
         )
         if sm.returncode != 0:
             skip(f"could not read {SECRET} ({sm.stderr.strip()[:200]})")

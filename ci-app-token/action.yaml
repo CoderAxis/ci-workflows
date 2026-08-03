@@ -134,6 +134,44 @@ runs:
             print(f"::error::{msg}")
             sys.exit(1)
 
+        # Transient markers only. An AccessDenied or InvalidIdentityToken is the trust
+        # policy refusing this identity - that is the control working, and retrying it
+        # would turn a decisive answer into a slow one, so those fail on the first try.
+        RETRYABLE = ("RequestLimitExceeded", "Throttling", "ThrottlingException",
+                     "ServiceUnavailable", "InternalError", "InternalFailure",
+                     "Unable to locate credentials", "Could not connect",
+                     "EndpointConnectionError", "ConnectTimeoutError",
+                     "ReadTimeoutError", "RequestTimeout")
+
+        def aws(argv, *, env=None, what, attempts=3):
+            """Run an AWS CLI call, retrying only what is worth retrying.
+
+            Both calls this wraps are single network round trips to AWS. Left bare, a
+            TimeoutExpired escaped as an uncaught traceback and failed the job with no
+            actionable message - and because every repository reaches its arch check,
+            GitOps pin and contract publish through this action, one slow STS response
+            read as a fleet-wide breakage rather than the blip it was.
+            """
+            last = ""
+            for attempt in range(1, attempts + 1):
+                try:
+                    r = subprocess.run(argv, capture_output=True, text=True,
+                                       env=env, timeout=60)
+                except subprocess.TimeoutExpired:
+                    last = "timed out after 60s"
+                else:
+                    if r.returncode == 0:
+                        return r
+                    last = r.stderr.strip()[:300]
+                    if not any(m in r.stderr for m in RETRYABLE):
+                        return r
+                if attempt < attempts:
+                    backoff = 2 ** attempt
+                    print(f"::warning::{what} did not complete ({last}); "
+                          f"retrying in {backoff}s ({attempt}/{attempts - 1})")
+                    time.sleep(backoff)
+            fail(f"{what} did not complete after {attempts} attempts: {last}")
+
         def api(url, *, token=None, method="GET", body=None, bearer=False):
             req = urllib.request.Request(url, method=method)
             req.add_header("Accept", "application/vnd.github+json")
@@ -162,12 +200,12 @@ runs:
 
         # 2. Exchange it for AWS credentials. A deny here means the trust policy
         #    rejected this identity, which is the control working, not a bug.
-        sts = subprocess.run(
+        sts = aws(
             ["aws", "sts", "assume-role-with-web-identity",
              "--role-arn", role, "--role-session-name", "ci-app-token",
              "--web-identity-token", id_token, "--duration-seconds", "900",
              "--query", "Credentials", "--output", "json"],
-            capture_output=True, text=True, timeout=60,
+            what="the AWS credential exchange",
         )
         if sts.returncode != 0:
             fail("this job is not authorised to mint an App token. Expected when a "
@@ -180,10 +218,10 @@ runs:
                "AWS_SESSION_TOKEN": creds["SessionToken"]}
 
         # 3. Read the App credential.
-        sm = subprocess.run(
+        sm = aws(
             ["aws", "secretsmanager", "get-secret-value", "--secret-id", secret_id,
              "--query", "SecretString", "--output", "text"],
-            capture_output=True, text=True, env=env, timeout=60,
+            env=env, what=f"reading {secret_id}",
         )
         if sm.returncode != 0:
             fail(f"could not read {secret_id}: {sm.stderr.strip()[:300]}")
