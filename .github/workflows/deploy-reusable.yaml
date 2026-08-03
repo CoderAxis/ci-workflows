@@ -75,6 +75,17 @@ on:
         required: false
         type: string
         default: ""
+      contract_publication_enabled:
+        description: >-
+          Whether this service's pipeline is permitted to publish to the contract registry.
+          The breaking-change gate needs it because a baseline that CI may never refresh is
+          not a contract anyone is serving; it is a document frozen at whatever was last
+          written by hand. Enforcing against such a baseline can only block, never protect,
+          so the gate reports the comparison as skipped rather than failed. Defaults to true,
+          which keeps the strict behaviour for any caller that does not pass it.
+        required: false
+        type: boolean
+        default: true
       aws_region:
         description: "AWS region of the canonical build + central registry."
         required: false
@@ -300,6 +311,7 @@ jobs:
           REGISTRY_TOKEN: ${{ steps.registry_token.outputs.token }}
           RELEASED: ${{ steps.released.outputs.version }}
           PUBLISHED_THIS_RUN: ${{ inputs.api_contract_version }}
+          PUBLICATION_ENABLED: ${{ inputs.contract_publication_enabled }}
           SERVICE: ${{ needs.resolve.outputs.service }}
         run: |
           set -euo pipefail
@@ -307,6 +319,9 @@ jobs:
           #
           #  - dev has a recorded contract  -> compare against exactly that. The question a deploy
           #    asks is whether it breaks what THIS environment's consumers see.
+          #  - it does not, this run published nothing, and publication is DISABLED -> latest.json
+          #    is a baseline no environment serves and no run may refresh, so it can only drift
+          #    further from the code. Nothing can be protected by comparing against it.
           #  - it does not, and this run published nothing -> latest.json is still someone else's
           #    document and remains a real comparison, which is the behaviour that existed before
           #    any of this and is worth keeping while the catalogue fills up.
@@ -322,6 +337,16 @@ jobs:
             path="${SERVICE}/${RELEASED}.json"
             label="the contract released in dev (${RELEASED})"
             dangling=true
+          elif [ -z "${PUBLISHED_THIS_RUN}" ] && [ "${PUBLICATION_ENABLED}" != "true" ]; then
+            # Nothing recorded for dev AND this pipeline may not publish. latest.json is then a
+            # document that no environment serves and that no run is permitted to replace, so it
+            # can only ever go further out of date. Enforcing against it does not protect a
+            # consumer - there is none - it just prevents the spec from ever changing again.
+            # Deliberately narrow: the moment dev records a contract the branch above takes over
+            # and compares strictly, and the moment publication is enabled the branch below does.
+            echo "compare=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::${SERVICE} has no contract recorded for dev and contract publication is disabled for it, so ${SERVICE}/latest.json is a baseline nothing serves and no run may refresh. The breaking-change comparison is SKIPPED, not passed; it starts working once publication is enabled or dev has one recorded deploy."
+            exit 0
           elif [ -z "${PUBLISHED_THIS_RUN}" ]; then
             path="${SERVICE}/latest.json"
             label="the published contract (nothing released recorded for dev yet)"

@@ -1991,6 +1991,10 @@ jobs:
       # publication is opt-in, and a spec that did not change publishes nothing - so the release
       # record omits the field rather than asserting a version it did not verify.
       api_contract_version: ${{ needs.contract.outputs.published-version }}
+      # Same switch the contract job is gated on above. When it is off the registry job is
+      # skipped, so no run can move latest.json and the breaking-change gate would be judging
+      # every future spec against a baseline frozen at whatever was last written there by hand.
+      contract_publication_enabled: ${{ vars.CONTRACT_PUBLISH_ENABLED == 'true' }}
 
   # ── notification ────────────────────────────────────────────────────────────────────────────
   # Centralised here, and this job is a REPLACEMENT rather than an addition. Each per-repo ci.yaml
