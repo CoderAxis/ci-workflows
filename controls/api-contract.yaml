@@ -28,6 +28,13 @@
 #   ADR-0067 - Registry-backed API documentation distribution (no runtime docs)
 #   RFC-0001 - API response envelope
 #   ADR-0006 - operationId naming convention (service-local; promotion to core-docs pending)
+#   RFC-0038 - HTTP protocol semantics at the edge (caching, conditional requests, rate-limit
+#              fields, PATCH media types, content negotiation, trace propagation, security
+#              headers). Its "Machine verification" section names the control for each rule, so
+#              the citation is bidirectional: the RFC states what is enforced and how strictly,
+#              and this catalog binds each rule to a detector.
+#   ADR-0094 - HTTP contract ownership by tier (defines which repositories publish a contract at
+#              all, and therefore which repositories `applies_when: http-api` selects)
 
 version: 1
 domain: api-contract
@@ -35,6 +42,7 @@ policy_ssot:
   - ADR-0048
   - ADR-0067
   - RFC-0001
+  - RFC-0038
 
 controls:
   - id: API-0001
@@ -212,3 +220,243 @@ controls:
       fleet migrates; it rises to `major` once the migration completes.
     detector: no_swaggo_annotation_source
     refs: [ADR-0048, ADR-0012]
+
+  # --- HTTP protocol semantics (RFC-0038) --------------------------------------------------
+  #
+  # The eight controls below enforce RFC-0038, which owns the protocol itself: caching,
+  # conditional requests, rate-limit signalling, partial-update semantics, content negotiation,
+  # trace propagation and security headers. They were added together because the RFC was
+  # written against a measurement, and the measurement is what set each severity: rules with a
+  # small candidate population are enforced hard, rules with a large one ratchet. That is a
+  # property of the fleet on 2026-08-04, not a preference, and RFC-0038 §Adoption records the
+  # numbers so a later reader can check whether they still hold.
+  #
+  # Note the two directions of failure these controls have to cover. A published contract can
+  # promise what the code does not do, and code can do what the contract does not promise. Both
+  # are contract lies and they need different scopes: API-0009 and API-0010 read SOURCE because
+  # the defect is a header the code emits, while API-0011 and API-0013 read the SPEC because the
+  # defect is what the contract tells a client. API-0012 needs both, which is why its scope is
+  # `service` - the whole point of it is that the two disagree.
+
+  - id: API-0008
+    title: Mutable resources support conditional requests
+    owner: platform-architecture
+    scope: spec
+    status: active
+    severity: major
+    applies_when: http-api
+    policy: >-
+      A GET returning a single mutable resource must declare a strong ETag response header, and
+      a PUT, PATCH or DELETE on such a resource must declare the If-Match request header
+      together with 412 Precondition Failed and 428 Precondition Required responses.
+    rationale: >-
+      Without an entity tag a client cannot revalidate cheaply and cannot detect that the
+      resource changed under it, so every concurrent edit is silently last-write-wins. Returning
+      428 rather than proceeding when If-Match is absent is what makes the protection
+      discoverable: a client learns the precondition exists instead of having to know. Measured
+      at adoption there were 55 single-resource reads and 81 unsafe operations on the published
+      surface with zero entity tags and zero preconditions between them, which is why this
+      control ratchets from that measurement rather than failing the fleet on the day it landed.
+    remediation: >-
+      Derive a strong validator from resource state - a version column, a full-precision
+      updated-at, or a hash of the canonical representation - and declare it as an ETag response
+      header. On the unsafe operations declare If-Match and both problem responses, reusing the
+      RFC-0002 error shape; this control adds status codes, never a second error format. A
+      resource a BFF assembles from several upstream calls may legitimately have no single value
+      to derive a tag from, and stays in the baseline until the upstream resource has one.
+    detector: conditional_requests
+    refs: [RFC-0038, RFC-0002]
+
+  - id: API-0009
+    title: A cacheable response declares its cache key
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    applies_when: always
+    policy: >-
+      Runtime code that sets Cache-Control with a directive permitting storage must set Vary in
+      the same handler, naming every request header the body depends on, including Authorization
+      when the response is authenticated. A no-store response needs no Vary, and neither does a
+      response that is genuinely identical for every caller and marked public.
+    rationale: >-
+      Cache-Control tells a cache it may store a response; Vary tells that cache which request
+      headers form the cache key. A response that permits storage without declaring a key leaves
+      the key to the cache's own judgement, which is the URL alone. At adoption the fleet set
+      Cache-Control in 17 handlers and Vary in exactly one - chat-service, for Origin, a CORS
+      concern and not a tenancy one. Nine of the 17 carried no-store and two were public JWKS
+      documents, both correct as written, leaving six sites to fix. There was no cross-tenant
+      leak, because RFC 9111 section 3.5 already stops a shared cache using a stored response to
+      an Authorization-bearing request unless the response opts in, and no caller-dependent
+      response opted in. The rule still holds because that protection is keyed on the credential
+      arriving in Authorization specifically - this platform also carries tenant identity in the
+      RFC-0006 trusted context headers, where section 3.5 gives nothing - and because private
+      excludes shared caches without making a browser cache correct.
+    remediation: >-
+      Add Vary naming the headers the body varies by, which for an authenticated response is
+      Authorization and usually the RFC-0006 organisation header. If the response must never be
+      stored at all, use no-store. If the body is identical for every caller, mark it public and
+      say why in a comment, because a reader who knows this rule will otherwise read the missing
+      Vary as the defect it usually is. Note that this control cannot check the related rule
+      that public must not appear on a caller-dependent response: whether a route is
+      authenticated is not determinable at the line setting the header, so that one is a
+      code-review obligation recorded in RFC-0038 section 2.
+    detector: cache_key_declared
+    refs: [RFC-0038, RFC-0006]
+
+  - id: API-0010
+    title: Rate limits use the standard fields
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    applies_when: always
+    policy: >-
+      X-RateLimit-* response headers are prohibited. A rate-limited response carries the
+      standard rate-limit fields, and a 429 also carries Retry-After.
+    rationale: >-
+      The X- convention has no specification and its common variants disagree on whether the
+      reset value is a delta or an epoch, so a client cannot consume it without knowing which
+      server it is talking to. Retry-After is required alongside because it is the field generic
+      HTTP clients and proxies already understand, where a rate-limit reset field is not. At
+      adoption this was emitted from seven sites across both BFFs and the edge gateway from what
+      is plainly the same copied middleware file, which is why the fix belongs in the shared
+      middleware package rather than in three repositories.
+    remediation: >-
+      Move the limiter onto the shared middleware and emit the standard fields plus Retry-After
+      on the 429. Removing X-RateLimit-* is a breaking change for any consumer that adopted it;
+      the measured consumer count at adoption was zero, so verify that before assuming it still
+      holds.
+    detector: standard_ratelimit_fields
+    refs: [RFC-0038]
+
+  - id: API-0011
+    title: A PATCH states what kind of patch it is
+    owner: platform-architecture
+    scope: spec
+    status: active
+    severity: major
+    applies_when: http-api
+    policy: >-
+      An operation using the PATCH method must declare application/merge-patch+json or
+      application/json-patch+json as a request media type, and must not declare bare
+      application/json.
+    rationale: >-
+      PATCH applies a set of changes, and the media type is what states how those changes are
+      expressed. application/json names a syntax, not a patch semantic: a client sending
+      {"name": null} cannot know whether that clears the field, is rejected, or is ignored.
+      Merge patch answers the question one way - null removes - and JSON Patch answers it
+      differently with explicit operations. All five published PATCH operations declared bare
+      application/json at adoption, so the contract left that question open on every one.
+    remediation: >-
+      Declare application/merge-patch+json, which is the default choice for these surfaces, and
+      make the handler answer 415 for any media type it does not declare. Use
+      application/json-patch+json where a caller genuinely needs ordered operations or array
+      element addressing; an operation may declare both.
+    detector: patch_media_type
+    refs: [RFC-0038]
+
+  - id: API-0012
+    title: Idempotency is declared where it is honoured
+    owner: platform-architecture
+    scope: service
+    status: active
+    severity: major
+    applies_when: http-api
+    policy: >-
+      An operation whose handler honours Idempotency-Key must declare that header as a
+      parameter, and must declare whether it is required.
+    rationale: >-
+      This is the one rule in the group where the gap runs contract-behind-behaviour rather than
+      the other way round. At adoption 38 source files handled the key while the published
+      contract mentioned it on five operations, so a caller reading the contract could not
+      discover a safe-retry mechanism the server already implemented - which costs exactly as
+      much as not having implemented it. A control that read only the spec would have reported
+      this surface as consistent, which is why this one reads both.
+    remediation: >-
+      Declare the header on every operation whose handler reads it, with required: true where
+      the operation moves money or has an external side effect. Where the handler reads the key
+      but ignores it, delete the read rather than declaring a guarantee that is not kept.
+    detector: idempotency_declared
+    refs: [RFC-0038]
+
+  - id: API-0013
+    title: The protocol version is pinned platform-wide
+    owner: platform-architecture
+    scope: spec
+    status: active
+    severity: critical
+    applies_when: http-api
+    policy: >-
+      docs/openapi.json must declare the OpenAPI version this platform has pinned. The pinned
+      value is 3.0.3 and is owned by RFC-0038 section 1.
+    rationale: >-
+      The version a contract is written against decides which schema dialect a client generator,
+      a validator and the breaking-change comparison each apply, so a fleet that disagrees about
+      it has no single contract language. All eleven published contracts agreed at adoption, but
+      only because one shared generator hardcodes the value: the sole assertion of it was a
+      per-repository test that four of the eleven repositories had copied, and the seven without
+      it included both BFFs, the two largest surfaces at 240 and 171 operations. Verifying a
+      platform-wide invariant by asking each repository to copy a test is how the invariant
+      survives where it was copied and lapses everywhere else.
+    remediation: >-
+      Regenerate the spec with the shared generator, which emits the pinned version. Do not
+      hand-edit the field to pass this control - a spec whose declared version disagrees with the
+      dialect it was generated for is worse than one that is merely outdated. Moving the pin to
+      3.1 is a deliberate platform change to RFC-0038 section 1 and the generator, gated on the
+      tooling prerequisite table in the OpenAPI spec-management standard.
+    detector: protocol_version_pinned
+    refs: [RFC-0038]
+
+  - id: API-0014
+    title: Outbound HTTP propagates trace context
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    applies_when: always
+    policy: >-
+      Runtime code that makes an outbound HTTP request must use the shared instrumented client
+      or transport. http.DefaultClient, http.Get/Post/Head and a bare &http.Client{} literal are
+      prohibited in runtime code.
+    rationale: >-
+      W3C trace context propagates because the client that sends the request injects
+      traceparent, so the checkable invariant is which client is used rather than whether a
+      header appears in a string somewhere. This control is a regression guard, not a migration:
+      trace context is the one protocol affordance this platform got right before it was written
+      down, present in 30 source files at adoption. An unstated invariant is one a future change
+      can remove without anyone having to argue for it, and a single bare http.Client is enough
+      to make a trace end at the service boundary with no error anywhere.
+    remediation: >-
+      Construct the client through the shared httpclient or httpx transport, which injects
+      traceparent and propagates tracestate unmodified. If a call genuinely must not be traced -
+      a health probe to a third party, say - it still uses the shared client; the sampling
+      decision belongs to the tracer, not to the choice of HTTP client.
+    detector: trace_context_propagated
+    refs: [RFC-0038]
+
+  - id: API-0015
+    title: Browser-facing responses carry security headers
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    applies_when: http-api
+    policy: >-
+      A repository serving a browser-reachable surface must set Strict-Transport-Security,
+      X-Content-Type-Options, Referrer-Policy and Permissions-Policy, and must set
+      Content-Security-Policy if it serves HTML.
+    rationale: >-
+      These are the response headers that stop a browser from downgrading the connection,
+      sniffing a content type, leaking a full referrer to a third party, or granting a device
+      permission the surface never needed. At adoption they were set in five separate
+      hand-maintained middleware files - org-core, auth-core, authz-core, the edge gateway and
+      the edge-gateway foundation - and declared in zero published contracts. Five copies of one
+      security control is five chances for one to drift, and drift here is silent: nothing fails
+      when a header stops being sent.
+    remediation: >-
+      Set the headers from the shared middleware so the header set is named in one place, and
+      declare them on the responses so a client and a reviewer can see the guarantee. This
+      control ratchets while the five copies are consolidated.
+    detector: security_response_headers
+    refs: [RFC-0038]
