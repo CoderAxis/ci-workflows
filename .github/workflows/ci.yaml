@@ -792,7 +792,10 @@ jobs:
               'package handlers\n\n'
               'func Handle(c *Context) {\n'
               '\t_ = c.GetHeader("Idempotency-Key")\n'  # API-0012
-              '\tc.Header("Cache-Control", "public, max-age=60")\n'  # API-0009
+              # API-0009. MUST stay `private`, not `public`: RFC-0038 section 2 exempts a
+              # genuinely public response, which has no per-caller cache key to declare, so a
+              # `public` fixture stops firing and this mutation test passes vacuously.
+              '\tc.Header("Cache-Control", "private, max-age=60")\n'
               '\tc.Header("X-RateLimit-Limit", "100")\n'  # API-0010
               '\tclient := &http.Client{Timeout: 5 * time.Second}\n'  # API-0014
               '\t_ = client\n'
