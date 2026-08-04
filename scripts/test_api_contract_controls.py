@@ -271,20 +271,21 @@ def test_cache_key_declared():
     violating_go = (
         'package handlers\n\n'
         'func Handle(c *Context) {\n'
-        '\tc.Header("Cache-Control", "public, max-age=60")\n'
+        '\tc.Header("Cache-Control", "private, max-age=60")\n'
         '\tc.JSON(200, nil)\n'
         '}\n'
     )
     with tempfile.TemporaryDirectory() as tmp:
         f = m.cache_key_declared(make_repo(tmp, go_files={"handler.go": violating_go}))
-        expect(f.count == 1, f"cache_key_declared: Cache-Control with no Vary MUST be a "
-                             f"violation, got {f.count}")
+        expect(f.count == 1, f"cache_key_declared: `private` with no Vary MUST be a violation - "
+                             f"RFC-0038 2 states private excludes shared caches but a browser "
+                             f"cache still keys on the URL alone, got {f.count}")
         expect("handler.go:4" in f.details[0], f"unexpected detail: {f.details}")
 
     clean_go = (
         'package handlers\n\n'
         'func Handle(c *Context) {\n'
-        '\tc.Header("Cache-Control", "public, max-age=60")\n'
+        '\tc.Header("Cache-Control", "private, max-age=60")\n'
         '\tc.Header("Vary", "Authorization")\n'
         '\tc.JSON(200, nil)\n'
         '}\n'
@@ -315,7 +316,7 @@ def test_cache_key_declared():
         '\tc.Header("Vary", "Origin")\n'
         '}\n\n'
         'func Handle(c *Context) {\n'
-        '\tc.Header("Cache-Control", "public, max-age=60")\n'
+        '\tc.Header("Cache-Control", "private, max-age=60")\n'
         '\tc.JSON(200, nil)\n'
         '}\n'
     )
@@ -338,6 +339,24 @@ def test_cache_key_declared():
         f = m.cache_key_declared(make_repo(tmp, go_files={"handler.go": forwarding_loop_go}))
         expect(f.count == 0, f"cache_key_declared: a header-name-forwarding loop MUST NOT be "
                              f"mistaken for a literal Cache-Control call, got {f.count}: {f.details}")
+
+    # RFC-0038 2's second exemption, and the reason it is not optional: a response that is
+    # genuinely identical for every caller MAY be marked `public` and MAY omit Vary. The
+    # section names a JWKS document, and platform-identity-service serves exactly one --
+    # `Cache-Control: public, max-age=300` on public key material that requires no auth.
+    # Flagging it asked a caller-independent body to declare a caller-dependent cache key.
+    jwks_go = (
+        'package handlers\n\n'
+        'func JWKS(c *Context) {\n'
+        '\tc.Header("Cache-Control", "public, max-age=300")\n'
+        '\tc.JSON(200, keys)\n'
+        '}\n'
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        f = m.cache_key_declared(make_repo(tmp, go_files={"jwks.go": jwks_go}))
+        expect(f.count == 0, f"cache_key_declared: `public` is RFC-0038 2's opt-in for a "
+                             f"caller-independent response and MUST NOT require Vary, got "
+                             f"{f.count}: {f.details}")
 
 
 # ── API-0010 standard_ratelimit_fields ───────────────────────────────────────────────────────
@@ -613,7 +632,7 @@ def _write_violating_fixture(root: pathlib.Path) -> None:
         'package handlers\n\n'
         'func Handle(c *Context) {\n'
         '\t_ = c.GetHeader("Idempotency-Key")\n'
-        '\tc.Header("Cache-Control", "public, max-age=60")\n'
+        '\tc.Header("Cache-Control", "private, max-age=60")\n'
         '\tc.Header("X-RateLimit-Limit", "100")\n'
         '\tclient := &http.Client{Timeout: 5 * time.Second}\n'
         '\t_ = client\n'
@@ -644,7 +663,7 @@ def _write_compliant_fixture(root: pathlib.Path) -> None:
         'package handlers\n\n'
         'func Handle(c *Context) {\n'
         '\t_ = c.GetHeader("Idempotency-Key")\n'
-        '\tc.Header("Cache-Control", "public, max-age=60")\n'
+        '\tc.Header("Cache-Control", "private, max-age=60")\n'
         '\tc.Header("Vary", "Authorization")\n'
         '\tc.Header("Strict-Transport-Security", "max-age=63072000")\n'
         '\tc.Header("X-Content-Type-Options", "nosniff")\n'

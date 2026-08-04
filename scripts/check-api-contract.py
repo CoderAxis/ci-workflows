@@ -163,6 +163,12 @@ IDEMPOTENCY_TEXT_RE = re.compile(r"idempotency-key", re.IGNORECASE)
 HEADER_READ_CALL_RE = re.compile(r"\bGetHeader\(|\.Header\.Get\(|Request\.Header\.Get\(",
                                  re.IGNORECASE)
 
+# The Idempotency-Key header being READ, with the name inside the read call. Kept separate
+# from HEADER_READ_CALL_RE because pairing that one with a mention anywhere in the file
+# cannot tell an inbound read from an outbound Header.Set of the same name.
+IDEMPOTENCY_HEADER_READ_RE = re.compile(
+    r"(?:GetHeader|\.Header\.Get)\(\s*[\"']idempotency-key[\"']\s*\)", re.IGNORECASE)
+
 # API-0014: the two shared packages a client may be built from or wired to. Referencing either
 # one anywhere inside a bare `&http.Client{...}` literal (e.g. `Transport: httpx.NewTransport
 # (nil)`) is the permitted third case; a client obtained entirely from `httpclient.NewClient(...)`
@@ -390,9 +396,20 @@ def cache_key_declared(repo: ServiceRepo) -> Finding:
             m = CACHE_CONTROL_SITE_RE.search(line)
             if not m:
                 continue
-            value = m.group(1).strip()
-            if "no-store" in value.lower():
+            value = m.group(1).strip().lower()
+            if "no-store" in value:
                 continue  # a response that may not be stored has no cache key to declare
+            if "public" in value:
+                # RFC-0038 §2's second exemption: a response that is genuinely identical for
+                # every caller -- the section names a JWKS document -- MAY be marked `public`
+                # and MAY omit Vary, because there is no caller-dependent input to key on.
+                #
+                # `public` is the marker the section chose for that opt-in, and §2 states in
+                # terms that whether a route is authenticated cannot be determined at the line
+                # that sets the header, so policing `public` on a caller-dependent response is
+                # named there as a code-review obligation rather than a mechanical one. Flagging
+                # it here would contradict the rule this control implements.
+                continue
             start, end = _enclosing_function_span(lines, i)
             func_text = "\n".join(lines[start:end])
             if VARY_SET_RE.search(func_text):
@@ -402,9 +419,12 @@ def cache_key_declared(repo: ServiceRepo) -> Finding:
                               "line to the next one)")
     violations = sorted(set(violations))
     note = (" A Vary set by a DIFFERENT function (e.g. CORS middleware's `Vary: Origin`) does "
-           "not satisfy this. The RFC-0038 §2 refinement - a Vary present but naming neither "
-           "Authorization nor an organisation header on an authenticated route - is NOT "
-           "applied: this checker cannot determine authentication statically and does not guess.")
+           "not satisfy this. `no-store` and `public` are exempt per RFC-0038 §2. The §2 "
+           "refinement - a Vary present but naming neither Authorization nor an organisation "
+           "header on an authenticated route - is NOT applied, and nor is the prohibition on "
+           "`public` for a caller-dependent body: both need to know whether a route is "
+           "authenticated, which is not determinable at the line that sets the header. §2 "
+           "assigns those two to code review by name; this checker does not guess.")
     if violations:
         return Finding(False, f"{len(violations)} Cache-Control site(s) with no cache key.{note}",
                        _capped(violations), len(violations))
@@ -486,12 +506,28 @@ def patch_media_type(repo: ServiceRepo) -> Finding:
 
 
 def _repo_honours_idempotency_key(repo: ServiceRepo) -> bool:
+    """True only where the repo READS the header INBOUND.
+
+    The name must appear inside the read call, not merely somewhere in the same file.
+    Correlating "this file mentions Idempotency-Key" with "this file reads some header"
+    conflates the two opposite directions, and it produced a real false positive:
+    stripe-adapter-service's Stripe client SETS Idempotency-Key on its OUTBOUND request
+    (it is Stripe's client) and, thirty lines later, reads a DIFFERENT header --
+    `resp.Header.Get("Request-Id")` -- off the response. Two unrelated facts in one file
+    were read as "this service honours Idempotency-Key from its callers", and six of its
+    operations were then required to declare a header nothing in the repo ever reads.
+
+    Sending a header is not honouring it. Under RFC-0038 §6 the rule is conditional on a
+    handler honouring the key, so a repo that only forwards one is out of scope entirely.
+    """
     for rel, text in repo.runtime_sources():
-        if not IDEMPOTENCY_TEXT_RE.search(text):
-            continue
-        if HEADER_READ_CALL_RE.search(text):
+        if IDEMPOTENCY_HEADER_READ_RE.search(text):
             return True
-        if "middleware" in str(rel).lower():
+        # Middleware is the one place the read may be indirected through a named constant
+        # rather than a literal, so a mention plus a header read is accepted there.
+        if ("middleware" in str(rel).lower()
+                and IDEMPOTENCY_TEXT_RE.search(text)
+                and HEADER_READ_CALL_RE.search(text)):
             return True
     return False
 
