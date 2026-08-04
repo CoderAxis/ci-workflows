@@ -201,6 +201,17 @@ SHARED_TRANSPORT_MARKER_RE = re.compile(r"\bhttpx\.NewTransport\(|\bhttpclient\.
 # SecurityHeaders() call is not evidence a caller made that choice.
 SECURITY_HEADERS_MARKER_RE = re.compile(r"\bginmiddleware\.SecurityHeaders\(")
 
+# API-0015, the other half of the marker above. A BARE SecurityHeaders() is not evidence of a
+# CSP, but passing WithHTML() or WithContentSecurityPolicy() is exactly the caller making that
+# choice, and the shared middleware then sets the header on every response. Without this,
+# adopting the option RFC-0038 section 9 asks for still reports Content-Security-Policy
+# "absent", and the only way to satisfy the checker is a second middleware that re-sets a
+# header already set - which is what notification-service and communication-service each grew,
+# both carrying a comment saying it exists for this scan. A control that can only be satisfied
+# by redundant code is measuring the code's shape, not the response's.
+CSP_OPT_IN_MARKER_RE = re.compile(
+    r"\bginmiddleware\.With(?:HTML|ContentSecurityPolicy)\(")
+
 # API-0015.
 SECURITY_HEADERS_REQUIRED = ("Strict-Transport-Security", "X-Content-Type-Options",
                              "Referrer-Policy", "Permissions-Policy")
@@ -650,6 +661,8 @@ def _header_set_anywhere(repo: ServiceRepo, header_name: str) -> bool:
         return True
     if header_name in SECURITY_HEADERS_REQUIRED and repo.uses_shared_security_headers():
         return True
+    if header_name == "Content-Security-Policy" and repo.opts_into_shared_csp():
+        return True
     return header_name.lower() in repo.config_header_rules()
 
 
@@ -778,6 +791,10 @@ class ServiceRepo:
     def uses_shared_security_headers(self) -> bool:
         """Whether runtime source wires the shared ginmiddleware.SecurityHeaders()."""
         return any(SECURITY_HEADERS_MARKER_RE.search(text) for _, text in self.runtime_sources())
+
+    def opts_into_shared_csp(self) -> bool:
+        """Whether runtime source opts the shared middleware into Content-Security-Policy."""
+        return any(CSP_OPT_IN_MARKER_RE.search(text) for _, text in self.runtime_sources())
 
     def has_http_api(self) -> bool:
         return self.spec is not None or self.spec_error is not None
