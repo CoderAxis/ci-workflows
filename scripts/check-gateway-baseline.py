@@ -217,6 +217,25 @@ class Repo:
         ports = self.service().get("ports") or {}
         return isinstance(ports, dict) and bool(ports.get("grpc"))
 
+    def owns_shared_baseline(self) -> bool:
+        """Whether this repository DEFINES the shared baseline rather than consuming it.
+
+        Detected by the embedded policy tree, not by repository name, so a rename or a
+        second baseline package does not silently fall out of scope.
+
+        This exists because centralising the perimeter created a blind spot. When
+        edge-gateway adopted the shared baseline and deleted its five local policy files,
+        GW-0006 went from correctly reporting two HTTP auth decision hops to reporting
+        clean - and nothing had been fixed. The hops had moved into platform-shared-go,
+        where every gateway control answered "repository does not satisfy gateway" and
+        skipped. So the one file that now decides the perimeter for every gateway was the
+        one file no gateway control inspected, and the control that guards the platform's
+        most security-critical hop could be silenced by moving a line between
+        repositories.
+        """
+        config = self.root / "platform" / "gatewaybaseline" / "config"
+        return config.is_dir() and any(config.glob("*.yaml"))
+
     def is_internet_facing(self) -> bool | None:
         service = self.service()
         if service.get("internet_facing") is not None:
@@ -534,6 +553,12 @@ def applies(repo: Repo, value: str) -> bool:
         return repo.is_gateway()
     if value == "grpc-service":
         return repo.has_grpc()
+    # Controls about the CONTENT of the perimeter follow the content. A gateway is in
+    # scope because it enforces the policy, and the baseline owner because it declares
+    # it; scoping such a control to gateways alone lets the policy escape enforcement by
+    # being centralised, which is the opposite of what centralising it is for.
+    if value == "gateway-or-baseline-owner":
+        return repo.is_gateway() or repo.owns_shared_baseline()
     return False
 
 

@@ -229,6 +229,47 @@ def test_gw0006_grpc_decisions():
                "GW-0006 must credit gRPC decision-service configuration")
 
 
+def test_gw0006_follows_the_policy_into_the_baseline_owner():
+    """GW-0006 must not be satisfiable by MOVING the decision hop to the shared module.
+
+    This is a regression test for a real evasion, performed accidentally. When
+    edge-gateway adopted the shared baseline and deleted its five local policy files,
+    GW-0006 flipped from correctly reporting two HTTP decision hops to reporting clean -
+    and nothing had been fixed. The hops now lived in platform-shared-go, which is neither
+    a gateway nor a gRPC service, so all eight controls reported "does not satisfy" and
+    skipped. The single file that decides the perimeter for every gateway was the only one
+    no gateway control read.
+    """
+    baseline_owner = {
+        # No service.contract.yaml and a name that is not a gateway: this repository must
+        # come into scope on the strength of the embedded policy tree ALONE, since that is
+        # what makes it the baseline owner.
+        "platform/gatewaybaseline/config/auth.yaml":
+            "auth:\n  validate_endpoint: /api/v1/auth/validate\n",
+        "platform/gatewaybaseline/config/authz.yaml":
+            "authz:\n  check_endpoint: /api/v1/authz/check-permission\n",
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, baseline_owner)
+        expect(repo.owns_shared_baseline(),
+               "the embedded policy tree must identify the baseline owner")
+        expect(m.applies(repo, "gateway-or-baseline-owner"),
+               "GW-0006 must apply to the baseline owner, or centralising the policy "
+               "removes it from enforcement")
+        expect(not m.applies(repo, "gateway"),
+               "the baseline owner is deliberately NOT a gateway; if it satisfied `gateway` "
+               "the other seven controls would run on a module that enforces nothing")
+        expect(m.grpc_decision_hops(repo).count == 2,
+               "GW-0006 must report both HTTP decision hops in the shared baseline")
+
+    # And a module that merely resembles the owner must not be pulled in: the trigger is
+    # the policy tree, not a `platform/` directory.
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, {"platform/envutil/env.go": "package envutil\n"})
+        expect(not m.applies(repo, "gateway-or-baseline-owner"),
+               "a shared module with no embedded baseline must stay out of scope")
+
+
 def test_gw0007_grpc_interceptors():
     with tempfile.TemporaryDirectory() as tmp:
         repo = make_repo(tmp, {

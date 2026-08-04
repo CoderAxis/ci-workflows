@@ -190,7 +190,14 @@ controls:
     scope: config
     status: active
     severity: critical
-    applies_when: gateway
+    # Gateways AND whichever repository declares the shared baseline, because this control
+    # is about the CONTENT of the perimeter and the content moved. When edge-gateway
+    # adopted the shared baseline and deleted its local policy files, this control went
+    # from reporting two HTTP decision hops to reporting clean with nothing fixed: the
+    # hops had moved to platform-shared-go, which satisfies neither `gateway` nor
+    # `grpc-service` and so skipped all eight controls. Scoped to gateways alone, a
+    # critical control is silenced by centralising the policy it inspects.
+    applies_when: gateway-or-baseline-owner
     policy: >-
       Authentication validation and authorization checks use gRPC. A configured auth
       validate_endpoint or authz check_endpoint whose value is an HTTP URL or URL path is a
