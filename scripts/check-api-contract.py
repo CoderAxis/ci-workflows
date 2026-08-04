@@ -255,6 +255,80 @@ def _line_no(text: str, idx: int) -> int:
     return text.count("\n", 0, idx) + 1
 
 
+def _strip_go_comments(text: str, blank_strings: bool = False) -> str:
+    """Blank out Go comments, preserving line numbers. Optionally blank string contents too.
+
+    Ported from check-gateway-baseline.py, which needed the same thing. Non-code is replaced
+    character-for-character with spaces and newlines are kept, so a match's offset still maps
+    to the line it came from and every caller's `_line_no` stays correct.
+
+    This is deliberately a state machine and NOT a `//.*` regex, because a regex gets Go
+    wrong in a way that reads as working. The gateway detector originally used the naive
+    version and the authorization policy string "order.v1.OrderService/*" opened a block
+    comment that never closed, silently discarding the rest of the file - including the gRPC
+    server assembly 44 lines below. So a policy string blinded the detector that reads
+    policy. Anything cheaper than tracking quotes has that failure mode.
+
+    blank_strings additionally empties string, rune and raw-string CONTENTS while keeping the
+    quotes, for checks whose pattern can appear inside a literal. That is not hypothetical:
+    the ihq CLI's own RFC-0038 detector calls traceFinding(f.Path, i, "http.Client{}") and
+    ("http.DefaultClient"), so naming the patterns it detects made it report itself. Blanking
+    contents also fixes brace counting for free, since a `{` inside a string no longer feeds
+    _extract_balanced.
+
+    NOT applied to runtime_sources() for every check, which would be the tempting
+    simplification: swaggo annotations ARE comments (`// @Summary`), and API-0006 exists to
+    find them. A global strip would make the swaggo detector permanently report clean.
+    """
+    out, i, state = [], 0, "code"
+    while i < len(text):
+        c = text[i]
+        n = text[i + 1] if i + 1 < len(text) else ""
+        if state == "line":
+            out.append(c if c == "\n" else " ")
+            if c == "\n":
+                state = "code"
+        elif state == "block":
+            if c == "*" and n == "/":
+                out.extend("  ")
+                i += 1
+                state = "code"
+            else:
+                out.append("\n" if c == "\n" else " ")
+        elif state in ("string", "rune"):
+            quote = '"' if state == "string" else "'"
+            closing = c == quote
+            out.append(c if closing or not blank_strings else " ")
+            if c == "\\" and i + 1 < len(text):
+                out.append(text[i + 1] if not blank_strings else " ")
+                i += 1
+            elif closing:
+                state = "code"
+        elif state == "raw":
+            # A raw string may span lines, so newlines are kept even when blanking.
+            out.append(c if c in ("`", "\n") or not blank_strings else " ")
+            if c == "`":
+                state = "code"
+        elif c == "/" and n == "/":
+            out.extend("  ")
+            i += 1
+            state = "line"
+        elif c == "/" and n == "*":
+            out.extend("  ")
+            i += 1
+            state = "block"
+        else:
+            out.append(c)
+            if c == '"':
+                state = "string"
+            elif c == "'":
+                state = "rune"
+            elif c == "`":
+                state = "raw"
+        i += 1
+    return "".join(out)
+
+
 def _is_type_reference_not_literal(text: str, match_start: int) -> bool:
     """True when a CLIENT_LITERAL_RE match is actually `) *http.Client {`: a function
     signature's `*http.Client` return type immediately followed by its body's opening brace,
@@ -665,9 +739,32 @@ def idempotency_declared(repo: ServiceRepo) -> Finding:
 
 
 def trace_context_propagated(repo: ServiceRepo) -> Finding:
-    """API-0014: outbound HTTP goes through the shared instrumented transport."""
+    """API-0014: outbound HTTP goes through the shared instrumented transport.
+
+    Comments are blanked first, because a comment cannot construct an HTTP client and this
+    check had no comment handling at all. Two repositories were flagged for prose, and both
+    are the shape that makes this worse than an ordinary false positive:
+
+    org-service's comment DESCRIBES THE FIX ALREADY APPLIED - "each built their own
+    &http.Client{} per invocation, which both skipped trace propagation (RFC-0038 section 8)"
+    - sitting nine lines above the corrected construction that passes httpx.NewTransport(nil).
+    So the finding penalised explaining the remediation while the remediation was in place,
+    and the way to clear it was to delete the explanation.
+
+    inboxxhq-architecture-check's is the explanatory comment inside its OWN rule for detecting
+    bare http.Client literals. The tool that finds the pattern was reported for naming it.
+
+    A detector that cannot tell code from prose about code teaches people to stop writing the
+    prose, which costs more than the finding was ever worth.
+
+    String contents are blanked for the same reason and on the same evidence: the ihq CLI's
+    RFC-0038 detector names these patterns in string arguments - traceFinding(f.Path, i,
+    "http.Client{}") - so it reported itself, three findings' worth, on a repository whose
+    outbound clients that code never touches.
+    """
     violations = []
     for rel, text in repo.runtime_sources():
+        text = _strip_go_comments(text, blank_strings=True)
         for m in DEFAULT_CLIENT_RE.finditer(text):
             violations.append(f"{rel}:{_line_no(text, m.start())}: uses http.DefaultClient "
                               "(uninstrumented)")

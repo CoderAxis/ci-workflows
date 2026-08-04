@@ -686,6 +686,50 @@ def test_trace_context_propagated():
         expect(f.count == 0, f"trace_context_propagated: a getter returning *http.Client MUST "
                              f"NOT be mistaken for a client construction, got {f.count}: {f.details}")
 
+    # Regression: neither a COMMENT nor a STRING constructs a client, and this check had no
+    # handling for either. Both false positives were found in the fleet and both are the shape
+    # that punishes good practice.
+    #
+    # org-service's comment DESCRIBED THE FIX ALREADY APPLIED - "each built their own
+    # &http.Client{} per invocation, which both skipped trace propagation" - nine lines above
+    # the corrected construction, so the only way to clear the finding was to delete the
+    # explanation. inboxxhq-architecture-check's was the comment inside its OWN rule for
+    # detecting bare http.Client literals, and the ihq CLI's RFC-0038 detector names the same
+    # patterns in string ARGUMENTS: traceFinding(f.Path, i, "http.Client{}"). Each tool that
+    # finds the pattern was reported for describing it; that cleared 5 of the CLI's 13.
+    #
+    # Asserted in ONE fixture with real violations present, because a fixture containing only
+    # prose would also pass against a check that had stopped reporting anything.
+    with tempfile.TemporaryDirectory() as tmp:
+        go = (
+            'package clients\n\n'
+            '// Describing &http.Client{} and http.DefaultClient is documentation, not a call.\n'
+            '/* And so is naming &http.Client{} or http.Get( in a block comment. */\n'
+            'var patterns = []string{"http.Client{}", "http.DefaultClient", "http.Get("}\n\n'
+            'func Real() *http.Client {\n'
+            '\treturn &http.Client{Timeout: 5 * time.Second}\n'
+            '}\n'
+        )
+        f = m.trace_context_propagated(make_repo(tmp, go_files={"c.go": go}))
+        expect(f.count == 1, f"trace_context_propagated: only the ONE real construction may be "
+                             f"flagged - comments and string literals naming the pattern must "
+                             f"not be - got {f.count}: {f.details}")
+        # Line 8 is the `return &http.Client{...}`; line 7 is the signature, which the getter
+        # regression above covers. Pinning the LINE is the point: blanking must preserve
+        # offsets, so a fixture that reports the right count on the wrong line still fails.
+        expect(any(":8" in d for d in f.details), f"the finding must land on line 8, the real "
+                                                  f"construction: {f.details}")
+
+    # And the stripper itself must not reintroduce the bug it was ported to avoid: a string
+    # containing "/*" opened a block comment that never closed in the gateway detector's first
+    # version, discarding the rest of the file - so a policy string blinded the detector.
+    stripped = m._strip_go_comments(
+        'x := "order.v1.OrderService/*"\nreal := &http.Client{}\n', blank_strings=True)
+    expect("&http.Client{" in stripped,
+           "a string containing /* must not swallow the code after it")
+    expect(len(stripped) == len('x := "order.v1.OrderService/*"\nreal := &http.Client{}\n'),
+           "the stripper must preserve length so line numbers stay correct")
+
 
 # ── API-0015 security_response_headers ───────────────────────────────────────────────────────
 
