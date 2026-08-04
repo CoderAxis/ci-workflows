@@ -752,6 +752,73 @@ jobs:
       - name: Verify control docs are in sync with the catalog
         run: python3 scripts/check-api-contract.py --verify-docs README.md
 
+      # RFC-0038 (HTTP protocol semantics) added eight detectors - API-0008..API-0015 - at once.
+      # Each gets at least one fixture that MUST be counted as a violation and one that MUST
+      # NOT, built with tempfile rather than real repo state, because a real repo gets fixed
+      # over time and would silently make the test vacuous. See the module docstring for the
+      # specific false positives (a getter mistaken for a client construction, a switch-case
+      # label mistaken for a response write, a query parameter mistaken for a header) each
+      # fixture was built to catch.
+      - name: RFC-0038 detectors discriminate (API-0008..API-0015)
+        run: python3 scripts/test_api_contract_controls.py
+
+      # Mutation test - the eight new detectors must still fail a dirty tree. This is the same
+      # shape as the DS-0003 / WFC-0001..0004 mutation tests elsewhere in this file: a positive
+      # fixture proves a detector matches something, but only a required failure on a KNOWN-BAD
+      # tree proves the wiring (registration in DETECTORS, applies_when, the catalog entry
+      # itself) is intact end to end, not just the detector function in isolation.
+      - name: Mutation test - the RFC-0038 catalog must still fail a dirty tree
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib
+          tmp = pathlib.Path("/tmp/rfc0038-dirty-fixture")
+          (tmp / "docs").mkdir(parents=True, exist_ok=True)
+          spec = {
+              "openapi": "3.1.0",  # API-0013
+              "info": {"title": "dirty", "version": "1.0.0"},
+              "paths": {
+                  "/widgets/{id}": {  # API-0008 (no ETag)
+                      "get": {"responses": {"200": {"description": "OK"}}},
+                      "patch": {"responses": {"200": {"description": "OK"}},  # API-0011
+                               "requestBody": {"content": {"application/json": {"schema": {}}}}},
+                  },
+                  "/widgets": {"post": {"responses": {"200": {"description": "OK"}}}},
+              },
+          }
+          (tmp / "docs" / "openapi.json").write_text(json.dumps(spec))
+          (tmp / "internal" / "handlers").mkdir(parents=True, exist_ok=True)
+          (tmp / "internal" / "handlers" / "h.go").write_text(
+              'package handlers\n\n'
+              'func Handle(c *Context) {\n'
+              '\t_ = c.GetHeader("Idempotency-Key")\n'  # API-0012
+              '\tc.Header("Cache-Control", "public, max-age=60")\n'  # API-0009
+              '\tc.Header("X-RateLimit-Limit", "100")\n'  # API-0010
+              '\tclient := &http.Client{Timeout: 5 * time.Second}\n'  # API-0014
+              '\t_ = client\n'
+              '\tc.JSON(200, nil)\n'
+              '}\n'
+          )
+          PY
+
+          set +e
+          out="$(python3 scripts/check-api-contract.py /tmp/rfc0038-dirty-fixture --fail-on major 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          rm -rf /tmp/rfc0038-dirty-fixture
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the RFC-0038 dirty fixture passed; the eight new detectors are not firing"
+            exit 1
+          fi
+          for control in API-0008 API-0009 API-0010 API-0011 API-0012 API-0013 API-0014 API-0015; do
+            if ! echo "$out" | grep -q "::error::\[$control\]"; then
+              echo "::error::$control did not fire against the RFC-0038 dirty fixture"
+              exit 1
+            fi
+          done
+          echo "all eight RFC-0038 controls fired as expected (exit $rc)"
+
       - name: The module floor and the reference artifact name the same proto vintage
         run: |
           python3 - <<'PY'

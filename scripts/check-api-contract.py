@@ -90,6 +90,11 @@ DOCS_END = "<!-- END api-contract-controls -->"
 CANONICAL_SUCCESS = "common.v1.SuccessResponse"
 CANONICAL_ERROR = "common.v1.ErrorResponse"
 
+# RFC-0038 section 1: the platform's single pinned OpenAPI dialect. This MUST stay a single
+# named constant - never inlined into a comparison - because the RFC says the pin moves as one
+# deliberate edit to this value (and, in lockstep, to the Go CLI's twin of it).
+PINNED_OPENAPI_VERSION = "3.0.3"
+
 # Spec files a service may legitimately commit. Anything else under docs/ matching
 # openapi*.json is a rival spec - the exact hygiene failure that left auth carrying a
 # 307KB "premigration" spec advertising 58 paths against a live 49.
@@ -113,6 +118,474 @@ RUNTIME_DOCS_MARKERS = (
 # A hand-rolled copy of the shared conformance suite: driving kin-openapi directly.
 KIN_OPENAPI_MARKERS = re.compile(r"gorillamux\.NewRouter|openapi3filter\.ValidateResponse")
 SHARED_CONFORMANCE_IMPORT = "openapicontract/conformance"
+
+# --- RFC-0038: HTTP protocol semantics (API-0008..API-0015) --------------------------------
+#
+# Detectors for the eight controls added by RFC-0038. The specification for exactly what each
+# one detects - including its exclusions and the counts measured at adoption - lives in
+# RFC0038_CONTROL_SPEC.md, which is also the input to an independent Go implementation in the
+# `ihq` CLI; the two are REQUIRED to agree on the same fixture, so a change to a rule here
+# should be mirrored there, not diverged from silently.
+
+PATCH_MEDIA_TYPES = {"application/merge-patch+json", "application/json-patch+json"}
+
+# API-0008: a path identifies a single resource, structurally, when its final non-empty segment
+# is a template parameter. Segments below mark infrastructure rather than a resource even when
+# they happen to sit after one (e.g. a health probe nested under a resource path).
+NON_RESOURCE_PATH_SEGMENTS = {
+    "health", "healthz", "readyz", "livez", "metrics", "ping", "version", ".well-known",
+}
+PAGINATION_PARAM_NAMES = {"page", "pagesize", "limit", "offset", "cursor"}
+SINGLE_RESOURCE_PATH_RE = re.compile(r"/\{[^/{}]+\}/?$")
+
+# API-0009 / API-0010: function-scoping is approximated, per the spec, by scanning from the
+# preceding top-level `func` line to the next one. This over-includes a closure nested inside
+# the enclosing function - the common shape for Gin middleware - rather than under-including it,
+# so a Vary or Retry-After set from the inner closure is still found.
+FUNC_LINE_RE = re.compile(r"^func\b")
+
+# A literal `.Header(`, `.Set(` or `.Add(` call naming a header as its own first argument.
+# Deliberately narrower than "the header name appears on this line": a loop that forwards a
+# slice of header names (`for _, h := range []string{"Cache-Control", ...}`) must NOT match,
+# because the header name is not the literal argument of the call that sets it.
+CACHE_CONTROL_SITE_RE = re.compile(r'\.(?:Header|Set|Add)\(\s*"Cache-Control"\s*,\s*(.*)\)',
+                                   re.IGNORECASE)
+VARY_SET_RE = re.compile(r'\.(?:Header|Set|Add)\(\s*"Vary"', re.IGNORECASE)
+XRATELIMIT_SITE_RE = re.compile(r'\.(?:Header|Set|Add)\(\s*"(X-RateLimit-[A-Za-z0-9-]*)"',
+                                re.IGNORECASE)
+STATUS_429_RE = re.compile(r"\bStatusTooManyRequests\b")
+RETRY_AFTER_SET_RE = re.compile(r'\.(?:Header|Set|Add)\(\s*"Retry-After"', re.IGNORECASE)
+
+# API-0012: the literal header spelling REQUIRES the hyphen, which is what keeps this from
+# matching the unrelated Go identifier `IdempotencyKey` or the JSON tag `idempotency_key` that
+# several services use for a same-named-but-different domain concept (an outbox/ledger key).
+IDEMPOTENCY_TEXT_RE = re.compile(r"idempotency-key", re.IGNORECASE)
+HEADER_READ_CALL_RE = re.compile(r"\bGetHeader\(|\.Header\.Get\(|Request\.Header\.Get\(",
+                                 re.IGNORECASE)
+
+# API-0014: the two shared packages a client may be built from or wired to. Referencing either
+# one anywhere inside a bare `&http.Client{...}` literal (e.g. `Transport: httpx.NewTransport
+# (nil)`) is the permitted third case; a client obtained entirely from `httpclient.NewClient(...)`
+# never matches CLIENT_LITERAL_RE in the first place, so it needs no special case here.
+CLIENT_LITERAL_RE = re.compile(r"&?\bhttp\.Client\s*\{")
+DEFAULT_CLIENT_RE = re.compile(r"\bhttp\.DefaultClient\b")
+BARE_OUTBOUND_CALL_RE = re.compile(r"\bhttp\.(Get|Post|Head|PostForm)\(")
+SHARED_TRANSPORT_MARKER_RE = re.compile(r"\bhttpx\.NewTransport\(|\bhttpclient\.")
+
+# API-0015.
+SECURITY_HEADERS_REQUIRED = ("Strict-Transport-Security", "X-Content-Type-Options",
+                             "Referrer-Policy", "Permissions-Policy")
+HTML_CONTENT_TYPE_RE = re.compile(r"text/html", re.IGNORECASE)
+HTML_TEMPLATE_IMPORT_RE = re.compile(r'"html/template"')
+
+
+def _enclosing_function_span(lines: list, idx: int) -> tuple:
+    """(start, end) line indices approximating the function enclosing lines[idx].
+
+    See FUNC_LINE_RE above for why the approximation is scoped to the nearest top-level `func`
+    lines rather than to the innermost brace-balanced block.
+    """
+    start = 0
+    for i in range(idx, -1, -1):
+        if FUNC_LINE_RE.match(lines[i]):
+            start = i
+            break
+    end = len(lines)
+    for i in range(idx + 1, len(lines)):
+        if FUNC_LINE_RE.match(lines[i]):
+            end = i
+            break
+    return start, end
+
+
+def _extract_balanced(text: str, open_idx: int) -> str:
+    """text[open_idx:...] from a '{' at open_idx to its matching '}', inclusive."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx:i + 1]
+    return text[open_idx:]
+
+
+def _line_no(text: str, idx: int) -> int:
+    return text.count("\n", 0, idx) + 1
+
+
+def _is_type_reference_not_literal(text: str, match_start: int) -> bool:
+    """True when a CLIENT_LITERAL_RE match is actually `) *http.Client {`: a function
+    signature's `*http.Client` return type immediately followed by its body's opening brace,
+    not a composite literal. `HttpClient() *http.Client {` is real code in this fleet (a getter
+    exposing the underlying client), and without this check every such getter would be counted
+    as an uninstrumented client construction it never performs.
+    """
+    prefix = re.sub(r"[\s*]+$", "", text[:match_start])
+    return prefix.endswith(")")
+
+
+def _is_single_resource_path(path: str) -> bool:
+    return bool(SINGLE_RESOURCE_PATH_RE.search(path))
+
+
+def _path_has_non_resource_segment(path: str) -> bool:
+    return any(seg in NON_RESOURCE_PATH_SEGMENTS for seg in path.split("/") if seg)
+
+
+def _op_declares_pagination_param(op: dict) -> bool:
+    for p in op.get("parameters") or []:
+        if isinstance(p, dict) and str(p.get("name", "")).strip().lower() in PAGINATION_PARAM_NAMES:
+            return True
+    return False
+
+
+def _resolve_schema_ref(schema, components: dict, seen: frozenset = frozenset()):
+    """Follow a single `$ref` into components.schemas, one level of cycle-guard included."""
+    if not isinstance(schema, dict) or "$ref" not in schema:
+        return schema
+    ref = schema["$ref"]
+    prefix = "#/components/schemas/"
+    if not ref.startswith(prefix):
+        return schema
+    name = ref[len(prefix):]
+    if name in seen:
+        return schema
+    target = components.get(name)
+    if not isinstance(target, dict):
+        return schema
+    return _resolve_schema_ref(target, components, seen | {name})
+
+
+def _merge_allof(schema, components: dict) -> dict:
+    """Best-effort flattening of an `allOf` into one dict with a combined `properties`.
+
+    Good enough to find the `data` property the proto envelope wraps a payload in - which is
+    all API-0008's collection check needs - without a general JSON-Schema merge.
+    """
+    schema = _resolve_schema_ref(schema, components)
+    if not isinstance(schema, dict):
+        return {}
+    members = schema.get("allOf")
+    if not isinstance(members, list):
+        return schema
+    merged: dict = {"properties": {}}
+    for member in members:
+        sub = _merge_allof(member, components)
+        if not isinstance(sub, dict):
+            continue
+        if sub.get("type"):
+            merged["type"] = sub["type"]
+        props = sub.get("properties")
+        if isinstance(props, dict):
+            merged["properties"].update(props)
+    return merged
+
+
+def _response_is_collection(op: dict, status: str, components: dict) -> bool:
+    """True when the STATUS response body is an array, or a `data` envelope around one.
+
+    Only proven when the schema says so; anything unresolvable (no schema, a non-JSON media
+    type, an unresolvable $ref) is treated as NOT a collection rather than guessed - the
+    structural path check already established this is a candidate single resource, and RFC-0038
+    §Machine verification's instruction is to skip what cannot be evaluated soundly, not to
+    widen an exclusion on a guess.
+    """
+    resp = (op.get("responses") or {}).get(status)
+    if not isinstance(resp, dict):
+        return False
+    schema = ((resp.get("content") or {}).get("application/json") or {}).get("schema")
+    if not isinstance(schema, dict):
+        return False
+    merged = _merge_allof(schema, components)
+    if merged.get("type") == "array":
+        return True
+    data_schema = (merged.get("properties") or {}).get("data")
+    resolved_data = _resolve_schema_ref(data_schema, components) if isinstance(data_schema, dict) else None
+    return isinstance(resolved_data, dict) and resolved_data.get("type") == "array"
+
+
+def _response_declares_header(op: dict, status: str, header_name: str) -> bool:
+    resp = (op.get("responses") or {}).get(status)
+    if not isinstance(resp, dict):
+        return False
+    headers = resp.get("headers")
+    if not isinstance(headers, dict):
+        return False
+    return any(str(h).lower() == header_name.lower() for h in headers)
+
+
+def _op_declares_header_param(op: dict, header_name: str) -> bool:
+    for p in op.get("parameters") or []:
+        if not isinstance(p, dict):
+            continue
+        if (str(p.get("in", "")).lower() == "header"
+                and str(p.get("name", "")).lower() == header_name.lower()):
+            return True
+    return False
+
+
+def conditional_requests(repo: ServiceRepo) -> Finding:
+    """API-0008: single-resource reads carry ETag; matching writes honour If-Match/412/428."""
+    if repo.spec_error:
+        return Finding(False, f"docs/openapi.json is unparseable: {repo.spec_error}", count=1)
+    components = ((repo.spec or {}).get("components") or {}).get("schemas") or {}
+    ops = repo.operations()
+
+    read_etag_paths = set()
+    violations = []
+
+    for path, method, op in ops:
+        if method != "get" or not _is_single_resource_path(path):
+            continue
+        if _path_has_non_resource_segment(path):
+            continue
+        if op.get("deprecated") is True:
+            continue
+        if _op_declares_pagination_param(op):
+            continue
+        resp200 = (op.get("responses") or {}).get("200")
+        if not isinstance(resp200, dict):
+            continue  # nothing documented to carry an ETag; not this control's failure to report
+        if _response_is_collection(op, "200", components):
+            continue
+        if _response_declares_header(op, "200", "ETag"):
+            read_etag_paths.add(path)
+            continue
+        violations.append(f"GET {path}: single-resource read has no ETag on its 200 response")
+
+    for path, method, op in ops:
+        if method not in ("put", "patch", "delete") or not _is_single_resource_path(path):
+            continue
+        if path not in read_etag_paths:
+            continue  # precondition unmet: the matching GET has no ETag yet (RFC-0038 §3 ordering)
+        missing = []
+        if not _op_declares_header_param(op, "If-Match"):
+            missing.append("If-Match header parameter")
+        if "412" not in (op.get("responses") or {}):
+            missing.append("412 response")
+        if "428" not in (op.get("responses") or {}):
+            missing.append("428 response")
+        if missing:
+            violations.append(f"{method.upper()} {path}: missing {', '.join(missing)} "
+                              "(the matching GET declares ETag)")
+
+    violations = sorted(set(violations))
+    reads = sum(1 for v in violations if v.startswith("GET "))
+    writes = len(violations) - reads
+    if violations:
+        return Finding(False, f"{reads} read(s) missing ETag, {writes} write(s) missing a "
+                              "precondition", _capped(violations), len(violations))
+    return Finding(True, "every single-resource read carries ETag and every matching write "
+                         "honours If-Match/412/428", count=0)
+
+
+def cache_key_declared(repo: ServiceRepo) -> Finding:
+    """API-0009: a storable Cache-Control must be paired with Vary in the same function."""
+    violations = []
+    for rel, text in repo.runtime_sources():
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            m = CACHE_CONTROL_SITE_RE.search(line)
+            if not m:
+                continue
+            value = m.group(1).strip()
+            if "no-store" in value.lower():
+                continue  # a response that may not be stored has no cache key to declare
+            start, end = _enclosing_function_span(lines, i)
+            func_text = "\n".join(lines[start:end])
+            if VARY_SET_RE.search(func_text):
+                continue
+            violations.append(f"{rel}:{i + 1}: sets Cache-Control ({value}) with no Vary in the "
+                              "enclosing function (scanned from the preceding top-level `func` "
+                              "line to the next one)")
+    violations = sorted(set(violations))
+    note = (" A Vary set by a DIFFERENT function (e.g. CORS middleware's `Vary: Origin`) does "
+           "not satisfy this. The RFC-0038 §2 refinement - a Vary present but naming neither "
+           "Authorization nor an organisation header on an authenticated route - is NOT "
+           "applied: this checker cannot determine authentication statically and does not guess.")
+    if violations:
+        return Finding(False, f"{len(violations)} Cache-Control site(s) with no cache key.{note}",
+                       _capped(violations), len(violations))
+    return Finding(True, f"every storable Cache-Control site declares Vary in its own function.{note}",
+                   count=0)
+
+
+def _is_429_write_site(line: str) -> bool:
+    """False for a line that merely mentions StatusTooManyRequests without writing a response.
+
+    Two shapes appear in this fleet and neither is a write: a gRPC-code-to-HTTP-status mapping
+    table that `return`s the constant from a switch (never itself touches a response writer),
+    and the `case http.StatusTooManyRequests:` label that dispatches to the line that actually
+    writes it. Both would otherwise be double- or falsely-counted as "writes 429 with no
+    Retry-After" for a status value that is only ever being translated or matched, not written.
+    """
+    stripped = line.strip()
+    if re.match(r"^case\s+http\.StatusTooManyRequests\s*:$", stripped):
+        return False
+    if re.match(r"^return\s+http\.StatusTooManyRequests\s*$", stripped):
+        return False
+    if re.search(r"(==|!=)\s*http\.StatusTooManyRequests\b", stripped):
+        return False
+    if re.search(r"http\.StatusTooManyRequests\s*(==|!=)", stripped):
+        return False
+    return True
+
+
+def standard_ratelimit_fields(repo: ServiceRepo) -> Finding:
+    """API-0010: no X-RateLimit-*, and every 429 carries Retry-After from the same function."""
+    violations = []
+    for rel, text in repo.runtime_sources():
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            m = XRATELIMIT_SITE_RE.search(line)
+            if m:
+                violations.append(f"{rel}:{i + 1}: sets prohibited {m.group(1)} response header")
+        for i, line in enumerate(lines):
+            if not STATUS_429_RE.search(line) or not _is_429_write_site(line):
+                continue
+            start, end = _enclosing_function_span(lines, i)
+            func_text = "\n".join(lines[start:end])
+            if RETRY_AFTER_SET_RE.search(func_text):
+                continue
+            violations.append(f"{rel}:{i + 1}: writes 429 Too Many Requests with no Retry-After "
+                              "in the enclosing function")
+    violations = sorted(set(violations))
+    xrl = sum(1 for v in violations if "X-RateLimit" in v)
+    if violations:
+        return Finding(False, f"{xrl} X-RateLimit-* site(s), {len(violations) - xrl} 429 "
+                              "response(s) with no Retry-After", _capped(violations), len(violations))
+    return Finding(True, "no X-RateLimit-* headers, and every 429 carries Retry-After", count=0)
+
+
+def patch_media_type(repo: ServiceRepo) -> Finding:
+    """API-0011: PATCH declares a real patch media type, never bare application/json."""
+    if repo.spec_error:
+        return Finding(False, f"docs/openapi.json is unparseable: {repo.spec_error}", count=1)
+    violations = []
+    for path, method, op in repo.operations():
+        if method != "patch":
+            continue
+        rb = op.get("requestBody")
+        content = rb.get("content") if isinstance(rb, dict) else None
+        if not isinstance(content, dict) or not content:
+            violations.append(f"PATCH {path}: no request body media type declared")
+            continue
+        media_types = {str(mt).split(";", 1)[0].strip().lower() for mt in content}
+        if "application/json" in media_types:
+            violations.append(f"PATCH {path}: declares bare application/json")
+        elif not (media_types & PATCH_MEDIA_TYPES):
+            violations.append(f"PATCH {path}: declares neither application/merge-patch+json nor "
+                              "application/json-patch+json")
+    violations = sorted(set(violations))
+    if violations:
+        return Finding(False, f"{len(violations)} PATCH operation(s) with an unclear patch "
+                              "media type", _capped(violations), len(violations))
+    return Finding(True, "every PATCH operation declares a real patch media type", count=0)
+
+
+def _repo_honours_idempotency_key(repo: ServiceRepo) -> bool:
+    for rel, text in repo.runtime_sources():
+        if not IDEMPOTENCY_TEXT_RE.search(text):
+            continue
+        if HEADER_READ_CALL_RE.search(text):
+            return True
+        if "middleware" in str(rel).lower():
+            return True
+    return False
+
+
+def idempotency_declared(repo: ServiceRepo) -> Finding:
+    """API-0012: an operation whose handler reads Idempotency-Key must declare it (service scope).
+
+    Correlating a specific handler to a specific operation is not reliable by static analysis
+    (see RFC0038_CONTROL_SPEC.md), so this is a REPO-LEVEL approximation: if ANY runtime source
+    reads the header, every unsafe operation in the spec is expected to declare it. This
+    over-counts relative to a perfect mapping, which is acceptable only because the control
+    ratchets - stated in the evidence string so a reader of a CI log is not misled into thinking
+    every counted operation was proven to read the key.
+    """
+    if not _repo_honours_idempotency_key(repo):
+        return Finding(True, "no runtime source reads the Idempotency-Key header; the repo does "
+                             "not appear to implement idempotency", count=0)
+    if repo.spec_error:
+        return Finding(False, f"docs/openapi.json is unparseable: {repo.spec_error}", count=1)
+    violations = []
+    for path, method, op in repo.operations():
+        if method not in ("post", "put", "patch", "delete"):
+            continue
+        if not _op_declares_header_param(op, "Idempotency-Key"):
+            violations.append(f"{method.upper()} {path}: does not declare an Idempotency-Key "
+                              "header parameter")
+    violations = sorted(set(violations))
+    note = (" [repo-level approximation per API-0012: the repo reads Idempotency-Key SOMEWHERE "
+           "in runtime source, which is not proof that every counted operation's handler reads "
+           "it - only that the count can never rise faster than real adoption.]")
+    if violations:
+        return Finding(False, f"{len(violations)} unsafe operation(s) missing Idempotency-Key"
+                              f"{note}", _capped(violations), len(violations))
+    return Finding(True, f"repo reads Idempotency-Key and every unsafe operation declares it{note}",
+                   count=0)
+
+
+def trace_context_propagated(repo: ServiceRepo) -> Finding:
+    """API-0014: outbound HTTP goes through the shared instrumented transport."""
+    violations = []
+    for rel, text in repo.runtime_sources():
+        for m in DEFAULT_CLIENT_RE.finditer(text):
+            violations.append(f"{rel}:{_line_no(text, m.start())}: uses http.DefaultClient "
+                              "(uninstrumented)")
+        for m in BARE_OUTBOUND_CALL_RE.finditer(text):
+            violations.append(f"{rel}:{_line_no(text, m.start())}: calls http.{m.group(1)}(...) "
+                              "directly (uninstrumented)")
+        for m in CLIENT_LITERAL_RE.finditer(text):
+            if _is_type_reference_not_literal(text, m.start()):
+                continue
+            brace_idx = m.end() - 1
+            body = _extract_balanced(text, brace_idx)
+            if SHARED_TRANSPORT_MARKER_RE.search(body):
+                continue
+            violations.append(f"{rel}:{_line_no(text, m.start())}: bare http.Client{{}} literal "
+                              "is not wired to httpx.NewTransport / platform-shared-go/httpclient")
+    violations = sorted(set(violations))
+    if violations:
+        return Finding(False, f"{len(violations)} outbound HTTP client construction(s) bypass "
+                              "trace propagation", _capped(violations), len(violations))
+    return Finding(True, "every outbound HTTP client is obtained from, or wired to, the shared "
+                         "instrumented transport", count=0)
+
+
+def _header_set_anywhere(repo: ServiceRepo, header_name: str) -> bool:
+    pattern = re.compile(r'\.(?:Header|Set|Add)\(\s*"' + re.escape(header_name) + r'"',
+                         re.IGNORECASE)
+    return any(pattern.search(text) for _, text in repo.runtime_sources())
+
+
+def _serves_html(repo: ServiceRepo) -> bool:
+    return any(HTML_CONTENT_TYPE_RE.search(text) or HTML_TEMPLATE_IMPORT_RE.search(text)
+              for _, text in repo.runtime_sources())
+
+
+def security_response_headers(repo: ServiceRepo) -> Finding:
+    """API-0015: browser-facing responses carry the standard security headers.
+
+    A violation here is an ABSENCE across the whole repository, not a bad pattern found at one
+    site, so - unlike every other detector in this file - there is no single file:line to name
+    for a counted violation. The detail line says so explicitly rather than inventing one.
+    """
+    required = list(SECURITY_HEADERS_REQUIRED)
+    serves_html = _serves_html(repo)
+    if serves_html:
+        required.append("Content-Security-Policy")
+    missing = sorted(h for h in required if not _header_set_anywhere(repo, h))
+    if missing:
+        detail = [f"{h}: not set anywhere in this repository's runtime source" for h in missing]
+        return Finding(False, f"{len(missing)} required security response header(s) absent",
+                       _capped(detail), len(missing))
+    html_note = " (including Content-Security-Policy, since the repo serves HTML)" if serves_html else ""
+    return Finding(True, f"every required security response header is set somewhere in runtime "
+                         f"source{html_note}", count=0)
 
 
 @dataclass
@@ -355,6 +828,18 @@ def no_swaggo_annotation_source(repo: ServiceRepo) -> Finding:
     return Finding(True, "no swaggo annotation source", count=0)
 
 
+def protocol_version_pinned(repo: ServiceRepo) -> Finding:
+    """API-0013: docs/openapi.json declares the platform's single pinned OpenAPI dialect."""
+    if repo.spec_error:
+        return Finding(False, f"docs/openapi.json is unparseable: {repo.spec_error}", count=1)
+    found = (repo.spec or {}).get("openapi")
+    if found == PINNED_OPENAPI_VERSION:
+        return Finding(True, f"openapi version pinned at {PINNED_OPENAPI_VERSION!r}", count=0)
+    found_display = repr(found) if found is not None else "missing"
+    detail = f"docs/openapi.json: openapi={found_display}, expected {PINNED_OPENAPI_VERSION!r}"
+    return Finding(False, detail, [detail], 1)
+
+
 DETECTORS = {
     "no_runtime_docs": no_runtime_docs,
     "single_committed_spec": single_committed_spec,
@@ -363,6 +848,14 @@ DETECTORS = {
     "canonical_components_current": canonical_components_current,
     "operation_ids_governed": operation_ids_governed,
     "no_swaggo_annotation_source": no_swaggo_annotation_source,
+    "conditional_requests": conditional_requests,
+    "cache_key_declared": cache_key_declared,
+    "standard_ratelimit_fields": standard_ratelimit_fields,
+    "patch_media_type": patch_media_type,
+    "idempotency_declared": idempotency_declared,
+    "protocol_version_pinned": protocol_version_pinned,
+    "trace_context_propagated": trace_context_propagated,
+    "security_response_headers": security_response_headers,
 }
 
 
