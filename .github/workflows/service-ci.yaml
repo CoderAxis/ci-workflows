@@ -1598,6 +1598,66 @@ jobs:
           echo "ran=true" >> "${GITHUB_OUTPUT}"
           echo "Generator ran and normalization executed."
 
+      # Wholesale loss is NOT drift, and is refused whatever OPENAPI_DRIFT_BLOCKING says.
+      #
+      # The drift step below is deliberately non-blocking during the staged rollout, and that
+      # tolerance was hiding a different failure entirely. authz-service committed 150 operations
+      # across 113 paths; `scripts/swagger.sh` there regenerated 3, exiting 0 with normalization
+      # reporting success, because every handler is implemented in authz-core and swag cannot see
+      # across a module boundary - so there was nothing to find and it faithfully emitted nothing.
+      # CI ran that, saw the 147-operation diff, and printed a notice.
+      #
+      # The trapdoor is what makes this worth its own gate: the remedy for drift is "regenerate and
+      # commit the result", so the very act of turning the drift gate on would have demanded the
+      # 3-operation spec be committed as the corrected one. A measured sweep found the same shape
+      # in six more repos - call-routing, configuration, ledger, notification, payment and
+      # voice-ai-agent all commit specs their sources carry no annotations for.
+      #
+      # Half is the threshold rather than any loss, because legitimate regeneration does remove
+      # operations: a retired route, or a normalizer that stops emitting a path it should never
+      # have. Losing most of the document is a different claim, and it is always the same one -
+      # this generator cannot see the handlers, so the spec is authored and the repo needs a
+      # route-coverage gate instead (see check-openapi-generator.py, which accepts an
+      # openapi-contract-check make target as an alternative engine).
+      - name: Refuse wholesale operation loss
+        if: steps.generate.outputs.ran == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -f docs/openapi.json ]] || { echo "::notice::no docs/openapi.json; nothing to compare."; exit 0; }
+          git show HEAD:docs/openapi.json > /tmp/committed-openapi.json 2>/dev/null || {
+            echo "::notice::docs/openapi.json is not committed at HEAD; nothing to compare."; exit 0; }
+          python3 - <<'PY'
+          import json, sys
+
+          def ops(path):
+              try:
+                  doc = json.load(open(path))
+              except Exception as exc:
+                  print(f"::notice::could not parse {path}: {exc}")
+                  return None
+              methods = {"get", "put", "post", "delete", "patch", "head", "options", "trace"}
+              return sum(1 for item in doc.get("paths", {}).values()
+                         for verb in item if verb.lower() in methods)
+
+          before, after = ops("/tmp/committed-openapi.json"), ops("docs/openapi.json")
+          if before is None or after is None:
+              sys.exit(0)
+          print(f"committed {before} operations, generated {after}")
+          if before >= 4 and after * 2 < before:
+              print(
+                  f"::error::the generator produced {after} operations from a committed spec of "
+                  f"{before}. That is not drift: a generator that emits under half the document "
+                  f"cannot see the handlers it claims to describe, which happens when they live "
+                  f"in a core module across a boundary swag does not cross. Do NOT commit this "
+                  f"output. Either point the generator at the sources, or - if the spec is "
+                  f"authored, which zero @Router annotations in the repo would confirm - delete "
+                  f"scripts/swagger.sh and add an `openapi-contract-check` make target that runs "
+                  f"a bidirectional route-coverage test against the live router."
+              )
+              sys.exit(1)
+          PY
+
       # Drift is REPORTED here, and blocking is opt-in per repo. The generators have only just
       # been repaired, so every committed spec in the fleet predates working normalization and a
       # blocking drift gate would redden all 17 repos at once for a backlog rather than for a
