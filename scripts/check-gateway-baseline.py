@@ -38,7 +38,7 @@ KNOWN_GATEWAYS = {
 }
 SEVERITY_ORDER = {"critical": 3, "major": 2, "minor": 1}
 REQUIRED_FIELDS = ("id", "title", "owner", "scope", "status", "severity",
-                   "applies_when", "policy")
+                   "applies_when", "policy", "rationale", "remediation", "detector", "refs")
 MAX_DETAILS = 25
 
 
@@ -487,15 +487,20 @@ def tls_backend_hops(repo: Repo) -> Finding:
     return Finding(evidence="no raw gateway-to-backend net.Dial/net.DialTimeout call")
 
 
+# Keyed by the catalog's `detector` NAME, not by control id, matching
+# check-api-contract.py. RFC-0039 §"Machine verification" tells the reader that the catalog's
+# detector key is what binds a control to its implementation, so binding by id here would make
+# that statement false and would let a catalog entry be renamed without anything noticing that
+# the implementation stayed behind.
 DETECTORS = {
-    "GW-0001": shared_baseline_loaded,
-    "GW-0002": no_local_policy_redefinition,
-    "GW-0003": module_floor,
-    "GW-0004": protocol_gateway_proxy,
-    "GW-0005": bounded_long_lived_connections,
-    "GW-0006": grpc_decision_hops,
-    "GW-0007": grpc_interceptor_security,
-    "GW-0008": tls_backend_hops,
+    "shared_baseline_loaded": shared_baseline_loaded,
+    "no_local_policy_redefinition": no_local_policy_redefinition,
+    "module_floor": module_floor,
+    "protocol_gateway_proxy": protocol_gateway_proxy,
+    "bounded_long_lived_connections": bounded_long_lived_connections,
+    "grpc_decision_hops": grpc_decision_hops,
+    "grpc_interceptor_security": grpc_interceptor_security,
+    "tls_backend_hops": tls_backend_hops,
 }
 
 
@@ -512,8 +517,8 @@ def load_controls(path: Path) -> dict:
         missing = [key for key in REQUIRED_FIELDS if not control.get(key)]
         if missing:
             errors.append(f"{cid}: missing {missing}")
-        if cid not in DETECTORS:
-            errors.append(f"{cid}: no detector registered")
+        if control.get("detector") not in DETECTORS:
+            errors.append(f"{cid}: unknown detector {control.get('detector')!r}")
         if cid in seen:
             errors.append(f"{cid}: duplicate id")
         seen.add(cid)
@@ -548,7 +553,7 @@ def evaluate(repo: Repo, controls: list[dict]) -> list[dict]:
         elif not applies(repo, control["applies_when"]):
             rec["evidence"] = f"repository does not satisfy {control['applies_when']}"
         else:
-            finding = DETECTORS[cid](repo)
+            finding = DETECTORS[control["detector"]](repo)
             rec.update(evidence=finding.evidence, details=finding.details, count=finding.count)
             if finding.indeterminate:
                 rec["result"] = "indeterminate"
