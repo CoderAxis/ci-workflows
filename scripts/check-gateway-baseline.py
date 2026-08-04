@@ -40,6 +40,17 @@ SEVERITY_ORDER = {"critical": 3, "major": 2, "minor": 1}
 REQUIRED_FIELDS = ("id", "title", "owner", "scope", "status", "severity",
                    "applies_when", "policy", "rationale", "remediation", "detector", "refs")
 MAX_DETAILS = 25
+# The credited forms of gRPC server assembly. These are module-level because GW-0007's
+# APPLICABILITY and its DETECTOR both need them, and a repository that assembles a server
+# by a form only one of them recognised would either escape the control or be measured
+# against a question it does not answer.
+GRPC_ASSEMBLY = (
+    (re.compile(r"\bgrpcx\.NewServer\s*\("),
+     "shared grpcx server runtime installs authentication and authorization"),
+    (re.compile(r"\b(?:sharedgrpc|grpcHandler)\.StartGRPCServer\s*\("),
+     "shared gRPC server bootstrap installs authentication and authorization"),
+)
+RAW_GRPC_SERVER = re.compile(r"\bgrpc\.NewServer\s*\(")
 
 
 @dataclass
@@ -213,9 +224,39 @@ class Repo:
                 or self.name.endswith(("-gateway", "-bff"))
                 or str(service.get("name", "")).endswith(("-gateway", "-bff")))
 
-    def has_grpc(self) -> bool:
+    def declares_grpc_port(self) -> bool:
         ports = self.service().get("ports") or {}
         return isinstance(ports, dict) and bool(ports.get("grpc"))
+
+    def assembles_grpc_server(self) -> bool:
+        return any(pattern.search(text) or RAW_GRPC_SERVER.search(text)
+                   for _, text in self.go_sources
+                   for pattern, _ in GRPC_ASSEMBLY)
+
+    def has_grpc(self) -> bool:
+        """Whether GW-0007 applies: this repository declares a gRPC port OR assembles a server.
+
+        The port declaration alone was the original signal, and it is deliberately KEPT rather
+        than replaced, because a contract advertising a port for a server the repository never
+        assembles is itself a defect - deriving applicability from source alone would hide it by
+        making the control simply not apply.
+
+        The union exists because the port and the server live in DIFFERENT repositories on this
+        platform. announcement-service declares the port and holds no gRPC code; its
+        announcement-core dependency assembles the server with the shared interceptor chain and
+        declared no port, so the control was applied to the repository with the port but not the
+        code, and skipped on the repository with the code but not the port. Following go.mod into
+        the dependency is not the fix: announcement-core is a VERSIONED require, so in CI - where
+        exactly one repository is checked out - its source is not on disk, and such a detector
+        would pass locally while staying indeterminate in CI.
+
+        Widening to assembly also closes an evasion path, which is the stronger reason. A service
+        assembling grpc.NewServer with no interceptors FAILS; moving that assembly into its -core
+        module downgraded the FAIL to INDETERMINATE, so the control could be escaped by moving
+        code one module away. That is the same shape as the GW-0006 evasion where centralising
+        policy into platform-shared-go put it beyond every gateway control's reach.
+        """
+        return self.declares_grpc_port() or self.assembles_grpc_server()
 
     def owns_shared_baseline(self) -> bool:
         """Whether this repository DEFINES the shared baseline rather than consuming it.
@@ -478,15 +519,21 @@ def grpc_interceptor_security(repo: Repo) -> Finding:
     all_text = "\n".join(text for _, text in repo.go_sources)
     # grpcx.NewServer owns both unary and stream authentication/authorization chains. The older
     # shared bootstrap is also legitimate: it delegates to that same platform runtime.
-    if re.search(r"\bgrpcx\.NewServer\s*\(", all_text):
-        return Finding(evidence="shared grpcx server runtime installs authentication and authorization")
-    if re.search(r"\b(?:sharedgrpc|grpcHandler)\.StartGRPCServer\s*\(", all_text):
-        return Finding(evidence="shared gRPC server bootstrap installs authentication and authorization")
+    for pattern, evidence in GRPC_ASSEMBLY:
+        if pattern.search(all_text):
+            return Finding(evidence=evidence)
 
-    direct = re.search(r"\bgrpc\.NewServer\s*\(", all_text)
+    direct = RAW_GRPC_SERVER.search(all_text)
     if not direct:
-        return Finding(evidence="INDETERMINATE: service contract declares gRPC but server assembly "
-                                "is not visible in repository source", indeterminate=True)
+        # Stays INDETERMINATE rather than failing, and the distinction is real: from a single
+        # checkout there is no way to tell a repository whose server is assembled by a dependency
+        # from one that serves no gRPC at all. The evidence names both readings so the verdict is
+        # actionable, because "not visible" alone describes the detector's view rather than the
+        # two very different situations that produce it.
+        return Finding(evidence="INDETERMINATE: declares a gRPC port but assembles no server in "
+                                "this repository - either a dependency assembles it, and that "
+                                "module is in scope on its own source, or the port declaration "
+                                "is a contract defect", indeterminate=True)
     authn = bool(re.search(r"(?i)(?:authenticate|authentication|authn|service.?token).*(?:interceptor|chain)|"
                            r"(?:interceptor|chain).*(?:authenticate|authentication|authn|service.?token)",
                            all_text))

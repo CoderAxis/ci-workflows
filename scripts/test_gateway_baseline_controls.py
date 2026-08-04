@@ -346,6 +346,64 @@ def test_gw0007_grpc_interceptors():
                "GW-0007 must reject a bare gRPC server with no authn/authz interceptor evidence")
 
 
+def test_gw0007_applies_to_a_declared_port_or_an_assembled_server():
+    """Applicability is the UNION of a declared port and an assembled server, and both halves
+    have to be asserted together, because each guards a different failure.
+
+    Dropping the port half would hide a contract defect: a repository advertising a gRPC port for
+    a server it never assembles would stop being in scope instead of being reported.
+
+    Dropping the assembly half reopens an EVASION. A bare grpc.NewServer with no interceptors
+    fails this control, but the server and the port live in different repositories here - the
+    wrapper service declares the port while its -core module assembles the server. So moving an
+    unprotected assembly into a core module that declares no port took it out of scope entirely,
+    turning a FAIL into no verdict at all. That is the same shape as the GW-0006 evasion, where
+    centralising policy into platform-shared-go put it beyond every gateway control's reach.
+    """
+    port_only = "service:\n  name: wrapper\n  ports: {grpc: 9090}\n"
+    no_port = "service:\n  name: core-module\n  ports: {http: 8080}\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, {"service.contract.yaml": port_only,
+                               "doc.go": "package wrapper\n"})
+        expect(repo.has_grpc(),
+               "a declared gRPC port must keep the repository in scope even with no server, "
+               "so a port advertising a server that does not exist stays reportable")
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, {
+            "service.contract.yaml": no_port,
+            "server.go": "package server\nfunc start() { _ = grpc.NewServer() }\n",
+        })
+        expect(repo.has_grpc(),
+               "a repository that ASSEMBLES a gRPC server must be in scope even without a "
+               "declared port, or an unprotected assembly escapes by moving into a core module")
+        expect(m.grpc_interceptor_security(repo).count == 1,
+               "and once in scope that bare assembly must still FAIL, otherwise widening "
+               "applicability would have added a verdict without adding enforcement")
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, {"service.contract.yaml": no_port,
+                               "consumer.go": "package consumer\nfunc c() { _ = grpcx.Client(rt) }\n"})
+        expect(not repo.has_grpc(),
+               "a gRPC CLIENT is not a served surface: calling grpcx.Client must NOT pull a "
+               "repository into scope, or every consumer on the platform becomes in scope")
+
+
+def test_gw0007_indeterminate_evidence_names_both_readings():
+    """The INDETERMINATE evidence must state what is unknown, not merely that it is unknown.
+
+    "server assembly is not visible in repository source" describes the DETECTOR's view, while
+    two very different situations produce it: a dependency assembles the server, or nothing does
+    and the port declaration is wrong. Those need opposite responses, so a reader who cannot tell
+    them apart cannot act on the verdict.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, {"service.contract.yaml": GRPC_CONTRACT, "doc.go": "package wrapper\n"})
+        finding = m.grpc_interceptor_security(repo)
+        expect(finding.indeterminate, "a declared port with no assembly is INDETERMINATE, not a pass")
+        expect("dependency" in finding.evidence and "contract defect" in finding.evidence,
+               "evidence must name BOTH readings - a dependency assembling it, or a contract "
+               f"defect - so the verdict is actionable; got: {finding.evidence!r}")
+
+
 def test_gw0008_tls_backend():
     bad = """package proxy
 func dial(backendHost string) { _, _ = net.DialTimeout("tcp", backendHost, time.Second) }

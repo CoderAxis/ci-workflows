@@ -231,27 +231,35 @@ controls:
       chain. The shared grpcx server runtime and shared gRPC server bootstrap are credited because
       they install both controls centrally; explicit unary and stream chains are also credited
       when both controls are visible. A custom server assembly whose interceptor behaviour cannot
-      be established from repository source is INDETERMINATE.
+      be established from repository source is INDETERMINATE. Applicability is the UNION of a
+      declared gRPC port and an assembled gRPC server, because on this platform the two live in
+      different repositories: a wrapper service declares the port while its core module assembles
+      the server. A gRPC client is not a served surface and does not bring a repository in scope.
     rationale: >-
       Where a service does not enforce for itself, the gateway is the only thing between a caller
       and the data, which is the whole of the defence-in-depth argument. Enforcement is required
       in the interceptor chain rather than per handler for two reasons: a per-handler rule makes
       repeating an authorization call in every method the cheapest route to a green verdict, and
       it still leaves the next RPC anyone adds exposed by default. The census taken by running
-      this detector over all 123 repositories found 31 declaring a gRPC server, 24 provably
-      enforcing both decisions, zero measured violations and seven INDETERMINATE. The seven are
-      recorded as unresolved rather than as gaps because the detector could not see a server
-      assembly, which is a different finding from a server assembled without enforcement: in some
-      the assembly lives in a sibling core module this per-repository scan does not read, and in
-      others the service contract advertises a gRPC port for a server the repository never
-      registers.
+      this detector over all 124 repositories finds 29 provably enforcing both decisions, zero
+      measured violations and seven INDETERMINATE. Applicability follows assembly as well as the
+      port declaration because keying on the port alone both understated coverage and left an
+      evasion: five repositories that genuinely assemble a server declared no port and were
+      skipped, and because a bare assembly with no interceptors FAILS while a repository with no
+      port is not measured at all, moving an unprotected assembly into a core module downgraded a
+      failure to no verdict. That is the same shape as the GW-0006 evasion, where centralising
+      policy into platform-shared-go put it beyond the reach of every gateway control. Following
+      go.mod into the dependency was rejected as the fix: those core modules are versioned
+      requires rather than local replaces, so in CI - where one repository is checked out - their
+      source is absent, and such a detector would pass locally while staying INDETERMINATE in CI.
     remediation: >-
       Install authentication and authorization in the server's unary AND stream interceptor
       chains, or adopt the shared gRPC server runtime that installs both. For an INDETERMINATE
-      verdict, establish which case it is before writing code: if the assembly is in a sibling
-      module the detector's reach is what needs widening, and if the contract declares a server
-      that does not exist the contract is what needs correcting. Adding an interceptor to a
-      service that already enforces somewhere the scan could not reach is not a fix.
+      verdict, establish which case it is before writing code: if the assembly lives in a module
+      this repository depends on, that module is in scope on its own source and is where the
+      verdict belongs, and if the contract declares a port for a server that does not exist the
+      contract is what needs correcting. Adding an interceptor to a service that already enforces
+      somewhere the scan could not reach is not a fix.
     detector: grpc_interceptor_security
     refs: [ADR-0088, ADR-0089, RFC-0039]
 
