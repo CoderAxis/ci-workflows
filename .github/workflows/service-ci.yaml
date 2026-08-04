@@ -1633,15 +1633,43 @@ jobs:
       - name: Run the generator and require normalization to execute
         id: generate
         shell: bash
+        env:
+          DRIFT_BLOCKING: ${{ vars.OPENAPI_DRIFT_BLOCKING == 'true' }}
         run: |
           set -euo pipefail
 
           if [[ ! -f scripts/swagger.sh ]]; then
-            # Category C: the openapicontract engine, which owns its own gate. The static guard
-            # above has already established that such an engine positively exists here, so this
-            # is a different generator rather than the absence of one.
-            echo "::notice::no scripts/swagger.sh; generation is gated by openapi-contract-check."
+            # Category C: the openapicontract engine. The static guard above established that
+            # such an engine positively EXISTS here; it could not establish that anything runs
+            # it, and nothing did. `openapi-contract-check` was named by a notice on this line
+            # and invoked by no job in the fleet, so a change to the typed operation registry
+            # or to an example fixture merged alongside a docs/openapi.json generated before
+            # it, and every check stayed green - a step that did not happen looking identical
+            # to one that passed, which is the shape this file refuses everywhere else.
+            #
+            # The target regenerates the document in memory and byte-compares it against the
+            # committed one, so running it IS the drift gate for this engine, and it is the
+            # whole gate: there is no working tree to diff afterwards, which is why the two
+            # steps below stay keyed to the swagger.sh path via ran=false.
+            rc=0
+            make openapi-contract-check || rc=$?
             echo "ran=false" >> "${GITHUB_OUTPUT}"
+
+            if [[ "${rc}" -eq 0 ]]; then
+              echo "The committed document is what the typed registry generates."
+              exit 0
+            fi
+
+            # Blocking is opt-in per repo, on the same variable and for the same reason as the
+            # committed-spec drift step below: this gate has never run anywhere, so making it
+            # hard fleet-wide would redden repos for a backlog rather than for a regression.
+            # Unlike that step it always EXECUTES, because the failure being repaired here is
+            # a check that was never reached at all.
+            if [[ "${DRIFT_BLOCKING}" == "true" ]]; then
+              echo "::error::docs/openapi.json is not what the typed registry generates. Run 'make openapi-contract' and commit the result."
+              exit 1
+            fi
+            echo "::notice::docs/openapi.json is not what the typed registry generates; run 'make openapi-contract' and commit it. Not blocking: set the OPENAPI_DRIFT_BLOCKING repo variable to 'true' to enforce."
             exit 0
           fi
 
