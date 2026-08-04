@@ -55,6 +55,65 @@ GRPC_CONTRACT = """service:
   name: test-service
   ports: {grpc: 9090}
 """
+INTERNAL_GATEWAY_CONTRACT = """service:
+  name: test-gateway
+  type: gateway
+  internet_facing: false
+  ports: {http: 8080}
+"""
+UNDECLARED_GATEWAY_CONTRACT = """service:
+  name: test-gateway
+  type: gateway
+  ports: {http: 8080}
+"""
+
+
+def test_gw0001_distinguishes_all_three_internet_facing_answers():
+    """A declared `false` must be BELIEVED, not treated the same as an absent field.
+
+    GW-0001 had no branch for False, so it fell through to the indeterminate return and
+    produced the same verdict AND the same evidence as an undeclared field - evidence saying
+    the repository "does not establish whether this gateway is internet-facing" about a
+    contract that established precisely that. `true` was honoured while `false` was
+    discarded.
+
+    Two things followed. An internal gateway could not reach a clean verdict by declaring
+    what it is, so GW-0001 was permanently indeterminate on every internal gateway in the
+    fleet. And an operator who correctly declared one was told the repository does not
+    establish it, from which the only reasonable conclusion is that the field does not work.
+
+    All three answers are asserted together because the failure mode was two of them
+    collapsing into one. Testing `false` alone would pass against a detector that had simply
+    stopped reading the field.
+    """
+    cases = [
+        (INTERNAL_GATEWAY_CONTRACT, "pass",
+         "a contract declaring the gateway internal answers GW-0001's question"),
+        (GATEWAY_CONTRACT, "fail",
+         "an internet-facing gateway with no loader must still fail"),
+        (UNDECLARED_GATEWAY_CONTRACT, "indeterminate",
+         "an undeclared field must NOT be credited: ingress is infra-owned here, so silence "
+         "is genuinely unknown rather than internal"),
+    ]
+    verdicts = {}
+    for contract, expected, why in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp, {
+                "service.contract.yaml": contract,
+                "main.go": "package main\nfunc main() {}\n",
+            })
+            finding = m.shared_baseline_loaded(repo)
+            got = ("indeterminate" if finding.indeterminate
+                   else "fail" if finding.count else "pass")
+            expect(got == expected, f"{why} (expected {expected}, got {got})")
+            verdicts[expected] = finding.evidence
+
+    expect(verdicts["pass"] != verdicts["indeterminate"],
+           "the declared-internal and undeclared cases must not share evidence text; "
+           "identical evidence for a known and an unknown answer is the original defect")
+    expect("not internet-facing" in verdicts["pass"],
+           "the passing evidence must say WHY the baseline is not required, so a reader can "
+           "tell this apart from a gateway that adopted the baseline")
 
 
 def test_gw0001_shared_baseline():
