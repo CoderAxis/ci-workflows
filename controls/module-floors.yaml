@@ -48,3 +48,15 @@ floors:
       enum that every service's OpenAPI components are projected from. v0.7.0 is the vintage
       controls/common-v1-components.json is generated from, so a pin below it cannot produce
       components matching the reference and will fail API-0007.
+
+  github.com/coderaxis/platform-shared-go:
+    min: v1.22.0
+    reason: >-
+      First release carrying platform/gatewaybaseline, the embedded gateway security baseline
+      and its loader (ADR-0096). A floor rather than an exact pin for the reason this file's
+      header already gives: an exact pin across this many repositories turns every shared-module
+      release into a fleet-wide migration. GW-0003 enforces it.
+
+      The floor is deliberately the same release that made platform-shared-go/httpclient
+      instrumented. A gateway below it both lacks the baseline and, if it uses the shared HTTP
+      client, propagates no trace context - so there is no version worth pinning between them.

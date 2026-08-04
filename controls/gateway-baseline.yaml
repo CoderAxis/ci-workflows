@@ -1,0 +1,114 @@
+# Gateway security baseline control catalogue.
+#
+# Detection is intentionally conservative. Where repository source cannot prove that a
+# legitimate implementation is present or absent, the detector reports INDETERMINATE rather
+# than turning uncertainty into a violation.
+
+version: 1
+domain: gateway-baseline
+policy_ssot: [ADR-0095, ADR-0096, RFC-0039]
+
+controls:
+  - id: GW-0001
+    title: Internet-facing gateways load the shared security baseline
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: critical
+    applies_when: gateway
+    policy: >-
+      An internet-facing gateway imports the platform-shared-go gateway baseline package and
+      calls its loader. A repository-local copy of auth, authz, headers, ratelimit or security
+      baseline configuration is a violation. When source does not establish whether the gateway
+      is internet-facing, the detector reports INDETERMINATE rather than requiring redundant
+      local loading in an internal-only gateway.
+
+  - id: GW-0002
+    title: Gateways do not redefine baseline-owned policy
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    applies_when: gateway
+    policy: >-
+      A gateway does not redefine the top-level auth, authz, headers, ratelimit or security maps
+      locally. An override is permitted only when gateway-baseline-exceptions.yaml declares the
+      key and a non-empty reason. Parsed YAML is inspected so comments and nested keys are not
+      mistaken for policy definitions.
+
+  - id: GW-0003
+    title: Gateways meet the shared baseline module floor
+    owner: platform-architecture
+    scope: manifest
+    status: active
+    severity: major
+    applies_when: gateway
+    policy: >-
+      A gateway directly pins github.com/coderaxis/platform-shared-go at or above the
+      gateway-baseline floor in controls/module-floors.yaml. An absent, replaced, pseudo-version
+      or otherwise uncomparable pin is a violation rather than an assumed pass.
+
+  - id: GW-0004
+    title: Protocol traffic terminates at its protocol gateway
+    owner: platform-architecture
+    scope: config
+    status: active
+    severity: critical
+    applies_when: gateway
+    policy: >-
+      No surface routing rule marked websocket: true may name another gateway as its upstream.
+      Gateway upstreams are established from service-registry classifications and gateway names;
+      an unresolved dynamic upstream is INDETERMINATE rather than guessed.
+
+  - id: GW-0005
+    title: Long-lived connections have timeout and concurrency bounds
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    applies_when: gateway
+    policy: >-
+      Every long-lived connection surface declares both an idle timeout and a maximum concurrent
+      connection cap. A bidirectional io.Copy tunnel without a read deadline is a violation.
+      Pooled HTTP transport MaxConnsPerHost is not credited for a hijacked connection. If a
+      long-lived implementation is found but source cannot correlate its limits confidently, the
+      detector reports INDETERMINATE.
+
+  - id: GW-0006
+    title: Authentication decisions use gRPC
+    owner: platform-architecture
+    scope: config
+    status: active
+    severity: critical
+    applies_when: gateway
+    policy: >-
+      Authentication validation and authorization checks use gRPC. A configured auth
+      validate_endpoint or authz check_endpoint whose value is an HTTP URL or URL path is a
+      violation. Unparseable or dynamically generated configuration is INDETERMINATE.
+
+  - id: GW-0007
+    title: gRPC services enforce authentication and authorization
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: critical
+    applies_when: grpc-service
+    policy: >-
+      A service exposing gRPC enforces authentication and authorization in its server interceptor
+      chain. The shared grpcx server runtime and shared gRPC server bootstrap are credited because
+      they install both controls centrally; explicit unary and stream chains are also credited
+      when both controls are visible. A custom server assembly whose interceptor behaviour cannot
+      be established from repository source is INDETERMINATE.
+
+  - id: GW-0008
+    title: Gateway backend hops use TLS
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    applies_when: gateway
+    policy: >-
+      Gateway-to-backend connections use TLS. A live-code net.Dial or net.DialTimeout call to a
+      backend, upstream, service or target host is a violation. Commented examples are ignored,
+      and a raw dial whose destination cannot be classified from source is INDETERMINATE rather
+      than guessed.

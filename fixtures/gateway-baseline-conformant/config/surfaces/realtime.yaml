@@ -1,0 +1,9 @@
+routing:
+  rules:
+    - pattern: /ws
+      service: inboxxhq-chat-service
+      websocket: true
+
+decision_services:
+  auth_grpc_service: inboxxhq-auth-service:50060
+  authz_grpc_service: inboxxhq-authz-service:50061
