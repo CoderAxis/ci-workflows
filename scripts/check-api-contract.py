@@ -155,6 +155,14 @@ XRATELIMIT_SITE_RE = re.compile(r'\.(?:Header|Set|Add)\(\s*"(X-RateLimit-[A-Za-z
                                 re.IGNORECASE)
 STATUS_429_RE = re.compile(r"\bStatusTooManyRequests\b")
 RETRY_AFTER_SET_RE = re.compile(r'\.(?:Header|Set|Add)\(\s*"Retry-After"', re.IGNORECASE)
+# The two ways a Go function can put bytes on an HTTP response. A function with
+# neither is CLASSIFYING a 429, not sending one - every BFF's gRPC client has a
+# `case codes.ResourceExhausted: httpStatus = 429` translation helper that takes
+# an error and returns an error, and demanding Retry-After from it asks a value
+# constructor to set a header it has no writer for. Checking for the writer rather
+# than excluding the assignment line keeps the genuine
+# `status := 429; c.JSON(status, ...)` pattern in scope.
+RESPONSE_WRITER_RE = re.compile(r"gin\.Context|http\.ResponseWriter|\bResponseWriter\b")
 
 # API-0012: the literal header spelling REQUIRES the hyphen, which is what keeps this from
 # matching the unrelated Go identifier `IdempotencyKey` or the JSON tag `idempotency_key` that
@@ -488,6 +496,8 @@ def standard_ratelimit_fields(repo: ServiceRepo) -> Finding:
                 continue
             start, end = _enclosing_function_span(lines, i)
             func_text = "\n".join(lines[start:end])
+            if not RESPONSE_WRITER_RE.search(func_text):
+                continue
             if RETRY_AFTER_SET_RE.search(func_text):
                 continue
             violations.append(f"{rel}:{i + 1}: writes 429 Too Many Requests with no Retry-After "

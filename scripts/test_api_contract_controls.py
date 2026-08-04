@@ -383,11 +383,11 @@ def test_standard_ratelimit_fields():
     with tempfile.TemporaryDirectory() as tmp:
         go = (
             'package mw\n\n'
-            'func Other(w Writer) {\n'
+            'func Other(w http.ResponseWriter) {\n'
             '\tw.WriteHeader(http.StatusOK)\n'
             '}\n\n'
             '// Throttle answers http.StatusTooManyRequests with Retry-After set.\n'
-            'func Throttle(w Writer) {\n'
+            'func Throttle(w http.ResponseWriter) {\n'
             '\tw.Header().Set("Retry-After", "30")\n'
             '\tw.WriteHeader(http.StatusTooManyRequests)\n'
             '}\n'
@@ -403,10 +403,14 @@ def test_standard_ratelimit_fields():
                              f"flagged, got {f.count}: {f.details}")
 
     # 429 with Retry-After in the same function: clean.
+    # Signatures here spell out *gin.Context deliberately. The detector only asks
+    # for Retry-After from a function that HAS somewhere to write it, so a fixture
+    # abbreviating the handler to `c *Context` would be skipped and would assert
+    # nothing - real gin handlers never abbreviate it.
     with tempfile.TemporaryDirectory() as tmp:
         go = (
             'package mw\n\n'
-            'func Limit(c *Context) {\n'
+            'func Limit(c *gin.Context) {\n'
             '\tc.Header("Retry-After", "60")\n'
             '\tc.Status(http.StatusTooManyRequests)\n'
             '}\n'
@@ -417,11 +421,45 @@ def test_standard_ratelimit_fields():
 
     # 429 with no Retry-After anywhere in the function: violation.
     with tempfile.TemporaryDirectory() as tmp:
-        go = 'package mw\n\nfunc Limit(c *Context) {\n\tc.Status(http.StatusTooManyRequests)\n}\n'
+        go = 'package mw\n\nfunc Limit(c *gin.Context) {\n\tc.Status(http.StatusTooManyRequests)\n}\n'
         f = m.standard_ratelimit_fields(make_repo(tmp, go_files={"rl.go": go}))
         expect(f.count == 1, f"standard_ratelimit_fields: 429 with NO Retry-After MUST be a "
                              f"violation, got {f.count}")
         expect("Retry-After" in f.details[0], f"unexpected detail: {f.details}")
+
+    # A gRPC-code-to-HTTP-status translation helper: it takes an error and returns an
+    # error, so it has no context and no ResponseWriter. Every BFF carries one. Asking
+    # it for Retry-After asks a value constructor to set a header it cannot set.
+    with tempfile.TemporaryDirectory() as tmp:
+        go = (
+            'package clients\n\n'
+            'func serviceError(err error, operation string) error {\n'
+            '\thttpStatus := 500\n'
+            '\tswitch st.Code() {\n'
+            '\tcase codes.ResourceExhausted:\n'
+            '\t\thttpStatus = http.StatusTooManyRequests\n'
+            '\t}\n'
+            '\treturn &ServiceError{Status: httpStatus}\n'
+            '}\n'
+        )
+        f = m.standard_ratelimit_fields(make_repo(tmp, go_files={"grpc.go": go}))
+        expect(f.count == 0, f"standard_ratelimit_fields: mapping a gRPC code onto an HTTP "
+                             f"status is not writing a response, got {f.count}: {f.details}")
+
+    # The other direction, and the reason this gate checks the WRITER rather than
+    # excluding the assignment line. Excluding `x = 429` outright would silence this
+    # too - and here the 429 really is sent, with no Retry-After alongside it.
+    with tempfile.TemporaryDirectory() as tmp:
+        go = (
+            'package mw\n\n'
+            'func Throttle(c *gin.Context) {\n'
+            '\tstatus := http.StatusTooManyRequests\n'
+            '\tc.JSON(status, gin.H{"error": "slow down"})\n'
+            '}\n'
+        )
+        f = m.standard_ratelimit_fields(make_repo(tmp, go_files={"rl.go": go}))
+        expect(f.count == 1, f"standard_ratelimit_fields: a status variable that is then "
+                             f"written MUST still be a violation, got {f.count}: {f.details}")
 
     # Regression: a switch-case label or a bare `return` of the constant is a status-code
     # MAPPING, not a response write, and must not be counted (this is a real false positive
@@ -446,7 +484,7 @@ def test_standard_ratelimit_fields():
     with tempfile.TemporaryDirectory() as tmp:
         go = (
             'package handlers\n\n'
-            'func writeServiceError(c *Context, code int) {\n'
+            'func writeServiceError(c *gin.Context, code int) {\n'
             '\tswitch code {\n'
             '\tcase http.StatusTooManyRequests:\n'
             '\t\twriteError(c, http.StatusTooManyRequests, "rate limited")\n'
