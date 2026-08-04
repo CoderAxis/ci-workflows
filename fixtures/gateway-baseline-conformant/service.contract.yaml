@@ -1,0 +1,7 @@
+service:
+  name: fixture-gateway
+  type: gateway
+  internet_facing: true
+  ports:
+    http: 8080
+    grpc: 9090

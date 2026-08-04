@@ -1,0 +1,13 @@
+auth:
+  service_url: http://inboxxhq-auth-service:80
+  validate_endpoint: /api/v1/auth/validate
+
+authz:
+  service_url: http://inboxxhq-authz-service:80
+  check_endpoint: /api/v1/authz/check-permission
+
+routing:
+  rules:
+    - pattern: /ws
+      service: inboxxhq-realtime-gateway
+      websocket: true
