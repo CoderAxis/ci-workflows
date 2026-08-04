@@ -52,9 +52,10 @@ def expect(cond: bool, msg: str) -> None:
         FAILURES.append(msg)
 
 
-def make_repo(tmp, go_files: dict | None = None, spec: dict | None = None) -> "m.ServiceRepo":
+def make_repo(tmp, go_files: dict | None = None, spec: dict | None = None,
+              config_files: dict | None = None) -> "m.ServiceRepo":
     root = pathlib.Path(tmp)
-    for rel, content in (go_files or {}).items():
+    for rel, content in {**(go_files or {}), **(config_files or {})}.items():
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -374,6 +375,27 @@ def test_standard_ratelimit_fields():
                              f"violation, got {f.count}")
         expect("X-RateLimit-Limit" in f.details[0], f"unexpected detail: {f.details}")
 
+    # A COMMENT is documentation, never a write. This is not merely a spurious finding: a doc
+    # comment sits ABOVE its function, so the enclosing-function lookup attributes the finding to
+    # the PREVIOUS function - the report then names code that has nothing to do with it. The
+    # fixture below is a developer documenting the correct behaviour and being flagged for the
+    # absence of exactly what the comment describes.
+    with tempfile.TemporaryDirectory() as tmp:
+        go = (
+            'package mw\n\n'
+            'func Other(w Writer) {\n'
+            '\tw.WriteHeader(http.StatusOK)\n'
+            '}\n\n'
+            '// Throttle answers http.StatusTooManyRequests with Retry-After set.\n'
+            'func Throttle(w Writer) {\n'
+            '\tw.Header().Set("Retry-After", "30")\n'
+            '\tw.WriteHeader(http.StatusTooManyRequests)\n'
+            '}\n'
+        )
+        f = m.standard_ratelimit_fields(make_repo(tmp, go_files={"rl.go": go}))
+        expect(f.count == 0, f"standard_ratelimit_fields: a comment mentioning the status is not "
+                             f"a write site, got {f.count}: {f.details}")
+
     with tempfile.TemporaryDirectory() as tmp:
         go = 'package mw\n\nfunc Limit(c *Context) {\n\tc.Header("X-Request-ID", "abc")\n}\n'
         f = m.standard_ratelimit_fields(make_repo(tmp, go_files={"rl.go": go}))
@@ -463,6 +485,26 @@ def test_idempotency_declared():
         f = m.idempotency_declared(make_repo(tmp, go_files={"h.go": go}, spec=spec))
         expect(f.count == 0, f"idempotency_declared: declaring the header parameter MUST clear "
                              f"the violation, got {f.count}: {f.details}")
+
+    # PUT and DELETE are idempotent by definition (RFC 9110 9.2.2), so they are out of scope: an
+    # Idempotency-Key there asks for a mechanism to deliver a guarantee the method already gives.
+    # 46 of this control's first 93 fleet findings were DELETE, so the distinction is most of it.
+    with tempfile.TemporaryDirectory() as tmp:
+        spec = base_spec({"/widgets/{id}": {"put": op(), "delete": op()}})
+        go = 'package handlers\n\nfunc Handle(c *Context) {\n\t_ = c.GetHeader("Idempotency-Key")\n}\n'
+        f = m.idempotency_declared(make_repo(tmp, go_files={"h.go": go}, spec=spec))
+        expect(f.count == 0, f"idempotency_declared: PUT and DELETE are idempotent by definition "
+                             f"and MUST NOT be required to declare Idempotency-Key, got "
+                             f"{f.count}: {f.details}")
+
+    # PATCH is in scope precisely because it is NOT idempotent, so the exclusion above must not
+    # be read as "only POST".
+    with tempfile.TemporaryDirectory() as tmp:
+        spec = base_spec({"/widgets/{id}": {"patch": op()}})
+        go = 'package handlers\n\nfunc Handle(c *Context) {\n\t_ = c.GetHeader("Idempotency-Key")\n}\n'
+        f = m.idempotency_declared(make_repo(tmp, go_files={"h.go": go}, spec=spec))
+        expect(f.count == 1, f"idempotency_declared: PATCH is not idempotent and MUST stay in "
+                             f"scope, got {f.count}: {f.details}")
 
     # Declaring it as a QUERY parameter is NOT the same as declaring the header - RFC-0038 §6
     # says "header parameter" and org-bff's real spec makes exactly this mistake today.
@@ -605,6 +647,50 @@ def test_security_response_headers():
         f = m.security_response_headers(make_repo(tmp, go_files={"mw.go": go}))
         expect(f.count == 0, f"security_response_headers: all 5 headers present while serving "
                              f"HTML MUST pass, got {f.count}: {f.details}")
+
+    # A header applied from CONFIGURATION is applied. edge-gateway's middleware loops over a
+    # list in config/base/headers.yaml, so a Go-only scan reported four headers absent while
+    # every response actually carried them - a false positive that would have had an agent add
+    # a redundant hardcoded copy to a repo that already conformed.
+    with tempfile.TemporaryDirectory() as tmp:
+        go = ('package mw\n\n'
+              'func Handle(c *Context) {\n'
+              '\tfor _, h := range cfg.Headers.Response.Security {\n'
+              '\t\tc.Header(h.Name, h.Value)\n'
+              '\t}\n'
+              '}\n')
+        cfg = ('headers:\n'
+               '  response:\n'
+               '    security:\n'
+               '      - name: "Strict-Transport-Security"\n'
+               '        value: "max-age=63072000"\n'
+               '      - name: "X-Content-Type-Options"\n'
+               '        value: "nosniff"\n'
+               '      - name: "Referrer-Policy"\n'
+               '        value: "strict-origin-when-cross-origin"\n'
+               '      - name: "Permissions-Policy"\n'
+               '        value: "geolocation=()"\n')
+        f = m.security_response_headers(make_repo(
+            tmp, go_files={"mw.go": go}, config_files={"config/base/headers.yaml": cfg}))
+        expect(f.count == 0, f"security_response_headers: headers set from a config name/value "
+                             f"list MUST count as set, got {f.count}: {f.details}")
+
+    # The inverse, or the fix above would trade a false positive for a false negative: a bare
+    # list entry is a REQUEST-header allowlist and sets no response header. edge-gateway's real
+    # config names Idempotency-Key and If-Match exactly this way under `forward:`.
+    with tempfile.TemporaryDirectory() as tmp:
+        go = 'package mw\n\nfunc Handle(c *Context) {\n\tc.JSON(200, nil)\n}\n'
+        cfg = ('headers:\n'
+               '  forward:\n'
+               '    - "Referrer-Policy"\n'
+               '    - "Permissions-Policy"\n'
+               '    - "Strict-Transport-Security"\n'
+               '    - "X-Content-Type-Options"\n')
+        f = m.security_response_headers(make_repo(
+            tmp, go_files={"mw.go": go}, config_files={"config/base/headers.yaml": cfg}))
+        expect(f.count == 4, f"security_response_headers: a bare config list entry is an "
+                             f"allowlist, not a response header being set, so all 4 MUST still "
+                             f"be reported missing, got {f.count}: {f.details}")
 
 
 # ── End-to-end mutation test: the real CLI, not just the detector functions ─────────────────

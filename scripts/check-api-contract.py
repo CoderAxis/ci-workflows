@@ -159,6 +159,10 @@ RETRY_AFTER_SET_RE = re.compile(r'\.(?:Header|Set|Add)\(\s*"Retry-After"', re.IG
 # API-0012: the literal header spelling REQUIRES the hyphen, which is what keeps this from
 # matching the unrelated Go identifier `IdempotencyKey` or the JSON tag `idempotency_key` that
 # several services use for a same-named-but-different domain concept (an outbox/ledger key).
+# PUT and DELETE are idempotent by definition (RFC 9110 9.2.2), so they are deliberately absent:
+# an Idempotency-Key there duplicates a guarantee the method already carries.
+NON_IDEMPOTENT_METHODS = ("post", "patch")
+
 IDEMPOTENCY_TEXT_RE = re.compile(r"idempotency-key", re.IGNORECASE)
 HEADER_READ_CALL_RE = re.compile(r"\bGetHeader\(|\.Header\.Get\(|Request\.Header\.Get\(",
                                  re.IGNORECASE)
@@ -442,6 +446,12 @@ def _is_429_write_site(line: str) -> bool:
     Retry-After" for a status value that is only ever being translated or matched, not written.
     """
     stripped = line.strip()
+    # A comment is documentation, never a write, and getting this wrong is worse than one
+    # spurious finding: a doc comment sits ABOVE its function, so the enclosing-function lookup
+    # attributes the finding to the PREVIOUS function and the report names code that has nothing
+    # to do with it.
+    if stripped.startswith(("//", "*", "/*")):
+        return False
     if re.match(r"^case\s+http\.StatusTooManyRequests\s*:$", stripped):
         return False
     if re.match(r"^return\s+http\.StatusTooManyRequests\s*$", stripped):
@@ -537,10 +547,17 @@ def idempotency_declared(repo: ServiceRepo) -> Finding:
 
     Correlating a specific handler to a specific operation is not reliable by static analysis
     (see RFC0038_CONTROL_SPEC.md), so this is a REPO-LEVEL approximation: if ANY runtime source
-    reads the header, every unsafe operation in the spec is expected to declare it. This
-    over-counts relative to a perfect mapping, which is acceptable only because the control
-    ratchets - stated in the evidence string so a reader of a CI log is not misled into thinking
-    every counted operation was proven to read the key.
+    reads the header, every operation in scope is expected to declare it. This over-counts
+    relative to a perfect mapping, which is acceptable only because the control ratchets -
+    stated in the evidence string so a reader of a CI log is not misled into thinking every
+    counted operation was proven to read the key.
+
+    Scope is POST and PATCH, not every unsafe method. PUT and DELETE are idempotent by
+    definition (RFC 9110 9.2.2), so an idempotency key on them asks for a mechanism to deliver a
+    guarantee the method already gives, and 46 of this control's first 93 fleet findings were
+    DELETE. RFC-0038 6's rationale is that "a caller reading the published contract cannot
+    discover a safe-retry mechanism the server already implements" - for PUT and DELETE the
+    method IS that mechanism, so there is nothing undiscoverable to declare.
     """
     if not _repo_honours_idempotency_key(repo):
         return Finding(True, "no runtime source reads the Idempotency-Key header; the repo does "
@@ -549,7 +566,7 @@ def idempotency_declared(repo: ServiceRepo) -> Finding:
         return Finding(False, f"docs/openapi.json is unparseable: {repo.spec_error}", count=1)
     violations = []
     for path, method, op in repo.operations():
-        if method not in ("post", "put", "patch", "delete"):
+        if method not in NON_IDEMPOTENT_METHODS:
             continue
         if not _op_declares_header_param(op, "Idempotency-Key"):
             violations.append(f"{method.upper()} {path}: does not declare an Idempotency-Key "
@@ -559,10 +576,10 @@ def idempotency_declared(repo: ServiceRepo) -> Finding:
            "in runtime source, which is not proof that every counted operation's handler reads "
            "it - only that the count can never rise faster than real adoption.]")
     if violations:
-        return Finding(False, f"{len(violations)} unsafe operation(s) missing Idempotency-Key"
-                              f"{note}", _capped(violations), len(violations))
-    return Finding(True, f"repo reads Idempotency-Key and every unsafe operation declares it{note}",
-                   count=0)
+        return Finding(False, f"{len(violations)} non-idempotent operation(s) missing "
+                              f"Idempotency-Key{note}", _capped(violations), len(violations))
+    return Finding(True, f"repo reads Idempotency-Key and every non-idempotent operation declares "
+                         f"it{note}", count=0)
 
 
 def trace_context_propagated(repo: ServiceRepo) -> Finding:
@@ -592,10 +609,25 @@ def trace_context_propagated(repo: ServiceRepo) -> Finding:
                          "instrumented transport", count=0)
 
 
+def _collect_header_rules(node, found: set) -> None:
+    """Walk parsed config for {name: <header>, value: <something>} rules."""
+    if isinstance(node, dict):
+        name, value = node.get("name"), node.get("value")
+        if isinstance(name, str) and value is not None:
+            found.add(name.strip().lower())
+        for v in node.values():
+            _collect_header_rules(v, found)
+    elif isinstance(node, list):
+        for v in node:
+            _collect_header_rules(v, found)
+
+
 def _header_set_anywhere(repo: ServiceRepo, header_name: str) -> bool:
     pattern = re.compile(r'\.(?:Header|Set|Add)\(\s*"' + re.escape(header_name) + r'"',
                          re.IGNORECASE)
-    return any(pattern.search(text) for _, text in repo.runtime_sources())
+    if any(pattern.search(text) for _, text in repo.runtime_sources()):
+        return True
+    return header_name.lower() in repo.config_header_rules()
 
 
 def _serves_html(repo: ServiceRepo) -> bool:
@@ -647,6 +679,7 @@ class ServiceRepo:
         self.spec_path = root / "docs" / "openapi.json"
         self.spec, self.spec_error = self._load_spec()
         self.go_sources = self._load_go_sources()
+        self._config_headers = None
         self.baseline_error = None
         self.baseline = self._load_baseline()
 
@@ -678,6 +711,43 @@ class ServiceRepo:
 
     def runtime_sources(self):
         return [(rel, text) for rel, text in self.go_sources if not rel.name.endswith("_test.go")]
+
+    def config_header_rules(self) -> set:
+        """Lower-cased header names that configuration sets to a value.
+
+        A header applied declaratively is still applied, and reading Go alone gets this
+        wrong: edge-gateway sets its whole security header set from config/base/headers.yaml
+        via a middleware that loops over the list, so a source-only scan reports four
+        headers absent while every response actually carries them.
+
+        Only a name/value PAIR counts. A bare list entry is a request-header allowlist
+        (`forward:`, `allowed_headers:`, both of which name Idempotency-Key and If-Match
+        here) and sets no response header, so matching the header name alone would trade
+        this false positive for a false negative.
+        """
+        if self._config_headers is None:
+            found = set()
+            for path in sorted(self.root.rglob("*.y*ml")) + sorted(self.root.rglob("*.json")):
+                rel_parts = path.relative_to(self.root).parts
+                if any(p.startswith(".") for p in rel_parts):
+                    continue
+                if {"vendor", "node_modules", "testdata"} & set(rel_parts):
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                # Cheap pre-filter: every rule shape needs the literal key.
+                if "name" not in text:
+                    continue
+                try:
+                    doc = (json.loads(text) if path.suffix == ".json"
+                           else yaml.safe_load(text))
+                except (ValueError, yaml.YAMLError):
+                    continue
+                _collect_header_rules(doc, found)
+            self._config_headers = found
+        return self._config_headers
 
     def test_sources(self):
         return [(rel, text) for rel, text in self.go_sources if rel.name.endswith("_test.go")]
