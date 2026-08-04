@@ -130,7 +130,17 @@ if __name__ == "__main__":
         raise SystemExit(
             "usage: IHQ_BIN=/path/to/ihq check-detector-parity.py <repo>...\n"
             "\n"
-            "Pass every repository that publishes docs/openapi.json, plus at least one\n"
-            "fixture that CONFORMS. A run in which every verdict is the same value proves\n"
-            "nothing, and the spread table at the end is what shows whether it did.")
+            "Pass every repository that publishes docs/openapi.json, plus BOTH fixtures in\n"
+            "this repo's fixtures/ directory:\n"
+            "\n"
+            "  fixtures/rfc0038-conformant   passes all eight controls\n"
+            "  fixtures/rfc0038-violating    identical but for an unpinned OpenAPI dialect\n"
+            "\n"
+            "The fixtures are not optional padding. A run in which every verdict is the same\n"
+            "value proves nothing - both implementations would 'agree' by saying yes to\n"
+            "everything - and the real fleet does not supply both outcomes for every control:\n"
+            "API-0015 was flagged on all 37 repos and API-0013 on none, so those two columns\n"
+            "were untested until the fixtures supplied the missing side. The spread table at\n"
+            "the end reports this per control; treat any column that is not 'both outcomes\n"
+            "seen' as an untested claim rather than a passing one.")
     sys.exit(main(args))

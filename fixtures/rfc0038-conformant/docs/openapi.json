@@ -1,0 +1,411 @@
+{
+ "openapi": "3.0.3",
+ "info": {
+  "title": "conformant fixture",
+  "version": "1.0.0"
+ },
+ "paths": {
+  "/widgets/{id}": {
+   "get": {
+    "operationId": "getWidget",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "If-None-Match",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "ok",
+      "headers": {
+       "ETag": {
+        "schema": {
+         "type": "string"
+        },
+        "description": "Strong validator from resource state"
+       }
+      },
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "304": {
+      "description": "not modified"
+     },
+     "429": {
+      "content": {
+       "application/problem+json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "type": {
+           "type": "string"
+          },
+          "title": {
+           "type": "string"
+          },
+          "status": {
+           "type": "integer"
+          },
+          "detail": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      "description": "too many requests",
+      "headers": {
+       "Retry-After": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   },
+   "put": {
+    "operationId": "updateWidget",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "If-Match",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "ok",
+      "headers": {
+       "ETag": {
+        "schema": {
+         "type": "string"
+        },
+        "description": "Strong validator from resource state"
+       }
+      }
+     },
+     "412": {
+      "content": {
+       "application/problem+json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "type": {
+           "type": "string"
+          },
+          "title": {
+           "type": "string"
+          },
+          "status": {
+           "type": "integer"
+          },
+          "detail": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      "description": "precondition failed"
+     },
+     "428": {
+      "content": {
+       "application/problem+json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "type": {
+           "type": "string"
+          },
+          "title": {
+           "type": "string"
+          },
+          "status": {
+           "type": "integer"
+          },
+          "detail": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      "description": "precondition required"
+     }
+    }
+   },
+   "patch": {
+    "operationId": "patchWidget",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "If-Match",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "Idempotency-Key",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/merge-patch+json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "ok",
+      "headers": {
+       "ETag": {
+        "schema": {
+         "type": "string"
+        },
+        "description": "Strong validator from resource state"
+       }
+      }
+     },
+     "412": {
+      "content": {
+       "application/problem+json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "type": {
+           "type": "string"
+          },
+          "title": {
+           "type": "string"
+          },
+          "status": {
+           "type": "integer"
+          },
+          "detail": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      "description": "precondition failed"
+     },
+     "415": {
+      "content": {
+       "application/problem+json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "type": {
+           "type": "string"
+          },
+          "title": {
+           "type": "string"
+          },
+          "status": {
+           "type": "integer"
+          },
+          "detail": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      "description": "unsupported media type"
+     },
+     "428": {
+      "content": {
+       "application/problem+json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "type": {
+           "type": "string"
+          },
+          "title": {
+           "type": "string"
+          },
+          "status": {
+           "type": "integer"
+          },
+          "detail": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      "description": "precondition required"
+     }
+    }
+   },
+   "delete": {
+    "operationId": "deleteWidget",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "If-Match",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "deleted"
+     },
+     "412": {
+      "content": {
+       "application/problem+json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "type": {
+           "type": "string"
+          },
+          "title": {
+           "type": "string"
+          },
+          "status": {
+           "type": "integer"
+          },
+          "detail": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      "description": "precondition failed"
+     },
+     "428": {
+      "content": {
+       "application/problem+json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "type": {
+           "type": "string"
+          },
+          "title": {
+           "type": "string"
+          },
+          "status": {
+           "type": "integer"
+          },
+          "detail": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      "description": "precondition required"
+     }
+    }
+   }
+  },
+  "/widgets": {
+   "post": {
+    "operationId": "createWidget",
+    "parameters": [
+     {
+      "name": "Idempotency-Key",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "created",
+      "headers": {
+       "ETag": {
+        "schema": {
+         "type": "string"
+        },
+        "description": "Strong validator from resource state"
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+}
