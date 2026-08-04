@@ -190,6 +190,65 @@ def test_conditional_requests_reads():
                              f"operation even though the path ends in a template param, got "
                              f"{f.count}: {f.details}")
 
+    # OpenAPI lets an operation reference a shared parameter or response OBJECT, and the fleet's
+    # specs do. The checks read .name/.headers/.content straight off those nodes, which a bare
+    # {"$ref": ...} does not carry, so each of the four cases below read as "documents nothing"
+    # and reported something absent that is present. Every one pointed the same wrong way: the
+    # only way to satisfy the control was to inline what had deliberately been shared.
+    # The live example was notification-service's paginated GET /org/notifications/order/{orderID},
+    # which refs components.responses.ArraySuccess and so was read as a single-resource read.
+    #
+    # MUST NOT count: a $ref'd response whose resolved body is a collection.
+    with tempfile.TemporaryDirectory() as tmp:
+        spec = base_spec({"/widgets/{widgetId}": {"get": op(responses={
+            "200": {"$ref": "#/components/responses/ArraySuccess"}})}})
+        spec.setdefault("components", {})["responses"] = {"ArraySuccess": {
+            "description": "OK",
+            "content": {"application/json": {"schema": {
+                "type": "object", "properties": {"data": {"type": "array",
+                                                          "items": {"type": "object"}}}}}}}}
+        f = m.conditional_requests(make_repo(tmp, spec=spec))
+        expect(f.count == 0, f"conditional_requests: a $ref'd response resolving to a collection "
+                             f"MUST NOT be read as a single-resource read, got {f.count}: "
+                             f"{f.details}")
+
+    # MUST NOT count: a $ref'd response that declares the ETag header.
+    with tempfile.TemporaryDirectory() as tmp:
+        spec = base_spec({"/widgets/{widgetId}": {"get": op(responses={
+            "200": {"$ref": "#/components/responses/TaggedWidget"}})}})
+        spec.setdefault("components", {})["responses"] = {"TaggedWidget": {
+            "description": "OK", "headers": {"ETag": {"schema": {"type": "string"}}}}}
+        f = m.conditional_requests(make_repo(tmp, spec=spec))
+        expect(f.count == 0, f"conditional_requests: an ETag declared on a SHARED response MUST "
+                             f"count as declared, got {f.count}: {f.details}")
+
+    # MUST NOT count: pagination declared through a $ref'd parameter.
+    with tempfile.TemporaryDirectory() as tmp:
+        spec = base_spec({"/widgets/{widgetId}": {"get": op(
+            parameters=[{"$ref": "#/components/parameters/PageParam"}])}})
+        spec.setdefault("components", {})["parameters"] = {"PageParam": {
+            "name": "page", "in": "query", "schema": {"type": "integer"}}}
+        f = m.conditional_requests(make_repo(tmp, spec=spec))
+        expect(f.count == 0, f"conditional_requests: a $ref'd pagination parameter MUST exclude "
+                             f"the operation the same as an inline one, got {f.count}: "
+                             f"{f.details}")
+
+    # MUST NOT count: a write whose If-Match comes from a $ref'd parameter, where the matching
+    # GET does declare an ETag - otherwise part 2 of the control is vacuous for shared params.
+    with tempfile.TemporaryDirectory() as tmp:
+        spec = base_spec({"/widgets/{widgetId}": {
+            "get": op(responses={"200": {"description": "OK",
+                                         "headers": {"ETag": {"schema": {"type": "string"}}}}}),
+            "put": op(parameters=[{"$ref": "#/components/parameters/IfMatchParam"}],
+                      responses={"200": {"description": "OK"}, "412": {"description": "stale"},
+                                 "428": {"description": "precondition required"}}),
+        }})
+        spec.setdefault("components", {})["parameters"] = {"IfMatchParam": {
+            "name": "If-Match", "in": "header", "schema": {"type": "string"}}}
+        f = m.conditional_requests(make_repo(tmp, spec=spec))
+        expect(f.count == 0, f"conditional_requests: an If-Match from a SHARED parameter MUST "
+                             f"count as declared, got {f.count}: {f.details}")
+
     # MUST NOT count: a declared pagination parameter marks this a collection, not a resource.
     # This is the exact "Cart.Items" false-positive shape the RFC calls out by name.
     with tempfile.TemporaryDirectory() as tmp:

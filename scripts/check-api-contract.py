@@ -281,6 +281,54 @@ def _op_declares_pagination_param(op: dict) -> bool:
     return False
 
 
+def _deref_component(node, section: dict, prefix: str, seen: frozenset = frozenset()):
+    """Follow a single `$ref` into one components section, with a cycle guard."""
+    if not isinstance(node, dict) or "$ref" not in node:
+        return node
+    ref = node["$ref"]
+    if not isinstance(ref, str) or not ref.startswith(prefix):
+        return node
+    name = ref[len(prefix):]
+    if name in seen:
+        return node
+    target = section.get(name)
+    if not isinstance(target, dict):
+        return node
+    return _deref_component(target, section, prefix, seen | {name})
+
+
+def _deref_op(op: dict, components_root: dict) -> dict:
+    """An operation with its `parameters` and `responses` resolved through components.
+
+    OpenAPI lets an operation reference a shared parameter or response OBJECT, and these specs
+    do. The checks below read `.name`, `.headers` and `.content` straight off those nodes, and a
+    bare {"$ref": ...} carries none of them - so an operation documenting an ETag, an If-Match
+    parameter or a pagination parameter in a shared component reads as documenting nothing.
+
+    Each of the four resulting misreads points the same wrong way: it reports something absent
+    that is present, and the only way to satisfy the control becomes inlining what was
+    deliberately shared. Resolving schema $refs while ignoring response and parameter ones was
+    the gap - notification-service's paginated GET /org/notifications/order/{orderID} refs
+    components.responses.ArraySuccess, and so was read as a single-resource read owing an ETag.
+    """
+    if not isinstance(op, dict):
+        return op
+    params_section = components_root.get("parameters") or {}
+    responses_section = components_root.get("responses") or {}
+    resolved = dict(op)
+    if isinstance(op.get("parameters"), list):
+        resolved["parameters"] = [
+            _deref_component(p, params_section, "#/components/parameters/")
+            for p in op["parameters"]
+        ]
+    if isinstance(op.get("responses"), dict):
+        resolved["responses"] = {
+            status: _deref_component(body, responses_section, "#/components/responses/")
+            for status, body in op["responses"].items()
+        }
+    return resolved
+
+
 def _resolve_schema_ref(schema, components: dict, seen: frozenset = frozenset()):
     """Follow a single `$ref` into components.schemas, one level of cycle-guard included."""
     if not isinstance(schema, dict) or "$ref" not in schema:
@@ -370,8 +418,10 @@ def conditional_requests(repo: ServiceRepo) -> Finding:
     """API-0008: single-resource reads carry ETag; matching writes honour If-Match/412/428."""
     if repo.spec_error:
         return Finding(False, f"docs/openapi.json is unparseable: {repo.spec_error}", count=1)
-    components = ((repo.spec or {}).get("components") or {}).get("schemas") or {}
-    ops = repo.operations()
+    components_root = (repo.spec or {}).get("components") or {}
+    components = components_root.get("schemas") or {}
+    ops = [(path, method, _deref_op(op, components_root))
+           for path, method, op in repo.operations()]
 
     read_etag_paths = set()
     violations = []
