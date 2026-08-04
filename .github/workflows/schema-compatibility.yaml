@@ -16,14 +16,20 @@ name: Reusable Schema Compatibility
 #
 # What it does (single source of truth — change here, roll the @v1 tag, never
 # edit ~27 core-postgres repos):
-#   1. Spin an ephemeral postgres:18 and mint a short-lived GitHub-App module-read
+#   1. On pull requests, refuse any change that rewrites a migration the base branch
+#      already has (scripts/check-migration-immutability.py). Editing an applied
+#      migration cannot change the database that ran it — it only makes the two
+#      disagree, and dbmigrate then fails the PreSync hook by checksum, which leaves
+#      the app unhealthy and silently stops it promoting out of dev. A 2026-07-24
+#      sweep did this to fourteen repos' baselines at once.
+#   2. Spin an ephemeral postgres:18 and mint a short-lived GitHub-App module-read
 #      token (private-module fetch), exactly like the per-repo gate used to.
-#   2. Apply the repo's migrations to HEAD via the shared, auto-detecting ladder in
+#   3. Apply the repo's migrations to HEAD via the shared, auto-detecting ladder in
 #      scripts/schema-compat.sh (goose round-trip test -> schema.GooseUpDSN ->
 #      embedded schema.Migrate baseline -> static SQL lint). This fixes the
 #      long-standing "goose gap" where pure-goose repos silently fell through to a
 #      static lint and never actually migrated.
-#   3. Discover every *_outbox table the migrated schema owns and run the shared
+#   4. Discover every *_outbox table the migrated schema owns and run the shared
 #      canonical-outbox verifier (RFC-0032 / ADR-0069) against each, failing closed
 #      on ANY semantic drift (columns/types/defaults/domain/PK/unique/checks/
 #      partitioning). Discovery replaced an opt-in `table` input that no caller ever
@@ -110,8 +116,13 @@ jobs:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
       GONOSUMDB: github.com/coderaxis/*
     steps:
+      # Full history: the immutability guard below compares each migration against
+      # the base branch. A shallow clone cannot see the base, and it fails loudly
+      # rather than reporting "no violations" from a checkout that cannot look.
       - name: Checkout service (caller)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Checkout central SSOT (schema-compat script)
         uses: actions/checkout@v4
@@ -119,6 +130,17 @@ jobs:
           repository: coderaxis/github-actions
           ref: ${{ inputs.actions_ref }}
           path: .coderaxis-ci
+
+      # Cheap and first: needs neither Postgres nor Go, and an edited migration is
+      # not worth spending a schema round-trip to discover. Pull requests only —
+      # the guard asks "does this change rewrite history the base already has",
+      # which has no meaning once the merge has happened.
+      - name: Applied migrations are immutable
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          python3 .coderaxis-ci/scripts/check-migration-immutability.py \
+            --base-ref "origin/${{ github.base_ref }}"
 
       - name: Resolve Postgres connection URL
         shell: bash
