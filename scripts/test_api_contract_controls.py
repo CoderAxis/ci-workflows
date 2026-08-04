@@ -692,6 +692,36 @@ def test_security_response_headers():
                              f"allowlist, not a response header being set, so all 4 MUST still "
                              f"be reported missing, got {f.count}: {f.details}")
 
+    # A call into the shared platform/ginmiddleware.SecurityHeaders() sets all 4 base headers
+    # in one place, so a repo that correctly adopts it - the fix RFC-0038 section 9 asks for -
+    # carries none of the literal header strings itself. Without this marker every such repo
+    # would report the same four headers "absent" forever, indistinguishable from a repo that
+    # set none of them at all.
+    with tempfile.TemporaryDirectory() as tmp:
+        go = ('package bootstrap\n\n'
+              'func startHTTPServer() {\n'
+              '\trouter.Use(ginmiddleware.SecurityHeaders())\n'
+              '}\n')
+        f = m.security_response_headers(make_repo(tmp, go_files={"server.go": go}))
+        expect(f.count == 0, f"security_response_headers: a call into the shared "
+                             f"ginmiddleware.SecurityHeaders() MUST count as setting all 4 base "
+                             f"headers, got {f.count}: {f.details}")
+
+    # The marker covers the 4 base headers only. A repo that serves HTML AND calls the shared
+    # middleware bare (no WithHTML/WithContentSecurityPolicy) has not opted into CSP, so it
+    # MUST still be asked for it explicitly - the marker is not a blanket pass.
+    with tempfile.TemporaryDirectory() as tmp:
+        go = ('package bootstrap\n\n'
+              'func startHTTPServer() {\n'
+              '\trouter.Use(ginmiddleware.SecurityHeaders())\n'
+              '\tc.Data(200, "text/html; charset=utf-8", body)\n'
+              '}\n')
+        f = m.security_response_headers(make_repo(tmp, go_files={"server.go": go}))
+        expect(f.count == 1, f"security_response_headers: the shared-middleware marker MUST NOT "
+                             f"imply Content-Security-Policy on a repo serving HTML, got "
+                             f"{f.count}: {f.details}")
+        expect("Content-Security-Policy" in f.details[0], f"unexpected detail: {f.details}")
+
 
 # ── End-to-end mutation test: the real CLI, not just the detector functions ─────────────────
 #
