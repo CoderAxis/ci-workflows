@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -265,10 +266,35 @@ func dial() { _ = "documented only" }
 
 def test_catalog_shape_and_end_to_end_fixtures():
     doc = yaml.safe_load(CONTROLS.read_text(encoding="utf-8"))
-    exact = {"id", "title", "owner", "scope", "status", "severity", "applies_when", "policy"}
+    # The shape is api-contract.yaml's, deliberately: the GW family and the API family are the
+    # same kind of control, so a reader who knows one catalog knows this one. `exact` rather than
+    # a subset because an unrecognised key is far more likely to be a typo that silently does
+    # nothing than a deliberate extension - `remediaton:` would read as present to a human and be
+    # absent to every consumer.
+    exact = {"id", "title", "owner", "scope", "status", "severity", "applies_when", "policy",
+             "rationale", "remediation", "detector", "refs"}
     for control in doc["controls"]:
         expect(set(control) == exact,
-               f"{control.get('id')}: catalogue entry must use the exact required shape")
+               f"{control.get('id')}: catalogue entry must use the exact required shape; "
+               f"missing={sorted(exact - set(control))} unexpected={sorted(set(control) - exact)}")
+
+    # Every detector named by the catalog must resolve, and every implemented detector must be
+    # named by exactly one control. The second half is the one worth having: an implementation
+    # nothing references is dead code that still reads as enforcement.
+    named = [c.get("detector") for c in doc["controls"]]
+    expect(sorted(named) == sorted(set(named)), f"a detector is bound twice: {named}")
+    expect(set(named) == set(m.DETECTORS),
+           f"catalog and implementation disagree; catalog-only={sorted(set(named) - set(m.DETECTORS))} "
+           f"implementation-only={sorted(set(m.DETECTORS) - set(named))}")
+
+    # refs must name real policy documents rather than a plausible-looking string, since the
+    # catalog is where a reader goes to find the normative text behind a finding.
+    for control in doc["controls"]:
+        for ref in control["refs"]:
+            expect(re.fullmatch(r"(ADR|RFC)-\d{4}", ref) is not None,
+                   f"{control['id']}: ref {ref!r} is not an ADR-NNNN or RFC-NNNN identifier")
+        expect("RFC-0039" in control["refs"],
+               f"{control['id']}: must cite RFC-0039, which carries its normative definition")
 
     clean = subprocess.run(
         [sys.executable, str(CHECKER), str(FIXTURES / "gateway-baseline-conformant"),
