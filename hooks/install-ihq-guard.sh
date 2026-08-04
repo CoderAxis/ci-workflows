@@ -33,7 +33,11 @@ ROOT="${ROOT:-$(cd "${HERE}/../.." && pwd)}"
 block_for() {   # $1 = fast|full
   cat <<EOF
 ${BEGIN}
-# Contract checks driven by the ihq CLI. Bypass once with SKIP_IHQ_GUARD=1.
+# Contract checks driven by the ihq CLI. There is no SKIP_IHQ_GUARD: that escape
+# hatch was deliberately removed, because a gate with a documented bypass is the
+# bypass. git's own --no-verify still skips every hook, and that is the point --
+# it leaves a visible choice rather than an env var that reads as sanctioned.
+# A failure here is the answer CI will give you, delivered sooner.
 if [[ -f "\$(git rev-parse --show-toplevel)/.githooks/lib/ihq-guard.sh" ]]; then
   # shellcheck source=/dev/null
   source "\$(git rev-parse --show-toplevel)/.githooks/lib/ihq-guard.sh"
