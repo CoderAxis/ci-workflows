@@ -56,15 +56,6 @@ allow:
       that `r.GET("/", ...)` registers the service-info root, so the document has described
       nothing but operational surface since it was written.
 
-  - service: event-gateway
-    disposition: delete-spec
-    reason: >-
-      The source mounts no HTTP routes at all, and the spec describes /health x3, /metrics
-      and /api/docs-json. That last path is a runtime documentation endpoint, which control
-      API-0001 forbids outright - so the only non-operational route in this document is one
-      the platform prohibits serving. Delete the spec; if /api/docs-json is still mounted
-      anywhere, that is an API-0001 violation to fix separately.
-
   - service: edge-gateway
     disposition: delete-spec
     reason: >-
@@ -86,16 +77,6 @@ allow:
       it, so after the rest declaration goes it declares no business interface on any
       transport. That is worth knowing separately - this is a deployed scaffold - but it is
       not a reason to keep publishing a contract for four operational endpoints.
-
-  - service: twilio-adapter-service
-    disposition: delete-spec
-    reason: >-
-      One health probe plus three /platform/data-explorer reads, which are debug endpoints
-      returning bare unenveloped arrays and are a fleet-wide deletion candidate in their own
-      right. There is no business API and, decisively for an adapter, no provider-driven
-      route: the Twilio webhook this service is named for now lands on
-      communication-service, which holds the signature verification. So nothing a provider
-      or a browser calls is described here.
 
   # ── delete-spec: a real HTTP surface that ADR-0094 retires ──────────────────────────────
   # These nine differ from the entries above: each publishes a substantial, genuine business
@@ -201,14 +182,6 @@ allow:
       during remediation whether the internal half belongs in a published contract at all or
       should move to proto, per ADR-0093 rule 3.
 
-  - service: call-routing-service
-    disposition: declare-rest
-    reason: >-
-      Nine mounted API routes against a 16-operation spec, and the sources annotate only a
-      fraction of them, so regeneration will shrink the document. The service also declares
-      callrouting.v1 over gRPC; the HTTP half is being migrated, so this may become
-      delete-spec rather than declare-rest once the migration lands.
-
   - service: payment-service
     disposition: declare-rest
     reason: >-
@@ -244,11 +217,3 @@ allow:
       has no scripts/swagger.sh and no route annotations, so declaring interfaces.rest needs
       a generator decision first - either annotate and adopt the shared generator, or move it
       to the openapicontract engine that owns its own gate.
-
-  - service: media-service
-    disposition: declare-rest
-    reason: >-
-      Six mounted routes (four API, one internal, one operational) against a ten-path spec
-      that splits five API and five internal. Media streaming is a genuinely HTTP-shaped
-      concern - range requests and content negotiation - so this one is likely to stay
-      HTTP-first rather than migrate.
