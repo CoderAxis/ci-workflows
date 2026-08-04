@@ -182,6 +182,17 @@ DEFAULT_CLIENT_RE = re.compile(r"\bhttp\.DefaultClient\b")
 BARE_OUTBOUND_CALL_RE = re.compile(r"\bhttp\.(Get|Post|Head|PostForm)\(")
 SHARED_TRANSPORT_MARKER_RE = re.compile(r"\bhttpx\.NewTransport\(|\bhttpclient\.")
 
+# API-0015. Mirrors SHARED_TRANSPORT_MARKER_RE above: a call into the shared
+# platform/ginmiddleware.SecurityHeaders() middleware sets Strict-Transport-Security,
+# X-Content-Type-Options, Referrer-Policy and Permissions-Policy in one place, so a
+# consuming repo carries none of those literal header strings itself. Without this marker
+# every repo that correctly adopts the shared middleware - the fix RFC-0038 section 9 asks
+# for - reports the same four headers "absent" forever, which is indistinguishable from a
+# repo that set none of them at all. It does not cover Content-Security-Policy: that header
+# is opt-in per RFC-0038 section 9 (WithHTML/WithContentSecurityPolicy), so a bare
+# SecurityHeaders() call is not evidence a caller made that choice.
+SECURITY_HEADERS_MARKER_RE = re.compile(r"\bginmiddleware\.SecurityHeaders\(")
+
 # API-0015.
 SECURITY_HEADERS_REQUIRED = ("Strict-Transport-Security", "X-Content-Type-Options",
                              "Referrer-Policy", "Permissions-Policy")
@@ -627,6 +638,8 @@ def _header_set_anywhere(repo: ServiceRepo, header_name: str) -> bool:
                          re.IGNORECASE)
     if any(pattern.search(text) for _, text in repo.runtime_sources()):
         return True
+    if header_name in SECURITY_HEADERS_REQUIRED and repo.uses_shared_security_headers():
+        return True
     return header_name.lower() in repo.config_header_rules()
 
 
@@ -751,6 +764,10 @@ class ServiceRepo:
 
     def test_sources(self):
         return [(rel, text) for rel, text in self.go_sources if rel.name.endswith("_test.go")]
+
+    def uses_shared_security_headers(self) -> bool:
+        """Whether runtime source wires the shared ginmiddleware.SecurityHeaders()."""
+        return any(SECURITY_HEADERS_MARKER_RE.search(text) for _, text in self.runtime_sources())
 
     def has_http_api(self) -> bool:
         return self.spec is not None or self.spec_error is not None
