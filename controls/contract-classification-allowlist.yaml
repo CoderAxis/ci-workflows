@@ -107,61 +107,6 @@ allow:
       Thirty-one operations, reached through org-bff and platform-bff over chat.v1.ChatService.
       No edge surface routes to it directly.
 
-  - service: compliance-service
-    disposition: delete-spec
-    reason: >-
-      Forty-three operations over compliance.v1.ComplianceService. No direct edge routes. Note
-      its ADR-0009 and CHANGELOG both claim the runtime serves this spec via
-      openapiroutes.RegisterFileWithOptions in internal/bootstrap/server.go - no such file and
-      no such call exist, so that documentation is stale and should be corrected, not honoured.
-
-  - service: configuration-service
-    disposition: delete-spec
-    reason: >-
-      Seventeen operations over configuration.v1.ConfigurationService, no direct edge routes.
-      Its scripts/swagger.sh is also destructive - seventeen committed operations against zero
-      @Router annotations, because the handlers live in configuration-core across a module
-      boundary swag cannot cross - so the generator would empty this document if anyone ran it.
-      Dropping interfaces.rest switches the generator job off, which removes that footgun as a
-      consequence rather than needing a separate repair.
-
-  - service: customer-service
-    disposition: delete-spec
-    reason: >-
-      Fourteen operations over customer.v1.CustomerService, no direct edge routes.
-
-  - service: ledger-service
-    disposition: delete-spec
-    reason: >-
-      Forty-five operations over ledger.v1.LedgerService. This one has been confirmed twice
-      independently as BFF-only, and the contract registry shows it has never published a
-      contract at all. Same destructive generator as configuration-service: forty-five
-      committed operations, zero @Router annotations.
-
-  - service: observability-service
-    disposition: delete-spec
-    reason: >-
-      Nine operations over observability.v1.ObservabilityService, no direct edge routes.
-
-  - service: order-service
-    disposition: delete-spec
-    reason: >-
-      Thirty-six operations over order.v1.OrderService, no direct edge routes. Checkout reaches
-      it through org-bff.
-
-  - service: product-service
-    disposition: delete-spec
-    reason: >-
-      Forty-six operations over product.v1.ProductService. The edge does route /products, but
-      to subscription-service and payment-service, not here.
-
-  - service: user-service
-    disposition: delete-spec
-    reason: >-
-      Fifty-six operations over user.v1.UserService, no direct edge routes; profile reads reach
-      it through platform-bff. Its docs/openapi.go embeds the spec, so deletion is a compile
-      failure until that file goes with it.
-
   # ── declare-rest: a real HTTP surface the catalog fails to declare ──────────────────────
   # Blocked on the generator repair described above. Route counts are from the service's own
   # sources (deployable plus core), not from the spec, because the spec is the thing in doubt.
