@@ -1397,6 +1397,81 @@ jobs:
             --has-rest "${{ needs.resolve.outputs.has_rest }}" \
             --allowlist .classification-tools/controls/contract-classification-allowlist.yaml
 
+  # ── gateway security baseline ───────────────────────────────────────────────────────────────
+  # GW-0001..GW-0008, the RFC-0039 controls. Until this job existed the control set was normative
+  # and measurable on demand while blocking nothing, which is the state RFC-0039 named as an
+  # obligation precisely so it could not be quietly left that way.
+  #
+  # UNGATED ON PURPOSE, like contract-classification above and for the reason that job's comment
+  # spells out at length: a control set whose applicability comes from a field a repository
+  # declares about itself is retired by declaring the field differently, and nothing goes red.
+  # The detector decides scope from the repository's own service contract - seven controls need a
+  # gateway or BFF, and grpc_server_auth_interceptors needs a declared gRPC port - and reports
+  # `skipped` for a control that does not apply, so running everywhere costs a few seconds on a
+  # repository the controls have nothing to say about and removes the gate that could hide one.
+  #
+  # This is not a hypothetical failure mode. The CLI implementation of these same controls
+  # decided gateway scope from the DIRECTORY NAME alone, so a repository declaring `type: gateway`
+  # was skipped by all eight and reported clean - not failing, not out of scope, but a clean
+  # verdict for a gateway nobody had checked.
+  #
+  # Policy SSOT: ADR-0095 (protocol ingress termination), ADR-0096 (embedded shared baseline),
+  # RFC-0039 (the normative control definitions).
+  gateway-baseline:
+    name: Gateway security baseline
+    needs: resolve
+    if: needs.resolve.outputs.repo_kind == 'deployable'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the service repo
+        uses: actions/checkout@v4
+
+      # From this repository at the moving major tag, like the classification guard above and for
+      # the same reason: a gateway must not be able to weaken the security baseline it is judged
+      # by, and the catalog plus detector are one unit that has to move together.
+      - name: Check out the gateway baseline controls (SSOT)
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/github-actions
+          ref: v1
+          path: .gateway-tools
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install guard dependencies
+        shell: bash
+        run: python3 -m pip install --upgrade PyYAML
+
+      # --fail-on major, the script's default, so a critical or major control blocks and a minor
+      # one reports. The per-repository baseline the detector reads is a ratchet: an existing
+      # count is frozen and cannot rise, which is what lets the control set land on a fleet with
+      # known gaps without turning six gateways red on the same morning.
+      - name: Gateways enforce the shared security baseline (RFC-0039)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .gateway-tools/scripts/check-gateway-baseline.py . \
+            --controls .gateway-tools/controls/gateway-baseline.yaml \
+            --report gateway-baseline-report.json
+
+      # The report is kept even when the step above fails, because the counts are what a reader
+      # needs to tell a new violation from a frozen one, and re-running a red job to find out is
+      # the workflow this exists to remove.
+      - name: Upload the baseline report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-baseline-report
+          path: gateway-baseline-report.json
+          if-no-files-found: ignore
+          retention-days: 14
+
   contract:
     name: API contract
     needs: resolve
@@ -2088,9 +2163,15 @@ jobs:
     # `e2e` was the one gate nothing watched. That mattered less while it could not block a
     # deploy; now that it can, its omission would mean a release stopped by a suite nobody was
     # told had failed.
+    #
+    # contract-classification and gateway-baseline were both missing when gateway-baseline was
+    # added, which is the same omission in the same list: each is ungated and so runs on every
+    # deployable, and each can fail a run that nobody would be told about. Adding one and leaving
+    # the other would have left the newer gate watched and the older one silent.
     needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
             dockerfile, structure, lanes, vulnerabilities, sqlc, docs, contracts, dependency-review,
-            integration, e2e, contract, openapi-generator, artifact]
+            integration, e2e, contract-classification, contract, gateway-baseline,
+            openapi-generator, artifact]
     # always() rather than failure(): several gates above are conditional, and a plain failure()
     # does not run once any needed job has been skipped - which is the normal shape here, so the
     # alert would have fired only on the subset of runs where every gate happened to be relevant.

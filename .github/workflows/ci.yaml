@@ -915,6 +915,101 @@ jobs:
           print(f"{len(cases)} floor-comparison cases hold")
           PY
 
+  # ---------------------------------------------------------------------------
+  # The gateway security baseline gate (GW-0001..GW-0008) judges every deployable in the fleet, so
+  # it earns the same self-check the API-contract gate above gets: the catalog, the detector and
+  # the two fixtures are held to the standard they police.
+  #
+  # WHY TWO FIXTURES AND NOT ONE. A conformant fixture proves the detector can say yes and a
+  # violating one proves it can say no, and a detector that cannot do both is not a control. This
+  # pair has already caught the failure in both directions during development: GW-0002 reported 175
+  # findings on a gateway where 5 were real, and GW-0007 could report pass or cannot-tell but never
+  # fail, so the fleet census it exists to produce was unreachable.
+  #
+  # The fixtures are committed trees rather than tempfile-built ones, unlike the RFC-0038 fixtures
+  # above, because these controls read whole-repository shape - a go.mod pin, a service contract, a
+  # config layer layout and Go source in the same tree - and building that per-test is what makes a
+  # test unreadable rather than robust. The mutation test below is what keeps them honest.
+  #
+  # Policy SSOT: ADR-0095, ADR-0096, RFC-0039.
+  gateway-baseline:
+    name: Gateway baseline - catalog + detector self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      # Catalog shape, detector binding and reference hygiene. Asserts among other things that
+      # every implemented detector is named by some control - dead detector code reads as
+      # enforcement to anyone auditing the script - and that every control cites RFC-0039.
+      - name: Control catalog and detector wiring hold
+        run: python3 scripts/test_gateway_baseline_controls.py
+
+      # The positive half. A control set that fails a clean tree is worse than no control set,
+      # because the only way to get a green run is to stop believing the gate.
+      - name: The conformant fixture must pass all eight controls
+        run: |
+          set -euo pipefail
+          out="$(python3 scripts/check-gateway-baseline.py fixtures/gateway-baseline-conformant \
+            --controls controls/gateway-baseline.yaml 2>&1)"
+          echo "$out"
+          for control in GW-0001 GW-0002 GW-0003 GW-0004 GW-0005 GW-0006 GW-0007 GW-0008; do
+            if ! echo "$out" | grep -q "\[ok\] $control "; then
+              echo "::error::$control did not pass against the conformant fixture; a control that"
+              echo "::error::cannot return a clean verdict cannot be satisfied by fixing anything"
+              exit 1
+            fi
+          done
+          echo "all eight controls pass a conformant gateway"
+
+      # The negative half, and the one that proves the WIRING rather than the detector functions:
+      # a fixture only reddens if the catalog entry, the applies_when scope, the detector-name
+      # binding and the severity threshold are all intact end to end.
+      - name: Mutation test - the violating fixture must fail every control
+        run: |
+          set -euo pipefail
+          set +e
+          out="$(python3 scripts/check-gateway-baseline.py fixtures/gateway-baseline-violating \
+            --controls controls/gateway-baseline.yaml --fail-on major 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the violating fixture passed; the gateway detectors are not firing"
+            exit 1
+          fi
+          for control in GW-0001 GW-0002 GW-0003 GW-0004 GW-0005 GW-0006 GW-0007 GW-0008; do
+            if ! echo "$out" | grep -q "::error::\[$control\]"; then
+              echo "::error::$control did not fire against the violating fixture"
+              exit 1
+            fi
+          done
+          echo "all eight controls fired as expected (exit $rc)"
+
+      # WHY DETECTOR PARITY IS NOT A STEP HERE, since RFC-0039 requires it and its absence would
+      # otherwise look like an oversight. scripts/check-detector-parity.py compares this detector
+      # against the second implementation in `ihq validate gateway`, which lives in
+      # coderaxis/inboxxhq-cli. Running it here would need a checkout of another private repository
+      # and a Go build of it, and the default GITHUB_TOKEN is scoped to this repository alone - so
+      # the step would need a credential the OIDC model does not issue. That is the same shape as
+      # the cross-repository reference described in service-ci.yaml's contract gate, and enabling a
+      # check that cannot resolve its own inputs produces a red nobody can fix or a green that
+      # means nothing.
+      #
+      # So parity is a monorepo gate, run where both implementations are present, and it is the
+      # release of this repository - not a run of it - that the CLI is compared against. The two
+      # halves above are what CI can prove alone: the detector discriminates in both directions,
+      # and it is wired to the catalog end to end.
+
   # ── release drift (the major tag against main) ───────────────────────────────────────────────
   # Consumers pin `@v1`, a MOVING major tag. So the fleet does not run what main says; it runs
   # whatever v1 last pointed at, and the two are only equal because somebody moved the tag.
