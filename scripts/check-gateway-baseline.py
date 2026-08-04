@@ -291,6 +291,26 @@ def shared_baseline_loaded(repo: Repo) -> Finding:
             missing.append("baseline loader call")
         return Finding(1, f"internet-facing gateway is missing {', '.join(missing)}",
                        [f"repository source contains no {item}" for item in missing])
+    # A contract that declares the gateway internal ANSWERS the question, so believing it is
+    # the whole point of reading the field. This branch used to be absent, which meant False
+    # fell through to the indeterminate return below and produced the same verdict AND the
+    # same evidence as an absent field - evidence reading "does not establish whether this
+    # gateway is internet-facing" about a contract that established exactly that.
+    #
+    # The effect was that `true` was honoured while `false` was discarded, so an internal
+    # gateway could not reach a clean verdict by declaring what it is, and an operator who
+    # correctly declared one would be told the repository does not establish it and could
+    # only conclude the field does not work. GW-0001 was therefore permanently
+    # indeterminate on every internal gateway in the fleet.
+    #
+    # This does mean a repository can put itself out of scope by declaring `false`, and that
+    # is intended rather than tolerated: service.contract.yaml is this platform's declared
+    # source of truth for applicability and is reviewed as such - the same file already
+    # decides which controls apply at all. A detector that never believed the contract would
+    # not be stricter, only unable to answer.
+    if facing is False:
+        return Finding(evidence="service.contract.yaml declares this gateway is not "
+                                "internet-facing, so the shared baseline is not required")
     return Finding(evidence=("INDETERMINATE: shared loader not visible and repository source "
                              "does not establish whether this gateway is internet-facing"),
                    indeterminate=True)
