@@ -42,20 +42,6 @@ allow:
   # No sequencing dependency. Each of these publishes a spec whose entire content is the
   # service-info root plus health probes, which ADR-0093 rule 5 says is not an API contract.
 
-  - service: e2ee-service
-    disposition: delete-spec
-    reason: >-
-      The spec is / plus the three health probes, and the source mounts the service-info
-      root and a health endpoint. There is no API here to contract for; the service
-      declares e2ee.v1 over gRPC.
-
-  - service: message-dispatcher-service
-    disposition: delete-spec
-    reason: >-
-      The spec is / plus the three health probes. The repo's own ADR-0001 already records
-      that `r.GET("/", ...)` registers the service-info root, so the document has described
-      nothing but operational surface since it was written.
-
   - service: edge-gateway
     disposition: delete-spec
     reason: >-
@@ -66,17 +52,6 @@ allow:
       legitimately serves documentation, or whether those five routes are the API-0001
       violation they look like on any other service. Either way the answer is not a published
       OpenAPI contract describing them.
-
-  - service: chat-search-service
-    disposition: delete-spec
-    reason: >-
-      The four published operations are the service-info root and the three health probes,
-      the same shape as e2ee-service above. Its catalog entry declared interfaces.rest and
-      nothing else, which made it look like the fleet's one genuinely HTTP-only service; it
-      is not. It registers no gRPC server, consumes no topic, and no edge surface routes to
-      it, so after the rest declaration goes it declares no business interface on any
-      transport. That is worth knowing separately - this is a deployed scaffold - but it is
-      not a reason to keep publishing a contract for four operational endpoints.
 
   # ── delete-spec: a real HTTP surface that ADR-0094 retires ──────────────────────────────
   # These nine differ from the entries above: each publishes a substantial, genuine business
@@ -100,12 +75,6 @@ allow:
   # declares. That repository is held - it carries unpushed work and publishing it triggers a
   # multi-hour downstream fan-out - so the bundles are batched into one later change instead of
   # eleven separate ones.
-
-  - service: chat-service
-    disposition: delete-spec
-    reason: >-
-      Thirty-one operations, reached through org-bff and platform-bff over chat.v1.ChatService.
-      No edge surface routes to it directly.
 
   # ── declare-rest: a real HTTP surface the catalog fails to declare ──────────────────────
   # Blocked on the generator repair described above. Route counts are from the service's own
@@ -133,25 +102,6 @@ allow:
       Nine mounted API routes against a 12-operation spec, similarly under-annotated.
       Payment webhooks are the part most likely to remain HTTP permanently, since the
       provider chooses the transport.
-
-  - service: device-service
-    disposition: declare-rest
-    reason: >-
-      Eight mounted routes (seven API, one operational) and a 12-path spec. Declares
-      device.v1 over gRPC as well, so the HTTP half needs a migration decision.
-
-  - service: presence-service
-    disposition: declare-rest
-    reason: >-
-      Seven mounted routes (six API, one operational) and a nine-path spec. Declares
-      presence.v1 over gRPC as well.
-
-  - service: chat-sync-service
-    disposition: declare-rest
-    reason: >-
-      Six mounted API routes and an eight-path spec. The catalog declares no gRPC interface
-      for this service at all, so HTTP is currently its only interface and the spec is the
-      only contract it has.
 
   - service: realtime-gateway
     disposition: declare-rest
