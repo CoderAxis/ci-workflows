@@ -239,12 +239,56 @@ def main(repos):
         print()
         if disagree or (count_gaps and fam.strict_counts):
             failed = True
+        # A family that decided NOTHING has not agreed, and this is the one outcome the
+        # summary line above cannot express: it prints "agree 0  DISAGREE 0  count gaps 0",
+        # which is character-for-character what a clean run of a narrow scope looks like.
+        #
+        # This exited 0 on `check-detector-parity.py gateways` - one argument naming a
+        # PARENT directory rather than the repositories inside it, so a single out-of-scope
+        # "repo" was compared, every control landed in NEVER DECIDED, and the harness
+        # reported success. A parity harness that passes when it compared nothing is the
+        # same defect class it exists to catch, and the usage text already tells the reader
+        # to treat an undecided column as an untested claim rather than a passing one. That
+        # instruction is now enforced rather than offered.
+        if agree == 0 and disagree == 0:
+            print(f"  VACUOUS: the {name} family reached no verdict on any repository, so "
+                  f"this run proves nothing about agreement. {unasked} control/repo pairs "
+                  f"were out of scope. Pass the repositories THEMSELVES, not a parent "
+                  f"directory, and include both fixtures.")
+            failed = True
 
     for e in shared.get("errors", []):
         print(f"  harness error: {e}")
     # A harness that cannot run one side has not proved agreement; it has proved
     # nothing, and reporting zero disagreements would be the misleading answer.
     return 1 if (failed or shared.get("errors")) else 0
+
+
+def parse_roots(args: list) -> list:
+    """Validate positional repository roots.
+
+    Every argument is a repository PATH. There are no options, and that is worth enforcing
+    rather than assuming: the arguments used to be consumed verbatim, so `--family gateway`
+    was read as two repositories named "--family" and "gateway", and `--help` as one named
+    "--help". Both produced a report rather than a usage error - the first plausible-looking
+    invocation of a tool whose whole purpose is to be trusted about what it measured.
+
+    A nonexistent path is refused for the same reason. Comparing nothing is not a clean
+    result, and a typo in one of the twenty-odd roots a full run takes should be named at the
+    point it is made rather than absorbed into the out-of-scope tally.
+    """
+    flags = [a for a in args if a.startswith("-")]
+    if flags:
+        raise SystemExit(
+            f"error: {', '.join(flags)} looks like an option, but this harness takes only "
+            f"repository paths.\nThere is no --family, --help or --json: pass the "
+            f"repositories to compare, and select controls by choosing which to pass.")
+    missing = [a for a in args if not Path(a).is_dir()]
+    if missing:
+        raise SystemExit(
+            f"error: not a directory: {', '.join(missing)}\n"
+            f"Each argument must be a repository root.")
+    return args
 
 
 if __name__ == "__main__":
@@ -268,4 +312,4 @@ if __name__ == "__main__":
             "were untested until the fixtures supplied the missing side. The spread table at\n"
             "the end reports this per control; treat any column that is not 'both outcomes\n"
             "seen' as an untested claim rather than a passing one.")
-    sys.exit(main(args))
+    sys.exit(main(parse_roots(args)))
