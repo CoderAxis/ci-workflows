@@ -760,6 +760,23 @@ def test_security_response_headers():
                              f"{f.count}: {f.details}")
         expect("Content-Security-Policy" in f.details[0], f"unexpected detail: {f.details}")
 
+    # The inverse of the case above, or the marker trades a false negative for a false positive.
+    # Passing WithContentSecurityPolicy/WithHTML IS the caller opting in, and the shared
+    # middleware then sets the header on every response. Without this the only way to pass is a
+    # second middleware re-setting a header already set - the redundant code notification-service
+    # and communication-service each grew, both commented as existing for this scan.
+    for opt in ('ginmiddleware.WithContentSecurityPolicy("default-src \'none\'")',
+                'ginmiddleware.WithHTML()'):
+        with tempfile.TemporaryDirectory() as tmp:
+            go = ('package bootstrap\n\n'
+                  'func startHTTPServer() {\n'
+                  f'\trouter.Use(ginmiddleware.SecurityHeaders({opt}))\n'
+                  '\tc.Data(200, "text/html; charset=utf-8", body)\n'
+                  '}\n')
+            f = m.security_response_headers(make_repo(tmp, go_files={"server.go": go}))
+            expect(f.count == 0, f"security_response_headers: {opt} IS an explicit CSP opt-in and "
+                                 f"MUST count as setting the header, got {f.count}: {f.details}")
+
 
 # ── End-to-end mutation test: the real CLI, not just the detector functions ─────────────────
 #
