@@ -422,6 +422,34 @@ def test_catalog_shape_and_end_to_end_fixtures():
         expect(False, f"violating fixture emitted invalid JSON: {bad.stdout}")
 
 
+def test_write_baseline_keeps_a_human_authored_rationale():
+    """Regenerating a baseline must not delete the reason a control was frozen.
+
+    A frozen critical is only defensible if the deferral is written down next to it. When a
+    rewrite dropped every key it did not author, that reason survived exactly until the next
+    --write-baseline and the file decayed to an unexplained number.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, {"service.contract.yaml": GATEWAY_CONTRACT})
+        path = repo.root / m.BASELINE_FILE
+        path.write_text(json.dumps({
+            "_comment": "generated",
+            "_deferred_because": "ADR-0095 sequences this into the ingress wave",
+            "controls": {"GW-0004": 1},
+        }, indent=2) + "\n", encoding="utf-8")
+
+        m.write_baseline(repo, [{"control": "GW-0004", "count": 2},
+                                {"control": "GW-0008", "count": 0}])
+
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        expect(doc.get("_deferred_because") == "ADR-0095 sequences this into the ingress wave",
+               "write_baseline discarded a human-authored rationale key")
+        expect(doc.get("controls") == {"GW-0004": 2},
+               f"write_baseline did not record the new counts: {doc.get('controls')}")
+        expect(doc.get("_comment") == m.BASELINE_COMMENT,
+               "write_baseline did not refresh its own generated comment")
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items())
              if name.startswith("test_") and callable(value)]

@@ -661,6 +661,24 @@ def report(repo: Repo, results: list[dict], doc: dict, fail_on: str, threshold: 
     }
 
 
+def _preserved_baseline_keys(path: Path) -> dict:
+    """Top-level keys a human added, which a rewrite must not silently discard.
+
+    Freezing a control means recording a decision, and the reason a critical is deferred is
+    the part worth keeping. If regenerating the file deleted that reason, the only durable
+    state would be a bare number and the next reader would have to guess why it is there.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    return {k: v for k, v in doc.items() if k not in ("_comment", "controls")}
+
+
 def write_baseline(repo: Repo, results: list[dict]) -> None:
     counts = {r["control"]: r["count"] for r in results if r["count"]}
     path = repo.root / BASELINE_FILE
@@ -671,8 +689,8 @@ def write_baseline(repo: Repo, results: list[dict]) -> None:
         else:
             print(f"gateway-baseline: {repo.name} is clean - no baseline needed")
         return
-    path.write_text(json.dumps({"_comment": BASELINE_COMMENT, "controls": counts}, indent=2) + "\n",
-                    encoding="utf-8")
+    doc = {"_comment": BASELINE_COMMENT, **_preserved_baseline_keys(path), "controls": counts}
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     print(f"gateway-baseline: wrote {path} ({sum(counts.values())} violation(s) frozen)")
 
 
