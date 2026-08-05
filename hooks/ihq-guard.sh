@@ -117,6 +117,31 @@ ihq_guard_pins() {
   return 1
 }
 
+# Does THIS repository's CI actually run a contract check?
+#
+# Only used to word the blocked message truthfully. Absence is reported as absence,
+# never as a pass — the findings stand either way.
+#
+# Almost every service reaches the check INDIRECTLY: its ci.yaml is three lines
+# calling the shared service-ci.yaml, and check-api-contract runs in there. Looking
+# only for the checker's own name therefore answers "no" for the entire fleet,
+# which is the wrong answer in the more dangerous direction — it would tell a
+# service developer their findings are not enforced when they are. So match the
+# reusable callers too. openapi-contract.yaml is covered by the api-contract
+# pattern, since the name contains it.
+#
+# Comment lines are dropped before matching. Without that, this answered "yes" for
+# inboxxhq-cli on the strength of a COMMENT in its ci.yaml stating it deliberately
+# does NOT use service-ci.yaml — the same defect as the detector whose findings
+# this hook prints, reached the same way: prose naming a thing read as the thing.
+ihq_guard_ci_checks_contract() {
+  local root="$1"
+  local wf="${root}/.github/workflows"
+  [[ -d "${wf}" ]] || return 1
+  grep -rhv '^[[:space:]]*#' "${wf}" 2>/dev/null \
+    | grep -qE 'check-api-contract|api-contract\.ya?ml|service-ci\.ya?ml|ihq[[:space:]]+validate'
+}
+
 # --- entry point ------------------------------------------------------------------------------
 
 ihq_guard() {
@@ -153,7 +178,20 @@ ihq_guard() {
 
   echo "${label}: checking this repository via $(basename "${bin}")…" >&2
   if ! "${bin}" validate --repo "${repo_root}" --fail-on "${fail_on}" --details; then
-    echo "${label}: blocked. CI runs the same check, so this is the result you would get there." >&2
+    # "CI runs the same check" was printed unconditionally, and it is not true
+    # everywhere: a repo whose workflows contain no contract job — inboxxhq-cli is
+    # one, its CI is vet/test/coverage/cross-compile — stays green on main while
+    # this hook blocks. Telling someone the gate they just hit is the gate CI will
+    # apply, when it demonstrably is not, is how a gate teaches people to reach for
+    # --no-verify: the first time the claim is caught out, the whole message stops
+    # being believed. So say only what is checkable from here.
+    if ihq_guard_ci_checks_contract "${repo_root}"; then
+      echo "${label}: blocked. This repository's CI runs the same check, so this is the result you would get there." >&2
+    else
+      echo "${label}: blocked. NOTE: this repository's CI does not run a contract check, so these" >&2
+      echo "  findings will NOT appear there — this hook is ahead of it. That is a gap in the" >&2
+      echo "  pipeline, not a reason the findings are wrong." >&2
+    fi
     return 1
   fi
 
