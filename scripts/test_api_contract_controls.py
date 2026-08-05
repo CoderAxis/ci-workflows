@@ -555,6 +555,53 @@ def test_standard_ratelimit_fields():
                              f"double-counted, but the real write on the next line still must "
                              f"be, expected exactly 1 got {f.count}: {f.details}")
 
+    # The shape of a DETECTOR's own source. Every token this control searches for is
+    # present and every one is pattern text inside a string: the status name, the bare
+    # 429, and the ResponseWriter that satisfies the can-this-function-reply test. The Go
+    # implementation reported four findings against its own exclusion table this way, and
+    # no edit to the flagged lines could clear them, because naming the pattern is how a
+    # detector is written. Comment handling alone did not cover it: only lines STARTING
+    # with a comment marker were skipped, so a string kept scoring.
+    with tempfile.TemporaryDirectory() as tmp:
+        go = (
+            'package openapi\n\n'
+            'var (\n'
+            '\tstatus429 = regexp.MustCompile("\\\\bStatusTooManyRequests\\\\b|\\\\b429\\\\b")\n'
+            '\twriterRef = regexp.MustCompile("gin\\\\.Context|http\\\\.ResponseWriter")\n'
+            ')\n'
+        )
+        f = m.standard_ratelimit_fields(make_repo(tmp, go_files={"rfc0038.go": go}))
+        expect(f.count == 0, f"standard_ratelimit_fields: a detector naming its own patterns in "
+                             f"string literals MUST NOT be a write site, got {f.count}: {f.details}")
+
+    # Commented-out code neither violates the rule nor satisfies it.
+    with tempfile.TemporaryDirectory() as tmp:
+        go = (
+            'package mw\n\n'
+            'func Limit(c *gin.Context) {\n'
+            '\t// c.Header("X-RateLimit-Limit", "100")\n'
+            '\tc.Header("Content-Type", "application/json")\n'
+            '}\n'
+        )
+        f = m.standard_ratelimit_fields(make_repo(tmp, go_files={"rl.go": go}))
+        expect(f.count == 0, f"standard_ratelimit_fields: a commented-out X-RateLimit header is "
+                             f"not a live site, got {f.count}: {f.details}")
+
+    # The mirror, and the reason the header half keeps string contents while blanking
+    # comments: prose naming Retry-After must not credit a handler that never sets it, or
+    # the way to clear a real finding becomes writing a sentence about it.
+    with tempfile.TemporaryDirectory() as tmp:
+        go = (
+            'package mw\n\n'
+            'func Limit(c *gin.Context) {\n'
+            '\t// RFC-0038 wants Retry-After here; not implemented yet.\n'
+            '\tc.Status(http.StatusTooManyRequests)\n'
+            '}\n'
+        )
+        f = m.standard_ratelimit_fields(make_repo(tmp, go_files={"rl.go": go}))
+        expect(f.count == 1, f"standard_ratelimit_fields: Retry-After named only in a comment MUST "
+                             f"NOT credit the handler, got {f.count}: {f.details}")
+
 
 # ── API-0012 idempotency_declared ────────────────────────────────────────────────────────────
 

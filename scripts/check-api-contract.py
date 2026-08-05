@@ -618,22 +618,45 @@ def _is_429_write_site(line: str) -> bool:
 
 
 def standard_ratelimit_fields(repo: ServiceRepo) -> Finding:
-    """API-0010: no X-RateLimit-*, and every 429 carries Retry-After from the same function."""
+    """API-0010: no X-RateLimit-*, and every 429 carries Retry-After from the same function.
+
+    Two views of each file, because the halves of this control read opposite things.
+
+    The 429 write-site half must NOT see string contents. Its patterns name
+    StatusTooManyRequests and ResponseWriter, and a detector spells both as pattern text --
+    the Go implementation reported four findings against its own exclusion table, where
+    every token it searches for sat inside a regex literal and no edit to those lines could
+    have cleared it. Comment handling alone was not enough: _is_429_write_site only skipped
+    lines STARTING with a comment marker, so a string kept scoring.
+
+    The header half must SEE string contents: "X-RateLimit-*" and "Retry-After" are the
+    evidence itself. Blanking them would drop the violation and, worse, the thing that
+    clears it -- an unseen Retry-After reads as an absent one, so every correct handler
+    would be flagged.
+
+    Comments are blanked in both. Commented-out code cannot violate the rule, and prose
+    naming Retry-After must not credit a handler that never sets it, or the way to clear a
+    real finding becomes writing a sentence about it.
+
+    Kept deliberately identical to the Go implementation in internal/openapi/rfc0038.go:
+    the parity harness compares counts on this family, so both sides must blank the same
+    things or they disagree while both reporting "flagged".
+    """
     violations = []
     for rel, text in repo.runtime_sources():
-        lines = text.splitlines()
-        for i, line in enumerate(lines):
+        code_lines = _strip_go_comments(text, blank_strings=True).splitlines()
+        text_lines = _strip_go_comments(text, blank_strings=False).splitlines()
+        for i, line in enumerate(text_lines):
             m = XRATELIMIT_SITE_RE.search(line)
             if m:
                 violations.append(f"{rel}:{i + 1}: sets prohibited {m.group(1)} response header")
-        for i, line in enumerate(lines):
+        for i, line in enumerate(code_lines):
             if not STATUS_429_RE.search(line) or not _is_429_write_site(line):
                 continue
-            start, end = _enclosing_function_span(lines, i)
-            func_text = "\n".join(lines[start:end])
-            if not RESPONSE_WRITER_RE.search(func_text):
+            start, end = _enclosing_function_span(code_lines, i)
+            if not RESPONSE_WRITER_RE.search("\n".join(code_lines[start:end])):
                 continue
-            if RETRY_AFTER_SET_RE.search(func_text):
+            if RETRY_AFTER_SET_RE.search("\n".join(text_lines[start:end])):
                 continue
             violations.append(f"{rel}:{i + 1}: writes 429 Too Many Requests with no Retry-After "
                               "in the enclosing function")
