@@ -1,0 +1,152 @@
+name: Frontend image CI
+
+# "Does it compile" for the Angular frontends, which cannot answer that question
+# any other way: their @inboxxhq/* dependencies live in other repositories and are
+# cloned during the image build, so the app cannot be installed standalone and the
+# only honest check is building the production image the deploy runner builds.
+#
+# WHY THIS IS CENTRAL RATHER THAN A JOB IN EACH APP. It was a job in each app, and
+# it had been failing on every commit for a week (G-39). Those jobs read the
+# cross-repo credential from `secrets.CROSS_REPO_TOKEN || secrets.GH_PAT ||
+# github.token`, and both apps had fallen off the front of that chain --
+# inboxxhq-web-app holds no secrets at all, while inboxxhq-web-console's PAT had
+# stopped authenticating. The fallback is the trap: `github.token` is scoped to the
+# app's own repository, so it cannot read coderaxis/frontend-core, and the chain
+# turns a missing credential into a failed clone rather than a clear error.
+#
+# Deploy never had this problem because it mints a short-lived App installation
+# token from its own OIDC identity through ci-app-token, holding no credential at
+# all (ADR-0110). That is what this workflow brings to CI, and it is why the job
+# must be DEFINED here: AWS scopes the trust policy to `job_workflow_ref`, which
+# names the workflow a job is defined in. A job defined in an app repository
+# carries that app's ref and AWS refuses it -- deliberately, so that a service repo
+# cannot mint the platform's credentials by editing its own workflow.
+#
+# The apps therefore forward nothing, and there is no repository secret left for
+# this lane to lose.
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: >-
+          Tag for the image built here. Never pushed -- the tag exists so build
+          output and failures name the app rather than a hash.
+        required: true
+        type: string
+      core_owner:
+        description: >-
+          Account owning the shared frontend sources. Split from the repository name
+          because the token is minted against an installation (an account) and then
+          narrowed to a repository, so these are two different decisions.
+        required: false
+        type: string
+        default: coderaxis
+      core_repository:
+        description: >-
+          The repository holding the shared frontend packages, cloned during the
+          image build. An input rather than a constant so that a second frontend
+          consuming a different core does not have to fork this workflow.
+        required: false
+        type: string
+        default: frontend-core
+      runs_on:
+        description: >-
+          A GitHub-hosted runner by default, NOT the self-hosted inboxxhq-deploy
+          ARC pods: those carry the docker CLI without a daemon, because real
+          deploys offload image builds to CodeBuild, and they lack the outbound
+          access needed to clone the private dependencies.
+        required: false
+        type: string
+        default: ubuntu-latest
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Docker build + unit tests (verify)
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write # proves this job's identity to AWS; no App key is handled here
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Match the branch of frontend-core the deploy pipeline would use, so CI
+      # compiles against the same shared sources. Anything outside the environment
+      # branches builds against main.
+      - name: Resolve frontend-core ref
+        id: core
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF_NAME}" in
+            dev|staging|preprod|prod) CORE_REF="${GITHUB_REF_NAME}" ;;
+            *) CORE_REF="main" ;;
+          esac
+          echo "ref=${CORE_REF}" >> "${GITHUB_OUTPUT}"
+
+      # Scoped to the one repository the build clones, so a leak of this token
+      # reaches nothing else. Short-lived (~1h) and already masked in logs.
+      - name: Mint a read token for the shared frontend sources
+        id: core_token
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ inputs.core_owner }}
+          repositories: ${{ inputs.core_repository }}
+
+      # Needed for the Dockerfile's secret mount (RUN --mount=type=secret,id=gh_token),
+      # which is how the private dependencies are cloned without baking a token
+      # into a layer.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        shell: bash
+        env:
+          GH_TOKEN_VALUE: ${{ steps.core_token.outputs.token }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          CORE_REF: ${{ steps.core.outputs.ref }}
+        run: |
+          set -euo pipefail
+          TOKEN_FILE="$(mktemp)"
+          printf '%s' "${GH_TOKEN_VALUE}" > "${TOKEN_FILE}"
+          trap 'rm -f "${TOKEN_FILE}"' EXIT
+          docker buildx build \
+            --secret "id=gh_token,src=${TOKEN_FILE}" \
+            --build-arg TARGETARCH=amd64 \
+            --build-arg CORE_REF="${CORE_REF}" \
+            -t "${IMAGE_NAME}:ci-${GITHUB_SHA::12}" \
+            .
+
+      # The unit suite, run in the same assembled workspace the build just used, via
+      # the Dockerfile's `unit-tests` stage. A step rather than a job so it reuses the
+      # builder layers cached above; as its own job it would repeat the clone and
+      # pnpm install from scratch.
+      #
+      # It is a RATCHET, not a pass/fail on the whole suite: both apps carry standing
+      # failures, and a check that is red on arrival gets switched off rather than
+      # fixed. See each app's scripts/unit-test-gate.mjs and .jest-baseline.json -- a
+      # suite that passes today may not start failing, and the frozen counts may only
+      # go down.
+      - name: Unit tests (ratchet against .jest-baseline.json)
+        shell: bash
+        env:
+          GH_TOKEN_VALUE: ${{ steps.core_token.outputs.token }}
+          CORE_REF: ${{ steps.core.outputs.ref }}
+        run: |
+          set -euo pipefail
+          TOKEN_FILE="$(mktemp)"
+          printf '%s' "${GH_TOKEN_VALUE}" > "${TOKEN_FILE}"
+          trap 'rm -f "${TOKEN_FILE}"' EXIT
+          docker buildx build \
+            --secret "id=gh_token,src=${TOKEN_FILE}" \
+            --build-arg TARGETARCH=amd64 \
+            --build-arg CORE_REF="${CORE_REF}" \
+            --target unit-tests \
+            --progress plain \
+            .
