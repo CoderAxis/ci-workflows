@@ -181,8 +181,18 @@ ihq_guard_frontend_topology() {
     *) return 0 ;;
   esac
 
-  local checker="${tree}/scripts/check-shared-package-topology.mjs"
-  [[ -f "${checker}" ]] || return 0
+  # Prefer the copy inside this repo, which is the versioned one. The bare
+  # scripts/ path is the pre-2026-08-06 location: it sat in a plain directory
+  # that no repository tracked, so the only gate against shared-package drift
+  # existed on a single machine (G-38). It is still accepted, as a symlink there
+  # keeps older trees working.
+  local checker=""
+  for candidate in \
+    "${tree}/github-actions/scripts/check-shared-package-topology.mjs" \
+    "${tree}/scripts/check-shared-package-topology.mjs"; do
+    [[ -f "${candidate}" ]] && { checker="${candidate}"; break; }
+  done
+  [[ -n "${checker}" ]] || return 0
   command -v node >/dev/null 2>&1 || return 0
 
   if ! node "${checker}"; then
