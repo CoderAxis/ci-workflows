@@ -59,6 +59,24 @@ on:
         required: false
         type: string
         default: ""
+      go_build_tags:
+        description: >-
+          Build tags for the unit/coverage run, as `go test -tags` takes them. A repo must set this
+          when its Dockerfile builds with a tag, because the tag selects which files compile: with
+          the wrong set, CI compiles and measures code the image does not contain, and never
+          compiles the code it does.
+
+          communication-service is the case that prompted this. Its Dockerfile builds `-tags twilio`
+          unconditionally, so every shipping binary carried the twilio files, while CI ran the
+          default set — the entire telephony surface, its authorization grants included, went
+          untested for as long as that was true. Worse than untested: two of its packages could not
+          COMPILE under the tag, and CI reported success throughout, because a build error in files
+          CI never builds is not a build error CI can see.
+
+          `integration` must stay in whatever a repo passes; the coverage run depends on it.
+        required: false
+        type: string
+        default: integration
 
 # No `secrets:` block, deliberately. Every token this pipeline uses is minted from the job's own
 # OIDC identity via ci-app-token and ci-slack-notify, so a repository forwards nothing: the
@@ -292,6 +310,10 @@ jobs:
 
       - name: Tests with coverage
         shell: bash
+        env:
+          # Through env, not inline `${{ }}`: a run block interpolates before bash sees it, so a
+          # caller's string would be shell, not an argument.
+          GO_TAGS: ${{ inputs.go_build_tags }}
         run: |
           set -euo pipefail
           # WHY THE INTEGRATION TAG IS ALWAYS ON.
@@ -309,6 +331,10 @@ jobs:
           # no tagged files the tag selects nothing extra and the run is unchanged; every repo that
           # does have them needs only Postgres, which is now present. tests/integration stays out of
           # the package list below and remains the integration job's, so nothing runs twice.
+          #
+          # A repo whose Dockerfile builds with a tag of its own adds it through go_build_tags, and
+          # keeps `integration` when it does, for everything above. The default is `integration`
+          # alone, so this is the same run it has always been for every caller that says nothing.
           #
           # WHAT IS MEASURED, AND WHY IT IS NOT `./...`.
           #
@@ -337,7 +363,7 @@ jobs:
           # would otherwise split into two arguments and go test would fail on a path that does not
           # exist, reported as a test failure rather than a quoting bug.
           mapfile -t pkgs < <(
-            GOWORK=off go list -tags=integration \
+            GOWORK=off go list -tags="${GO_TAGS}" \
               -f '{{.ImportPath}} {{.Name}} {{range .Imports}}{{if eq . "testing"}}T{{end}}{{end}}' ./... \
               | grep -Ev '/tests/(contracts|integration)' \
               | awk '$2 != "main" && $3 != "T" { print $1 }'
@@ -351,7 +377,7 @@ jobs:
           # across the set can only add covered statements to a denominator that was already this
           # list, so no repo's number falls.
           list="$(IFS=,; echo "${pkgs[*]}")"
-          GOWORK=off go test -tags=integration -coverpkg="${list}" "${pkgs[@]}" \
+          GOWORK=off go test -tags="${GO_TAGS}" -coverpkg="${list}" "${pkgs[@]}" \
             -coverprofile=coverage.out -covermode=atomic
           go tool cover -func=coverage.out | tail -5
 
