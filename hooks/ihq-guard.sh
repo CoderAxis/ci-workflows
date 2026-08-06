@@ -142,6 +142,59 @@ ihq_guard_ci_checks_contract() {
     | grep -qE 'check-api-contract|api-contract\.ya?ml|service-ci\.ya?ml|ihq[[:space:]]+validate'
 }
 
+# Shared-package topology, for the frontend repos only.
+#
+# Checks that every shared frontend package sits where it is declared to: see
+# frontend/shared-packages.manifest.json for the declaration and for the two defects that
+# produced it (a design-system copy maintained for three months that no image consumed, and
+# a contracts package where pnpm and tsc resolved different directories under one import).
+#
+# This one genuinely CANNOT run in CI, and the reason is structural rather than an oversight:
+# the drift is BETWEEN repositories, and no repository can see it. An app's Docker build
+# context is that app alone and clones its dependencies from GitHub, so at build time the
+# duplicate simply is not present to be found. There is also no root repository to host a
+# workspace-wide job — the combined tree is a directory of sibling checkouts, not a monorepo.
+# So the pre-push hook is not "ahead of CI" here as it is for contracts; it is the only place
+# the check can run at all. That is worth stating plainly rather than implying a CI backstop
+# that does not exist.
+#
+# Skipped silently when the manifest is absent, which is the normal case for someone who has
+# checked out one app on its own rather than the combined tree.
+ihq_guard_frontend_topology() {
+  local label="$1" root="$2"
+
+  # Walk up to find the combined tree. The manifest lives beside the frontend checkouts, above
+  # the repo being pushed, so it is found by ascent rather than by a fixed relative path — which
+  # would break for the two apps, frontend-core and the design repo all sitting at different depths.
+  local dir="${root}" tree=""
+  while [[ "${dir}" != "/" && -n "${dir}" ]]; do
+    if [[ -f "${dir}/frontend/shared-packages.manifest.json" ]]; then tree="${dir}"; break; fi
+    dir="$(dirname "${dir}")"
+  done
+  [[ -n "${tree}" ]] || return 0
+
+  # Only the repos the manifest actually governs. A push from a backend service should not pay
+  # for this, and should not be blocked by a frontend layout it has no part in.
+  local name; name="$(basename "${root}")"
+  case "${name}" in
+    inboxxhq-web-app|inboxxhq-web-console|inboxxhq-web-www|inboxxhq-web-design|frontend-core) ;;
+    *) return 0 ;;
+  esac
+
+  local checker="${tree}/scripts/check-shared-package-topology.mjs"
+  [[ -f "${checker}" ]] || return 0
+  command -v node >/dev/null 2>&1 || return 0
+
+  if ! node "${checker}"; then
+    echo "${label}: blocked on shared-package topology." >&2
+    echo "  NOTE: no CI job runs this check — it cannot be run from inside a single repository" >&2
+    echo "  (see the comment above ihq_guard_frontend_topology). This hook is the only gate," >&2
+    echo "  so a --no-verify here is not deferred to CI; it is skipped entirely." >&2
+    return 1
+  fi
+  return 0
+}
+
 # --- entry point ------------------------------------------------------------------------------
 
 ihq_guard() {
@@ -202,6 +255,8 @@ ihq_guard() {
   if [[ "${mode}" == "full" ]]; then
     ihq_guard_pins "${label}" "${repo_root}" || return 1
     echo "${label}: ✓ builds against its pins" >&2
+
+    ihq_guard_frontend_topology "${label}" "${repo_root}" || return 1
   fi
 
   return 0
