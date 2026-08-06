@@ -33,7 +33,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // This script is versioned in coderaxis/github-actions but runs against the
@@ -234,6 +234,131 @@ for (const [appName, app] of apps) {
     const sourceMarker = spec.ssot.kind === 'standalone-repo' ? spec.ssot.repo : 'frontend-core';
     if (!contents.includes(sourceMarker)) {
       fail(appName, `its Dockerfile never references ${sourceMarker}, the declared source of ${pkgName}`);
+    }
+  }
+}
+
+// --- 3b. Each app's tsconfig names every shared package, in BOTH spellings --
+//
+// Angular's AOT compiler requires every component it compiles to be part of the
+// TypeScript program, and sources outside the app's own src/ are not, unless a
+// tsconfig include names them. The path differs between the two layouts this app
+// builds in -- locally the workspace path is a symlink and TypeScript reports the
+// resolved frontend-core path, while in the image it is a real directory and no
+// frontend-core exists -- so both spellings must be listed. A glob matching
+// nothing is not an error, which is what makes carrying both safe.
+//
+// This is checked rather than merely documented because dropping the image
+// spelling breaks only the build that ships while local stays green, and the
+// reverse breaks only local. That asymmetry is exactly how G-25 and G-30 hid, and
+// while the CI compile gate is down (G-39) nothing else would catch either.
+// Angular writes these files with comments, so JSON.parse alone will not do.
+// This scans character by character instead of using a regex, because a regex for
+// block comments eats the `/**/` inside globs like "src/**/*.ts" -- and those globs
+// are precisely what this check reads.
+function readJsonc(file) {
+  const text = readFileSync(file, 'utf8');
+  let out = '';
+  let inString = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+
+    if (inString) {
+      out += char;
+      if (char === '\\') {
+        out += text[i + 1] ?? '';
+        i += 1;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      out += char;
+    } else if (char === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i += 1;
+      out += '\n';
+    } else if (char === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end === -1 ? text.length : end + 1;
+    } else {
+      out += char;
+    }
+  }
+
+  return JSON.parse(out.replace(/,(\s*[}\]])/g, '$1'));
+}
+
+for (const [appName, app] of apps) {
+  const consumes = app.consumes ?? [];
+  if (consumes.length === 0) continue;
+
+  const tsconfigPath = join(app.path, 'tsconfig.app.json');
+  if (!existsSync(abs(tsconfigPath))) {
+    fail(appName, `consumes shared packages but has no ${tsconfigPath}`);
+    continue;
+  }
+
+  let tsconfig;
+  try {
+    tsconfig = readJsonc(abs(tsconfigPath));
+  } catch (error) {
+    fail(appName, `${tsconfigPath} could not be parsed: ${error.message}`);
+    continue;
+  }
+
+  const include = tsconfig.include ?? [];
+  const exclude = tsconfig.exclude ?? [];
+  const appDir = abs(app.path);
+
+  for (const pkgName of consumes) {
+    const spec = manifest.packages[pkgName];
+    if (!spec) continue;
+
+    const dir = spec.tsconfigSourceDir;
+    if (!dir) {
+      fail(pkgName, 'the manifest declares no tsconfigSourceDir, so the tsconfig check cannot run');
+      continue;
+    }
+
+    const spellings = {
+      'the frontend-core path (used locally, where the workspace path is a symlink)':
+        relative(appDir, abs(spec.ssot.path)),
+      'the workspace path (used in the image, where it is a real directory)':
+        relative(appDir, abs(spec.dockerPath)),
+    };
+
+    for (const [why, prefix] of Object.entries(spellings)) {
+      const base = `${prefix}/${dir}/`;
+      if (!include.some((glob) => glob.startsWith(base))) {
+        fail(appName, `${tsconfigPath} include is missing ${pkgName} under ${base}**\n` +
+          `    That is ${why}.\n` +
+          `    Without it the build fails "is missing from the TypeScript compilation",\n` +
+          `    once per file reached only through a deep import.`);
+      }
+
+      // Excludes are required only where the package really ships tests or
+      // stories, so this asks the package rather than assuming.
+      for (const kind of ['spec', 'stories']) {
+        const pkgSourceDir = join(abs(spec.ssot.path), dir);
+        if (!existsSync(pkgSourceDir)) continue;
+        let ships = false;
+        try {
+          ships = execFileSync('find', [pkgSourceDir, '-name', `*.${kind}.ts`, '-print', '-quit'], {
+            encoding: 'utf8',
+          }).trim().length > 0;
+        } catch {
+          ships = false;
+        }
+        if (ships && !exclude.some((glob) => glob.startsWith(base) && glob.endsWith(`.${kind}.ts`))) {
+          fail(appName, `${tsconfigPath} exclude is missing ${base}**/*.${kind}.ts, ` +
+            `and ${pkgName} really ships ${kind} files.\n` +
+            `    They are written against Jest globals this build has no types for.`);
+        }
+      }
     }
   }
 }
