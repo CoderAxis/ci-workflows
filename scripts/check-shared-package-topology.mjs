@@ -101,6 +101,14 @@ if (!existsSync(MANIFEST)) {
   process.exit(2);
 }
 
+function isSymlinkPath(path) {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
 const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'));
 const packages = Object.entries(manifest.packages ?? {});
 const apps = Object.entries(manifest.apps ?? {});
@@ -113,9 +121,10 @@ if (packages.length === 0) {
 // --- 1. The working tree matches what each package declares ----------------
 //
 // The distinction that matters is a package's NATURE, not merely that something
-// exists at the path. A real directory where a symlink is declared is precisely
-// the defect: it is a second copy that will drift, and it looks identical to a
-// correct setup in every tool that only resolves paths.
+// exists at the path. Each shared package is now a real directory inside the
+// frontend-core checkout, used where it sits, and every consumer spells it that
+// one way -- so a symlink here is no longer a bridge between two layouts, it is a
+// second name for the same thing and a reason for tools to disagree again.
 for (const [name, spec] of packages) {
   const localPath = spec.local?.path;
   if (!localPath) {
@@ -129,25 +138,35 @@ for (const [name, spec] of packages) {
 
   const isSymlink = lstatSync(abs(localPath)).isSymbolicLink();
 
-  if (spec.local.expect === 'symlink') {
+  if (spec.local.expect === 'real-directory') {
+    if (isSymlink) {
+      fail(
+        name,
+        `${localPath} must be a real directory, but it is a symlink to "${readlinkSync(abs(localPath))}".\n` +
+          `    Consumers now spell this package one way, so a link adds a second path that\n` +
+          `    resolves to the same files -- which is how tsconfig and pnpm came to disagree\n` +
+          `    before (G-25, G-30).`,
+      );
+      continue;
+    }
+    if (realOrNull(localPath) !== realOrNull(spec.ssot.path)) {
+      fail(name, `${localPath} is not the declared SSOT ${spec.ssot.path}`);
+    }
+  } else if (spec.local.expect === 'symlink') {
     if (!isSymlink) {
       fail(
         name,
         `${localPath} must be a SYMLINK to ${spec.ssot.path}, but it is a real directory.\n` +
           `    A real directory here is a second copy of the package. Both will be edited and\n` +
-          `    they will diverge; whichever one the Docker build does not use ships nothing.\n` +
-          `    Fix: move it aside (see contracts/archived/) and symlink it to the SSOT.`,
+          `    they will diverge; whichever one the Docker build does not use ships nothing.`,
       );
       continue;
     }
-    const linkTarget = readlinkSync(abs(localPath));
-    const resolvedLocal = realOrNull(localPath);
-    const resolvedSsot = realOrNull(spec.ssot.path);
-    if (resolvedSsot && resolvedLocal !== resolvedSsot) {
+    if (realOrNull(spec.ssot.path) && realOrNull(localPath) !== realOrNull(spec.ssot.path)) {
       fail(
         name,
-        `${localPath} is a symlink to "${linkTarget}", which resolves to\n` +
-          `      ${resolvedLocal}\n    but its declared SSOT resolves to\n      ${resolvedSsot}`,
+        `${localPath} is a symlink to "${readlinkSync(abs(localPath))}", which does not resolve\n` +
+          `    to its declared SSOT ${spec.ssot.path}`,
       );
     }
   } else if (spec.local.expect === 'repo') {
@@ -158,15 +177,39 @@ for (const [name, spec] of packages) {
     const remote = gitRemote(localPath);
     const wanted = spec.ssot.repo;
     if (wanted && remote && !remote.includes(wanted)) {
-      fail(
-        name,
-        `${localPath} should be a checkout of ${wanted} but its origin is "${remote}"`,
-      );
+      fail(name, `${localPath} should be a checkout of ${wanted} but its origin is "${remote}"`);
     }
     if (wanted && !remote) {
       fail(name, `${localPath} has no git origin; expected a checkout of ${wanted}`);
     }
   }
+}
+
+// --- 1b. The retired path spellings have not come back ---------------------
+//
+// Each package was once reachable at a path named after the repository it came
+// from, because that is where the images put it. Those names are retired, and this
+// check exists so a stale clone or a hand-made convenience link cannot quietly
+// reintroduce the two-spellings problem: a second path that resolves to the same
+// package is enough for pnpm and tsc to mean different things by one specifier.
+const RETIRED_PATHS = [
+  'frontend/inboxxhq-web-design',
+  'frontend/inboxxhq-web-platform',
+  'contracts/inboxxhq-enterprise-contracts',
+];
+for (const retired of RETIRED_PATHS) {
+  if (!existsSync(abs(retired)) && !isSymlinkPath(abs(retired))) continue;
+  const kind = isSymlinkPath(abs(retired))
+    ? `a symlink to "${readlinkSync(abs(retired))}"`
+    : 'a real directory';
+  fail(
+    retired,
+    `this path is retired but exists as ${kind}.\n` +
+      `    Shared packages are used at frontend/frontend-core/packages/<pkg> now, and the\n` +
+      `    Docker builds assemble that same layout, so nothing needs this name. If it is a\n` +
+      `    link, delete it. If it is a real directory it is probably an old clone -- check\n` +
+      `    "git -C ${retired} log --not --remotes" for commits that exist nowhere else first.`,
+  );
 }
 
 // --- 2. No undeclared second copy of a core-owned package ------------------
@@ -198,12 +241,18 @@ if (existsSync(abs(corePackagesDir))) {
   }
 }
 
-// --- 3. Each app's Dockerfile agrees with the manifest ---------------------
+// --- 3. Each app's Dockerfile assembles the layout a checkout has -----------
 //
 // The Dockerfile is what CI and deploy actually build, so it is the authority on
-// where a package comes from. Checking the manifest against it keeps this file
-// honest: a manifest that quietly disagreed with the build would be worse than
-// no manifest, because it would be believed.
+// where a package comes from. What it must now agree with is stronger than "the
+// manifest": it must assemble the SAME layout a developer has, because that is the
+// property that removed the two-spellings problem. Two things carry it -- the
+// workspace root is `frontend/`, and core's packages are copied to
+// `frontend-core/packages` beneath it -- and together they make every relative path
+// in tsconfig mean the same directory in an image and on a laptop.
+//
+// Comment lines are stripped before the retired spellings are searched for, because
+// the Dockerfiles deliberately explain the layout they moved away from.
 for (const [appName, app] of apps) {
   const consumes = app.consumes ?? [];
   if (consumes.length === 0) continue;
@@ -213,7 +262,32 @@ for (const [appName, app] of apps) {
     fail(appName, `consumes shared packages but has no Dockerfile at ${dockerfile}`);
     continue;
   }
-  const contents = readFileSync(abs(dockerfile), 'utf8');
+  const raw = readFileSync(abs(dockerfile), 'utf8');
+  const instructions = raw
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('#'))
+    .join('\n');
+
+  if (!instructions.includes('WORKDIR /app/frontend')) {
+    fail(appName, `${dockerfile} never sets WORKDIR to /app/frontend.\n` +
+      `    That directory is the workspace root in a checkout, and matching it is what makes\n` +
+      `    the apps' relative tsconfig paths mean the same thing here and locally.`);
+  }
+
+  if (!instructions.includes('frontend-core/packages')) {
+    fail(appName, `${dockerfile} never assembles frontend-core/packages, where every shared\n` +
+      `    package is expected to be found.`);
+  }
+
+  for (const retired of RETIRED_PATHS) {
+    const inImage = retired.replace(/^(frontend|contracts)\//, '');
+    if (instructions.includes(retired) || instructions.includes(`/${inImage}`)) {
+      fail(appName, `${dockerfile} still assembles the retired path ${retired}.\n` +
+        `    Copying a shared package to a directory named after the repository it came from\n` +
+        `    is what made the image and a checkout disagree, and cost each app two tsconfig\n` +
+        `    globs per package (G-25, G-30).`);
+    }
+  }
 
   for (const pkgName of consumes) {
     const spec = manifest.packages[pkgName];
@@ -221,42 +295,45 @@ for (const [appName, app] of apps) {
       fail(appName, `consumes ${pkgName}, which the manifest does not declare`);
       continue;
     }
-    // The destination path must appear: it is what the app's tsconfig paths
-    // resolve against, in both layouts.
-    if (!contents.includes(spec.dockerPath)) {
-      fail(
-        appName,
-        `its Dockerfile never mentions ${spec.dockerPath}, where ${pkgName} is declared to be assembled`,
-      );
+    // A manifest self-consistency check rather than a text search: the package is
+    // reached in the image through the copied packages directory above, so what
+    // matters is that its declared image path lives under it.
+    if (!spec.dockerPath.startsWith('frontend/frontend-core/packages/')) {
+      fail(pkgName, `its dockerPath is "${spec.dockerPath}", outside the single assembled\n` +
+        `    location frontend/frontend-core/packages/.`);
+    }
+    if (spec.dockerPath !== spec.local.path) {
+      fail(pkgName, `its image path (${spec.dockerPath}) differs from its local path\n` +
+        `    (${spec.local.path}). One layout is the entire point: if these diverge, the apps\n` +
+        `    need two tsconfig spellings again.`);
     }
     // And the source must appear, so that "which repo does this come from" is
     // answerable from the build rather than from folklore.
     const sourceMarker = spec.ssot.kind === 'standalone-repo' ? spec.ssot.repo : 'frontend-core';
-    if (!contents.includes(sourceMarker)) {
+    if (!raw.includes(sourceMarker)) {
       fail(appName, `its Dockerfile never references ${sourceMarker}, the declared source of ${pkgName}`);
     }
   }
 }
 
-// --- 3b. Each app's tsconfig names every shared package, in BOTH spellings --
+// --- 3b. Each app's tsconfig names every shared package, once ---------------
 //
 // Angular's AOT compiler requires every component it compiles to be part of the
 // TypeScript program, and sources outside the app's own src/ are not, unless a
-// tsconfig include names them. The path differs between the two layouts this app
-// builds in -- locally the workspace path is a symlink and TypeScript reports the
-// resolved frontend-core path, while in the image it is a real directory and no
-// frontend-core exists -- so both spellings must be listed. A glob matching
-// nothing is not an error, which is what makes carrying both safe.
+// tsconfig include names them. So each shared package must appear -- and now it
+// appears EXACTLY ONCE, at the path both the checkout and the image use.
 //
-// This is checked rather than merely documented because dropping the image
-// spelling breaks only the build that ships while local stays green, and the
-// reverse breaks only local. That asymmetry is exactly how G-25 and G-30 hid, and
-// while the CI compile gate is down (G-39) nothing else would catch either.
-// Angular writes these files with comments, so JSON.parse alone will not do.
-// This scans character by character instead of using a regex, because a regex for
-// block comments eats the `/**/` inside globs like "src/**/*.ts" -- and those globs
-// are precisely what this check reads.
+// It used to need two globs per package, one per layout, and the failure mode was
+// asymmetric: dropping the image spelling broke only the build that ships while
+// local stayed green, and dropping the other broke only local. That is how G-25 and
+// G-30 hid. Checking for the retired spelling here is not pedantry -- a leftover glob
+// is the trace of someone re-adding the old layout, and it would match a directory
+// that should no longer exist.
 function readJsonc(file) {
+  // Angular writes these files with comments, so JSON.parse alone will not do. This
+  // scans character by character rather than using a regex, because a regex for block
+  // comments eats the `/**/` inside globs like "src/**/*.ts" -- and those globs are
+  // precisely what this check reads.
   const text = readFileSync(file, 'utf8');
   let out = '';
   let inString = false;
@@ -324,58 +401,67 @@ for (const [appName, app] of apps) {
       continue;
     }
 
-    const spellings = {
-      'the frontend-core path (used locally, where the workspace path is a symlink)':
-        relative(appDir, abs(spec.ssot.path)),
-      'the workspace path (used in the image, where it is a real directory)':
-        relative(appDir, abs(spec.dockerPath)),
-    };
+    const base = `${relative(appDir, abs(spec.local.path))}/${dir}/`;
+    if (!include.some((glob) => glob.startsWith(base))) {
+      fail(appName, `${tsconfigPath} include is missing ${pkgName} under ${base}**\n` +
+        `    Without it the build fails "is missing from the TypeScript compilation", once per\n` +
+        `    file reached only through a deep import.`);
+    }
 
-    for (const [why, prefix] of Object.entries(spellings)) {
-      const base = `${prefix}/${dir}/`;
-      if (!include.some((glob) => glob.startsWith(base))) {
-        fail(appName, `${tsconfigPath} include is missing ${pkgName} under ${base}**\n` +
-          `    That is ${why}.\n` +
-          `    Without it the build fails "is missing from the TypeScript compilation",\n` +
-          `    once per file reached only through a deep import.`);
+    // Excludes are required only where the package really ships tests or stories, so
+    // this asks the package rather than assuming.
+    for (const kind of ['spec', 'stories']) {
+      const pkgSourceDir = join(abs(spec.local.path), dir);
+      if (!existsSync(pkgSourceDir)) continue;
+      let ships = false;
+      try {
+        ships = execFileSync('find', [pkgSourceDir, '-name', `*.${kind}.ts`, '-print', '-quit'], {
+          encoding: 'utf8',
+        }).trim().length > 0;
+      } catch {
+        ships = false;
       }
+      if (ships && !exclude.some((glob) => glob.startsWith(base) && glob.endsWith(`.${kind}.ts`))) {
+        fail(appName, `${tsconfigPath} exclude is missing ${base}**/*.${kind}.ts, and ` +
+          `${pkgName} really ships ${kind} files.\n` +
+          `    They are written against Jest globals this build has no types for.`);
+      }
+    }
+  }
 
-      // Excludes are required only where the package really ships tests or
-      // stories, so this asks the package rather than assuming.
-      for (const kind of ['spec', 'stories']) {
-        const pkgSourceDir = join(abs(spec.ssot.path), dir);
-        if (!existsSync(pkgSourceDir)) continue;
-        let ships = false;
-        try {
-          ships = execFileSync('find', [pkgSourceDir, '-name', `*.${kind}.ts`, '-print', '-quit'], {
-            encoding: 'utf8',
-          }).trim().length > 0;
-        } catch {
-          ships = false;
-        }
-        if (ships && !exclude.some((glob) => glob.startsWith(base) && glob.endsWith(`.${kind}.ts`))) {
-          fail(appName, `${tsconfigPath} exclude is missing ${base}**/*.${kind}.ts, ` +
-            `and ${pkgName} really ships ${kind} files.\n` +
-            `    They are written against Jest globals this build has no types for.`);
-        }
+  // A glob under a retired path can only match if someone recreated it.
+  for (const glob of [...include, ...exclude]) {
+    for (const retired of RETIRED_PATHS) {
+      const spelling = `../${retired.split('/').pop()}/`;
+      if (glob.startsWith(spelling)) {
+        fail(appName, `${tsconfigPath} still lists "${glob}", a glob under the retired path\n` +
+          `    ${retired}. One spelling per package now; a second one is how the two layouts\n` +
+          `    drifted apart before.`);
       }
     }
   }
 }
 
-// --- 4. The local pnpm workspace declares core packages by their real path --
+// --- 4. The workspace file declares core packages by their real path --------
 //
 // This is a correctness invariant, not style. pnpm writes a member's dependency
-// links relative to the directory it MATCHED, but creates them inside the
-// directory that path RESOLVES to. Matching frontend/inboxxhq-<pkg>, a symlink
-// two levels under frontend/, makes pnpm emit `../../node_modules/.pnpm/...` and
-// write it into frontend-core/packages/<pkg>/node_modules, where `../../` means
-// frontend-core/packages/. Every link dangles, rxjs and @angular/* stop
-// resolving inside the package, every type there degrades to any/unknown, and
-// Angular can no longer read a component's `standalone` metadata. It surfaces as
-// TS7006/TS18046 plus NG2012 "Component imports must be standalone components"
-// against a file nobody edited, which is an expensive thing to debug from the
-// symptom. Declaring the real path makes pnpm emit the correct `../../../../`.
+// links relative to the directory it MATCHED, but creates them inside the directory
+// that path RESOLVES to. When these packages were also reachable through
+// frontend/inboxxhq-<pkg> symlinks two levels under frontend/, matching one made
+// pnpm emit `../../node_modules/.pnpm/...` and write it into
+// frontend-core/packages/<pkg>/node_modules, where `../../` means
+// frontend-core/packages/. Every link dangled, rxjs and @angular/* stopped resolving
+// inside the package, every type there degraded to any/unknown, and Angular could no
+// longer read a component's `standalone` metadata -- surfacing as TS7006/TS18046 plus
+// NG2012 "Component imports must be standalone components" against a file nobody had
+// edited, which is expensive to debug from the symptom.
+//
+// The symlinks are gone, so the arithmetic has one answer. This still checks the real
+// path is what is declared, because the same trap reopens the moment a convenience
+// link is added and matched.
+//
+// The file is also the one both Dockerfiles copy into the image, so a member list that
+// is wrong here is wrong in the build too.
 {
   const wsPath = 'frontend/pnpm-workspace.yaml';
   if (!existsSync(abs(wsPath))) {
@@ -386,15 +472,17 @@ for (const [appName, app] of apps) {
     for (const [name, spec] of packages) {
       if (spec.ssot?.kind !== 'core-package') continue;
       const real = spec.ssot.path.replace(/^frontend\//, '');
-      const symlink = spec.local?.path?.replace(/^frontend\//, '');
       if (!declared(real)) {
-        fail(name, `${wsPath} does not declare it by its real path "${real}".\n` +
-          `    Without that pnpm may match the symlink instead and write dependency\n` +
-          `    links at the wrong depth, leaving every one of them dangling.`);
+        fail(name, `${wsPath} does not declare it by its real path "${real}".`);
       }
-      if (symlink && !symlink.includes('/') && !declared(`!${symlink}`)) {
-        fail(name, `${wsPath} does not exclude the symlink spelling "!${symlink}",\n` +
-          `    so the package can be matched twice and pnpm may pick the symlink.`);
+    }
+    for (const retired of RETIRED_PATHS) {
+      const spelling = retired.replace(/^frontend\//, '');
+      if (spelling.includes('/')) continue; // not a frontend/ workspace member spelling
+      if (declared(spelling) || declared(`!${spelling}`)) {
+        fail(wsPath, `it still mentions "${spelling}", a retired path.\n` +
+          `    Neither a member nor an exclusion should name it: the directory does not exist,\n` +
+          `    and re-creating it is what let pnpm and tsc mean different things.`);
       }
     }
   }
