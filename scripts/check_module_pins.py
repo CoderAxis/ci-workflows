@@ -36,6 +36,16 @@ WHAT IT ENFORCES, AND WHY EACH RULE EXISTS
    Shipping one means the exact source cannot be recovered from the version alone, which
    breaks the provenance claim the release pipeline makes (§8).
 
+4. VERSION FLOORS (both classes), from controls/module-floors.yaml. A floor may be fleet-wide or
+   scoped to a role with applies_to, and the distinction is load-bearing. The governed sweep
+   above is deliberately broad about which PINS it looks at; it is not a statement that every
+   repository has the same REQUIREMENTS. Collapsing the two is not theoretical - the
+   platform-shared-go floor was raised for GW-0003, a control whose own definition reads
+   applies_when: gateway, and because the sweep applied it to every pin under the platform
+   prefix it landed on 78 of the 88 Go modules in the fleet. All six gateways already met it.
+   The result was that every consumer bump PR opened by a contracts release failed the pin
+   policy, 43 red jobs per release, none of them about a gateway.
+
 Advisory off a release branch, blocking on preprod/prod, matching the original script's
 posture so this swap does not quietly tighten the fleet in the same change that centralises it.
 """
@@ -48,11 +58,17 @@ import os
 import pathlib
 import re
 import sys
+from typing import NamedTuple
 
 # v0.0.0-20260518192409-9f39cdd313ed - timestamp + short sha, i.e. no tag exists.
 PSEUDO = re.compile(r"^v\d+\.\d+\.\d+-\d{14}-[0-9a-f]{12}$")
 STABLE = re.compile(r"^v\d+\.\d+\.\d+$")
 STRICT_MODES = {"preprod", "prod"}
+
+# The roles a floor may be scoped to. "service" is everything that is not a gateway; both are
+# resolvable from a checkout, which is what makes them usable as a scope.
+ROLES = {"gateway", "service"}
+GATEWAY_SUFFIXES = ("-gateway", "-bff")
 
 SELF_REPO = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_FLOORS = SELF_REPO / "controls" / "module-floors.yaml"
@@ -65,7 +81,17 @@ def semver(version: str) -> tuple[int, int, int] | None:
     return tuple(int(p) for p in version[1:].split("."))  # type: ignore[return-value]
 
 
-def load_floors(path: pathlib.Path) -> dict[str, str]:
+class Floor(NamedTuple):
+    """A declared minimum version, and the role it is declared for.
+
+    An empty applies_to means fleet-wide: every repository pinning the module is held to it.
+    Anything else names the one role that has to meet it.
+    """
+    minimum: str
+    applies_to: str = ""
+
+
+def load_floors(path: pathlib.Path) -> dict[str, Floor]:
     """Return {module: minimum version}, or {} when no floors file is present.
 
     A missing file means no floors are declared, which is a legitimate configuration. A
@@ -85,8 +111,57 @@ def load_floors(path: pathlib.Path) -> dict[str, str]:
     floors = doc.get("floors") or {}
     if not isinstance(floors, dict):
         raise SystemExit(f"::error::{path}: expected a 'floors:' mapping of module -> version")
-    return {m: str(spec["min"]) if isinstance(spec, dict) else str(spec)
-            for m, spec in floors.items()}
+    out: dict[str, Floor] = {}
+    for module, spec in floors.items():
+        if not isinstance(spec, dict):
+            out[module] = Floor(str(spec))
+            continue
+        scope = str(spec.get("applies_to") or "")
+        if scope and scope not in ROLES:
+            raise SystemExit(
+                f"::error::{path}: {module} declares applies_to: {scope}, which is not a role this "
+                f"check can resolve. Known roles: {', '.join(sorted(ROLES))}. A floor scoped to a "
+                "role nothing resolves to reads as declared and is enforced nowhere."
+            )
+        out[module] = Floor(str(spec["min"]), scope)
+    return out
+
+
+def detect_role(go_mod: pathlib.Path) -> str:
+    """Decide which role a checkout is, for floors that are scoped to one.
+
+    This has to answer the question the same way check-gateway-baseline.py does, because a floor
+    scoped to gateways and the control that enforces it on gateways have to agree about the set.
+    That script reads the service contract first and falls back to the name, so this does too.
+
+    The name test is a backstop rather than the primary, but it is not optional: a repository with
+    no readable contract must not be able to leave the gateway set just by being unparseable.
+    """
+    root = go_mod.resolve().parent
+    contract = root / "service.contract.yaml"
+    if contract.is_file():
+        try:
+            import yaml
+            service = (yaml.safe_load(contract.read_text(encoding="utf-8")) or {}).get("service")
+            if isinstance(service, dict):
+                if str(service.get("type", "")).lower() in ("gateway", "bff"):
+                    return "gateway"
+                if str(service.get("name", "")).endswith(GATEWAY_SUFFIXES):
+                    return "gateway"
+        except Exception:  # noqa: BLE001 - an unreadable contract falls through to the name test
+            pass
+
+    module = ""
+    try:
+        for line in go_mod.read_text(encoding="utf-8").splitlines():
+            if line.startswith("module "):
+                module = line.split()[1]
+                break
+    except OSError:
+        pass
+    if module.endswith(GATEWAY_SUFFIXES) or root.name.endswith(GATEWAY_SUFFIXES):
+        return "gateway"
+    return "service"
 
 
 def parse_go_mod(text: str) -> tuple[dict[str, str], set[str]]:
@@ -141,19 +216,28 @@ def _describe(version: str) -> str:
 
 def check(go_mod: pathlib.Path, modules: list[str], mode: str,
          governed_prefix: str = "",
-         floors: dict[str, str] | None = None) -> tuple[list[str], list[str], list[str]]:
+         floors: dict[str, Floor] | None = None,
+         role: str = "") -> tuple[list[str], list[str], list[str]]:
     """Return (errors, warnings, report).
 
     Floor violations are warnings in advisory modes and errors in strict ones, matching this
     script's existing posture: a stale contract vintage should not silently reach preprod or
     prod, but it should not block a dev branch while the fleet is still being moved onto the
     floor.
+
+    A floor scoped with applies_to is checked only against a repository of that role. The
+    governed sweep deliberately covers every pin under the platform prefix, which is what brings
+    platform-shared-go's consumers under policy without enumerating them - but that breadth is
+    about which PINS are looked at, not about which REQUIREMENTS every repository has to meet.
+    Without the distinction the two collapse, and a floor raised for one role becomes a floor for
+    the whole fleet the moment it is written down.
     """
     if not go_mod.is_file():
         return ([f"{go_mod} not found"], [], [])
     requires, replaced = parse_go_mod(go_mod.read_text(encoding="utf-8"))
     strict = mode in STRICT_MODES
     floors = floors or {}
+    role = role or detect_role(go_mod)
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -166,9 +250,17 @@ def check(go_mod: pathlib.Path, modules: list[str], mode: str,
         projects its OpenAPI components from its own pin, so both a current and a stale
         service pass their own drift check while publishing different envelopes.
         """
-        floor = floors.get(module)
-        if not floor:
+        spec = floors.get(module)
+        if not spec:
             return
+        if spec.applies_to and spec.applies_to != role:
+            # Reported rather than passed over in silence. A scoped floor that simply vanished
+            # from the output would be indistinguishable from no floor being declared, which is
+            # the reading this file's own header warns against.
+            report.append(f"{label}: floor {spec.minimum} applies to {spec.applies_to}, "
+                          f"not to this {role}; not enforced here")
+            return
+        floor = spec.minimum
         want, got = semver(floor), semver(version)
         if want is None:
             errors.append(f"{label}: declared floor {floor} is not a stable vX.Y.Z tag")
@@ -194,8 +286,11 @@ def check(go_mod: pathlib.Path, modules: list[str], mode: str,
                 "CI validates, so replace is not permitted on a platform module."
             )
             return
-        floor = floors.get(module)
-        suffix = f", floor {floor}" if floor else ""
+        spec = floors.get(module)
+        # Only name the floor when it binds this repository. Printing it unconditionally reads as
+        # a requirement being applied, which for a scoped floor is the opposite of what happened.
+        binding = spec and (not spec.applies_to or spec.applies_to == role)
+        suffix = f", floor {spec.minimum}" if binding else ""
         report.append(f"{label}: {version} ({_describe(version)}{suffix})")
         if strict and not STABLE.match(version):
             errors.append(
@@ -252,6 +347,13 @@ def main() -> int:
         help="YAML declaring the minimum version for contract-bearing modules. A pin below its "
              "floor fails. Absent file means no floors are declared.",
     )
+    ap.add_argument(
+        "--role",
+        default="",
+        choices=["", *sorted(ROLES)],
+        help="Role of the repository under test, for floors scoped with applies_to. Resolved from "
+             "the checkout when not given; pass it only to override that.",
+    )
     args = ap.parse_args()
 
     try:
@@ -264,7 +366,7 @@ def main() -> int:
     # DAG - but the governed sweep still applies, because a core pins platform-shared-go too.
     errors, warnings, report = check(
         pathlib.Path(args.go_mod), list(modules), args.mode, args.governed_prefix,
-        load_floors(pathlib.Path(args.floors)),
+        load_floors(pathlib.Path(args.floors)), args.role,
     )
 
     lines = [f"## Platform module pin policy ({args.mode})", ""]

@@ -27,11 +27,30 @@
 # under the engine's pin and 30 under the reference service's, so the fleet disagreed about
 # which error codes exist while every gate reported green.
 #
+# WHO A FLOOR APPLIES TO
+# ----------------------
+# A floor with no applies_to is fleet-wide: every repository pinning the module must meet it.
+# applies_to names a role instead, and only that role is held to it.
+#
+# The key exists because the two readers of this file do not have the same scope, and for a
+# while nothing here said so. check-gateway-baseline.py reads it for GW-0003, whose own
+# definition reads applies_when: gateway. check_module_pins.py reads it during the governed
+# sweep, which covers every pin under the platform prefix precisely so that no consumer is
+# missed. A floor written for the first was therefore enforced by the second on everything.
+#
+# platform-shared-go v1.22.0 is what that cost: added on 2026-08-04 for the gateway baseline,
+# it landed on 78 of the fleet's 88 Go modules, none of which the reason text is about, while
+# all six gateways were already above it. Every consumer bump PR a contracts release opened
+# then failed the pin policy - 43 red jobs per release, reported as a dependency problem in
+# 43 repositories rather than as one mis-scoped line here.
+#
 # RAISING A FLOOR
 # ---------------
 # Raising a number here is a deliberate, reviewable act that will fail every repo still
 # below it - which is the point, and why it belongs in a CODEOWNERS-guarded file rather than
-# in a script. Raise it when the fleet has been moved, not to force the move.
+# in a script. Raise it when the fleet has been moved, not to force the move. Scope it first:
+# "which repositories does this reason actually describe" is the question applies_to answers,
+# and it is cheaper to answer before the raise than after.
 #
 # API-0007 in controls/api-contract.yaml is the paired control: this file makes a service
 # depend on a current contract module, API-0007 makes it actually publish the current
@@ -51,6 +70,7 @@ floors:
 
   github.com/coderaxis/platform-shared-go:
     min: v1.22.0
+    applies_to: gateway
     reason: >-
       First release carrying platform/gatewaybaseline, the embedded gateway security baseline
       and its loader (ADR-0096). A floor rather than an exact pin for the reason this file's

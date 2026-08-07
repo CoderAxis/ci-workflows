@@ -191,6 +191,40 @@ def test_pin_policy() -> None:
                "--mode", "prod", "--governed-prefix", ""],
               capture_output=True, text=True).returncode, 0)
 
+    test_scoped_floors()
+
+
+def test_scoped_floors() -> None:
+    """A floor scoped with applies_to binds its role and nothing else.
+
+    The sweep looks at every pin under the platform prefix, which is what stops a consumer being
+    missed. That breadth is about which pins are READ; it is not a claim that every repository has
+    the same requirements. When the two were the same thing, the platform-shared-go floor - raised
+    for GW-0003, whose definition reads applies_when: gateway - was enforced on 78 of the fleet's
+    88 Go modules while all six gateways already met it, and every consumer bump PR a contracts
+    release opened failed on it.
+
+    Both directions are asserted. A scope that let everything through would be no floor at all,
+    and would pass a test that only checked the first case.
+    """
+    print("\nscoped floors (applies_to)")
+    check("a service below a gateway-scoped floor passes",
+          run_checker("below-gateway-floor-service", "prod"), 0)
+    check("...and the same pin in a gateway blocks",
+          run_checker("below-gateway-floor-gateway", "prod"), 1)
+    check("a gateway named only by its service contract blocks too",
+          run_checker("below-gateway-floor-by-contract", "prod"), 1)
+    # --role overrides detection, so the service fixture must block when told it is a gateway.
+    # Without this, a detect_role that returned "service" unconditionally would pass every case
+    # above and the scope would be enforcing nothing.
+    check("the floor itself still bites when the role says gateway",
+          subprocess.run(
+              [sys.executable, str(CHECKER),
+               "--go-mod", str(PINS / "below-gateway-floor-service" / "go.mod"),
+               "--modules", json.dumps([CORE_MOD, SCHEMA_MOD]),
+               "--mode", "prod", "--role", "gateway"],
+              capture_output=True, text=True).returncode, 1)
+
 
 def main() -> int:
     print("release cascade: dependency DAG derivation")
