@@ -292,6 +292,14 @@ jobs:
       contents: write # push the tag, create the release
       id-token: write # keyless provenance
       attestations: write
+      # anchore/sbom-action uploads each SBOM as a workflow artifact and then downloads it back to
+      # attach to the release, and downloading needs actions: read. Listing any scope here sets
+      # every unlisted one to none, so omitting this did not fall back to the caller's grant - it
+      # revoked it. The SBOMs were generated and uploaded, and the step then failed on its own
+      # artifact with "Resource not accessible by integration", after the tag had already been
+      # pushed: the module was importable at the new version but had no release to attach anything
+      # to. Every caller of this workflow already grants actions: read, because ci-gate needs it.
+      actions: read
     outputs:
       version: ${{ steps.ver.outputs.version }}
       releasable: ${{ steps.ver.outputs.releasable }}
