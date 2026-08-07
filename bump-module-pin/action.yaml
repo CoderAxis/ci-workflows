@@ -336,8 +336,24 @@ runs:
         echo "::notice::bump tier=${tier} (${CURRENT:-none} -> ${VERSION})"
 
         if [[ "${tier}" == "major" ]]; then
+          # The labels are the only durable signal that this PR is waiting on a person, so they
+          # are created before they are applied and their failure is reported rather than
+          # swallowed. Neither was true before: the labels existed in no target repository, so
+          # `gh pr edit --add-label` failed in every one of them, `|| true` hid it, and the only
+          # remaining trace was a warning in a release log that nobody reads because the run is
+          # green. The v0.14.0 fan-out left 48 PRs withheld for review and not one of them said
+          # so - which is the same silent skew this pipeline exists to prevent, one step later.
+          for label in \
+            "major-bump:b60205:Crosses a major version boundary; 0.x minor counts" \
+            "needs-manual-review:d93f0b:Auto-merge withheld deliberately; a person has to decide"; do
+            gh label create "${label%%:*}" --repo "${TARGET}" \
+              --color "$(cut -d: -f2 <<<"${label}")" \
+              --description "$(cut -d: -f3- <<<"${label}")" >/dev/null 2>&1 || true
+          done
           gh pr edit "${PR}" --repo "${TARGET}" \
-            --add-label major-bump --add-label needs-manual-review || true
+            --add-label major-bump --add-label needs-manual-review \
+            || echo "::warning::could not label #${PR} in ${TARGET}; it is withheld for review " \
+                    "and now says so nowhere but here"
           echo "::warning::major bump: auto-merge withheld, #${PR} needs review"
           exit 0
         fi
