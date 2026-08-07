@@ -2015,6 +2015,54 @@ jobs:
           # TestMain, so a failure here reproduces locally with no extra setup.
           GOWORK=off go test -tags e2e -count=1 -timeout 15m -v ./tests/e2e/...
 
+  # ── source invariants ───────────────────────────────────────────────────────────────────────
+  # The invariants that declare mechanism: [static-analysis] can only be kept by reading source.
+  # check_source_invariants.py owns those checks, and until --service-root existed it required a
+  # services/ tree that no CI job has - the fleet is ~40 separate repositories. Each job now
+  # scans its own checkout; the fleet is covered by the union. Dual checkout mirrors the docs
+  # job: the standard lives in core-docs, the subject is the repository under test.
+  source-invariants:
+    name: Source invariants
+    needs: resolve
+    # Go deployables and cores carry the callback/signature checks; schema repos carry the
+    # forwarding SQL checks (C6/C7). Other languages have no scanner yet and must not get a
+    # green tick for checks nobody ran.
+    if: >-
+      needs.resolve.outputs.language == 'go'
+      || needs.resolve.outputs.repo_kind == 'schema'
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ${{ github.event.repository.name || 'service' }}
+
+      - name: Mint a catalog-read token
+        id: catalog_token
+        uses: coderaxis/github-actions/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ inputs.catalog_owner }}
+          repositories: ${{ inputs.catalog_repo }}
+
+      - name: Check out the source-invariant standard
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.catalog_repo }}
+          ref: ${{ inputs.catalog_ref }}
+          token: ${{ steps.catalog_token.outputs.token }}
+          path: core-docs
+
+      - name: Scan this checkout against the central controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 core-docs/scripts/check_source_invariants.py \
+            --service-root "${{ github.event.repository.name || 'service' }}"
+
   # ── documentation ───────────────────────────────────────────────────────────────────────────
   # Replaces the per-repo docs-lint.yml and stale-docs-check.yml, which both ran
   # scripts/validate_docs.py from the repository being checked. That file existed in 91
