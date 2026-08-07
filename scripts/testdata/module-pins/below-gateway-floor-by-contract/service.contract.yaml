@@ -1,0 +1,3 @@
+service:
+  name: fixture-frontdoor
+  type: gateway
