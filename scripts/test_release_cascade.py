@@ -19,10 +19,12 @@ Run: python3 scripts/test_release_cascade.py
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import pathlib
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
@@ -31,6 +33,14 @@ from resolve_service_identity import resolve  # noqa: E402
 HERE = pathlib.Path(__file__).parent
 CATALOG = HERE / "testdata" / "release-cascade-catalog"
 PINS = HERE / "testdata" / "module-pins"
+
+
+def checker_module():
+    """Import check_module_pins as a module, the way ci.yaml's inline unit test does."""
+    spec = importlib.util.spec_from_file_location("pins", CHECKER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 CHECKER = HERE / "check_module_pins.py"
 
 CORE_ID, SCHEMA_ID, DEPLOYABLE_ID, SHARED_ID = 900000001, 900000002, 900000003, 900000004
@@ -224,6 +234,27 @@ def test_scoped_floors() -> None:
                "--modules", json.dumps([CORE_MOD, SCHEMA_MOD]),
                "--mode", "prod", "--role", "gateway"],
               capture_output=True, text=True).returncode, 1)
+
+    test_check_accepts_a_plain_floor_mapping()
+
+
+def test_check_accepts_a_plain_floor_mapping() -> None:
+    """check() is imported and called directly, not only through the CLI.
+
+    ci.yaml's floor-comparison unit test builds {module: "vX.Y.Z"} itself rather than going
+    through load_floors, which is the shape this function took before floors could be scoped.
+    Adding the scope broke that caller and nothing here noticed, because every case above shells
+    out to the CLI - so the library contract needs a case of its own.
+    """
+    print("\nfloors passed in as plain strings (the library calling convention)")
+    module = "github.com/coderaxis/platform-shared-go"
+    go_mod = pathlib.Path(tempfile.mkdtemp()) / "go.mod"
+    go_mod.write_text(f"module x\n\ngo 1.24\n\nrequire {module} v1.21.0\n", encoding="utf-8")
+
+    errors, _, _ = checker_module().check(
+        go_mod, [], "prod", "github.com/coderaxis/", {module: "v1.22.0"})
+    check("a bare version string is read as a fleet-wide floor and still blocks",
+          bool(errors), True)
 
 
 def main() -> int:
