@@ -216,7 +216,7 @@ def _describe(version: str) -> str:
 
 def check(go_mod: pathlib.Path, modules: list[str], mode: str,
          governed_prefix: str = "",
-         floors: dict[str, Floor] | None = None,
+         floors: dict[str, Floor | str] | None = None,
          role: str = "") -> tuple[list[str], list[str], list[str]]:
     """Return (errors, warnings, report).
 
@@ -236,7 +236,11 @@ def check(go_mod: pathlib.Path, modules: list[str], mode: str,
         return ([f"{go_mod} not found"], [], [])
     requires, replaced = parse_go_mod(go_mod.read_text(encoding="utf-8"))
     strict = mode in STRICT_MODES
-    floors = floors or {}
+    # A bare version string is accepted as a fleet-wide floor. load_floors does not produce that
+    # shape, but callers that build the mapping themselves do, and a caller passing the shape this
+    # function has always taken should not have to know that scoping was added underneath it.
+    floors = {m: f if isinstance(f, Floor) else Floor(str(f))
+              for m, f in (floors or {}).items()}
     role = role or detect_role(go_mod)
 
     errors: list[str] = []
