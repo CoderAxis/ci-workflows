@@ -138,10 +138,17 @@ def ci_report(fam: Family, repo: Path) -> dict:
 
 def cli_report(fam: Family, repo: Path) -> dict:
     """control id -> (verdict, count), from the CLI implementation."""
-    out = subprocess.run(
-        [IHQ, "validate", fam.cli_subcommand, "--repo", str(repo), "--json",
-         "--details", "--severity", "info"],
-        capture_output=True, text=True, timeout=300)
+    try:
+        out = subprocess.run(
+            [IHQ, "validate", fam.cli_subcommand, "--repo", str(repo), "--json",
+             "--details", "--severity", "info"],
+            capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as exc:
+        # A missing or unrunnable CLI used to end this harness in a traceback, which is
+        # loud but says nothing about the fix. It is a configuration error with one
+        # remedy, and the usage text already names it.
+        return {"__error__": f"could not run the CLI ({IHQ}): {exc}. Build it and pass "
+                             f"IHQ_BIN=/path/to/ihq."}
     try:
         doc = json.loads(out.stdout)
     except json.JSONDecodeError:
@@ -205,6 +212,84 @@ def run_family(name: str, fam: Family, repos, applicable) -> tuple:
     return agree, disagree, count_gaps, unasked
 
 
+def baseline_artifact_parity() -> list:
+    """Prove both tools write a byte-identical `_comment` into the baseline they co-own.
+
+    That string is duplicated on purpose -- the two tools ship in different
+    repositories, so neither can import the other's constant -- and duplication with no
+    check is how the two texts drift. Drift here is not cosmetic: both tools write this
+    key, so the file would flip between two texts as each ran, putting a spurious
+    one-line diff on every alternate commit in ~37 repositories.
+
+    Compared behaviourally, by running each tool and reading what it produced, rather
+    than by grepping the two sources for a literal. A source comparison passes when both
+    files contain the right string and neither writes it.
+
+    The comment is the file's only documentation and sits directly above the data, so it
+    is also asserted to name each member and its owning gate. It used to say "re-run
+    --write-baseline", singular, in a file three tools write -- which is what sent an
+    author on inboxxhq-org-service to refresh `checks` for a CI failure under `controls`.
+    """
+    import tempfile
+
+    problems = []
+    with tempfile.TemporaryDirectory() as tmp:
+        # A spec with one violation each tool will find, so both actually write a member
+        # rather than declining to create a file with nothing to freeze.
+        repo = Path(tmp) / "fixture"
+        (repo / "docs").mkdir(parents=True)
+        (repo / "docs" / "swagger.json").write_text("{}", encoding="utf-8")
+        (repo / "docs" / "openapi.json").write_text(json.dumps({
+            "openapi": "3.0.3", "info": {"title": "fixture", "version": "1.0.0"},
+            "paths": {"/things": {"get": {"responses": {"200": {"description": "OK"}}}}},
+        }), encoding="utf-8")
+
+        def comment_after(argv, label):
+            baseline = repo / ".api-contract-baseline.json"
+            baseline.unlink(missing_ok=True)
+            try:
+                out = subprocess.run(argv, cwd=repo, capture_output=True, text=True, timeout=300)
+            except (OSError, subprocess.SubprocessError) as exc:
+                # A tool that could not be run has not agreed with anything. Reporting this
+                # as parity would be the misleading answer, which is the whole premise of
+                # this harness.
+                problems.append(f"{label}: could not be run ({exc}). Pass the CLI as "
+                                f"IHQ_BIN=/path/to/ihq so this comparison actually happens.")
+                return None
+            if not baseline.exists():
+                problems.append(f"{label}: wrote no baseline, so its comment could not be "
+                                f"compared (exit {out.returncode}): {out.stderr.strip()[:200]}")
+                return None
+            try:
+                return json.loads(baseline.read_text(encoding="utf-8")).get("_comment")
+            except json.JSONDecodeError as exc:
+                problems.append(f"{label}: wrote a baseline that is not JSON ({exc})")
+                return None
+
+        ci = comment_after([sys.executable, str(HERE / "check-api-contract.py"), ".",
+                            "--controls", str(CONTROL_DIR / "api-contract.yaml"),
+                            "--write-baseline"], "check-api-contract.py")
+        cli = comment_after([IHQ, "validate", "--repo", ".", "--write-baseline"], "ihq validate")
+
+        if ci is not None and cli is not None and ci != cli:
+            problems.append("the two tools write different `_comment` text into the baseline "
+                            "they co-own, so the file will flip between them on alternate "
+                            f"runs.\n    check-api-contract.py: {ci!r}\n    ihq validate:          {cli!r}")
+        for label, text in (("check-api-contract.py", ci), ("ihq validate", cli)):
+            if text is None:
+                continue
+            for member, owner in (("controls", "check-api-contract.py"),
+                                  ("checks", "ihq validate"), ("arch", "ihq arch")):
+                if member not in text:
+                    problems.append(f"{label}: the baseline comment does not name the {member!r} "
+                                    f"member (owned by {owner}). It is the only documentation in "
+                                    f"a file three gates write, and a reader who cannot tell which "
+                                    f"member is theirs refreezes the wrong one.")
+            if "RISE" not in text.upper():
+                problems.append(f"{label}: the baseline comment must state the ratchet rule")
+    return problems
+
+
 def main(repos):
     shared = {}
     failed = False
@@ -256,6 +341,16 @@ def main(repos):
                   f"were out of scope. Pass the repositories THEMSELVES, not a parent "
                   f"directory, and include both fixtures.")
             failed = True
+
+    print("=== baseline artifact: the `_comment` both tools write must be identical")
+    artifact_problems = baseline_artifact_parity()
+    if artifact_problems:
+        failed = True
+        for msg in artifact_problems:
+            print(f"  DISAGREE: {msg}")
+    else:
+        print("  agree: both tools write the same baseline comment, and it names all three members")
+    print()
 
     for e in shared.get("errors", []):
         print(f"  harness error: {e}")

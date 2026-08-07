@@ -29,6 +29,7 @@ import tempfile
 HERE = pathlib.Path(__file__).resolve().parent
 CHECKER_PATH = HERE / "check-api-contract.py"
 CONTROLS_PATH = HERE.parent / "controls" / "api-contract.yaml"
+BASELINE = ".api-contract-baseline.json"
 
 
 def _load_checker():
@@ -1032,6 +1033,184 @@ def test_end_to_end_cli():
         for cid in new_controls:
             expect(f"::error::[{cid}]" not in proc.stdout,
                    f"end-to-end: {cid} fired against the COMPLIANT fixture (false positive)\n{proc.stdout}")
+
+
+# ── co-owned baseline: each gate names its own member ────────────────────────────────────────
+#
+# .api-contract-baseline.json is written by two programs under two vocabularies: this
+# script freezes `controls`, the ihq CLI freezes `checks`. That split is deliberate --
+# neither tool can evaluate the other's detectors -- but it is invisible in the file's
+# name, and both tools suggest the same `--write-baseline` flag. An author whose CI
+# failed here refreshed the baseline with the CLI, which wrote `checks`, and stayed
+# blocked on the same control (G-69). These tests hold the two properties that make
+# that diagnosable: this gate reads ONLY `controls`, and it SAYS that `checks` is
+# somebody else's.
+
+
+def test_baseline_reads_only_its_own_member():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / BASELINE).write_text(json.dumps({
+            "controls": {"API-0012": 7},
+            "checks": {"envelope-success": 3, "operationid-present": 1},
+        }), encoding="utf-8")
+        repo = m.ServiceRepo(root)
+
+        expect(repo.baseline_error is None,
+               f"a file carrying both members is not an error: {repo.baseline_error}")
+        expect(repo.baseline == {"API-0012": 7},
+               f"this gate must read `controls` alone, got {repo.baseline}")
+        expect(repo.foreign_frozen() == {"checks": 2},
+               f"the other gate's member must be counted for reporting, got {repo.foreign_frozen()}")
+
+
+def test_baseline_without_the_other_member_says_nothing_about_it():
+    # None, not 0. "The CLI freezes nothing" and "the CLI does not use this file" are
+    # different states, and only the first would be worth printing.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / BASELINE).write_text(json.dumps({"controls": {}}), encoding="utf-8")
+        expect(m.ServiceRepo(root).foreign_frozen() == {},
+               "absent foreign members must be absent, so their notes stay unprinted")
+
+
+def test_missing_controls_member_is_not_hidden_by_the_other_one():
+    # The exact G-69 shape: someone ran the CLI's --write-baseline and committed the
+    # result. `checks` is populated, `controls` is absent, and this gate forgives
+    # nothing -- which is correct, and must not be mistaken for a baseline in effect.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / BASELINE).write_text(json.dumps({"checks": {"envelope-error": 9}}),
+                                     encoding="utf-8")
+        repo = m.ServiceRepo(root)
+        expect(repo.baseline == {}, f"an absent `controls` forgives nothing, got {repo.baseline}")
+        expect(repo.foreign_frozen() == {"checks": 1},
+               "the populated `checks` must still be reported, since it is the thing that "
+               "explains why the author believed they had refreshed the baseline")
+
+
+def test_report_names_the_other_gates_member():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp) / "repo"
+        root.mkdir()
+        _write_violating_fixture(root)
+        (root / BASELINE).write_text(json.dumps({"controls": {}, "checks": {"envelope-success": 2}}),
+                                     encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(CHECKER_PATH), str(root),
+                               "--controls", str(CONTROLS_PATH)],
+                              capture_output=True, text=True)
+        out = proc.stdout
+        expect("baseline key: 'controls'" in out,
+               f"the group header must name the member this gate enforces:\n{out}")
+        expect("'checks'" in out and "NOT read here" in out,
+               f"the output must disclaim the member it does not enforce:\n{out}")
+        expect("ihq" in out,
+               f"the note must name the tool that owns `checks`, or it is not actionable:\n{out}")
+
+
+def test_a_misfiled_ihq_check_is_named_as_misfiled_not_as_a_stale_control():
+    # The wrong-member mistake, in the direction this gate can see. The pre-existing
+    # message told the author to rename or drop the line, and dropping it is the one
+    # action that loses another gate's frozen debt.
+    controls = m.load_controls(CONTROLS_PATH)["controls"]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / BASELINE).write_text(json.dumps({"controls": {"envelope-success": 4}}),
+                                     encoding="utf-8")
+        problems = m.baseline_problems(m.ServiceRepo(root), controls)
+
+        expect(len(problems) == 1, f"one misfiled key, one problem; got {problems}")
+        msg = problems[0] if problems else ""
+        expect("'checks'" in msg, f"the message must name the member it belongs in: {msg}")
+        expect("ihq" in msg, f"the message must name the tool that owns it: {msg}")
+        expect("enforced by nothing" in msg,
+               f"the message must say the count is currently enforced by nobody: {msg}")
+        expect("was retired, drop the line" not in msg,
+               f"must NOT advise dropping another gate's debt: {msg}")
+
+
+def test_a_genuinely_stale_control_id_still_reads_as_stale():
+    # The rename case the validator was built for must keep its original message: a
+    # four-digit ID that no longer exists is stale, not misfiled.
+    controls = m.load_controls(CONTROLS_PATH)["controls"]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / BASELINE).write_text(json.dumps({"controls": {"API-9999": 4}}), encoding="utf-8")
+        problems = m.baseline_problems(m.ServiceRepo(root), controls)
+
+        expect(len(problems) == 1, f"expected one problem, got {problems}")
+        msg = problems[0] if problems else ""
+        expect("not a control in this catalog" in msg and "renamed" in msg,
+               f"a stale control ID must still read as stale: {msg}")
+        expect("'checks'" not in msg,
+               f"a stale control ID is not a misfiled check, so must not be reported as one: {msg}")
+
+
+def test_every_foreign_member_is_reported_and_attributed():
+    # A repo can carry debt for all three enforcers at once. Reporting only one
+    # re-creates the original blind spot for the others.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / BASELINE).write_text(json.dumps({
+            "controls": {"API-0004": 2},
+            "checks": {"structural": 1, "envelope-error": 3},
+            "arch": {"ARCH-0003": 5},
+        }), encoding="utf-8")
+        repo = m.ServiceRepo(root)
+
+        expect(repo.baseline == {"API-0004": 2},
+               f"this gate still reads `controls` alone, got {repo.baseline}")
+        expect(repo.foreign_frozen() == {"checks": 2, "arch": 1},
+               f"both foreign members must be tallied, got {repo.foreign_frozen()}")
+        for key in repo.foreign_frozen():
+            meta = m.BASELINE_FOREIGN_KEYS[key]
+            expect(bool(meta["tool"]) and bool(meta["refreeze"]),
+                   f"{key} must name its tool and refreeze command, else the note dead-ends")
+        expect(m.BASELINE_CONTROLS_KEY not in m.BASELINE_FOREIGN_KEYS,
+               "this gate's own member must never be listed as foreign")
+
+
+def test_a_misfiled_arch_rule_is_sent_to_the_arch_member():
+    # ARCH-0003 under `controls` must not be reported as an ihq check: that would send
+    # the author to the wrong member and the wrong refreeze command.
+    controls = m.load_controls(CONTROLS_PATH)["controls"]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / BASELINE).write_text(json.dumps({"controls": {"ARCH-0003": 1}}), encoding="utf-8")
+        problems = m.baseline_problems(m.ServiceRepo(root), controls)
+
+        expect(len(problems) == 1, f"expected one problem, got {problems}")
+        msg = problems[0] if problems else ""
+        expect("'arch'" in msg, f"an ARCH rule belongs in the `arch` member: {msg}")
+        expect("ihq arch" in msg, f"the message must name the tool that enforces it: {msg}")
+        expect("'checks'" not in msg, f"must not be misattributed to `checks`: {msg}")
+
+
+def test_the_baseline_comment_tells_a_reader_which_member_is_theirs():
+    """The comment is the only documentation in a file three gates write.
+
+    Byte-identity with the ihq CLI's copy of this string cannot be checked here -- the two
+    tools ship in different repositories, so this checkout has only one of them, and
+    check-detector-parity.py owns that comparison by running both. What IS enforceable
+    here is the content, and content is what prevents the actual harm: the text used to
+    say "re-run --write-baseline", singular, which is what sent an author on
+    inboxxhq-org-service to refresh `checks` for a CI failure under `controls`.
+    """
+    text = m.BASELINE_COMMENT
+    for member, owner in ((m.BASELINE_CONTROLS_KEY, "check-api-contract.py"),
+                          ("checks", "ihq validate"), ("arch", "ihq arch")):
+        expect(member in text,
+               f"the baseline comment must name the {member!r} member, owned by {owner}: "
+               f"a reader who cannot tell which of the three is theirs refreezes the wrong "
+               f"one. Got: {text!r}")
+    expect("RISE" in text.upper(), f"the comment must state the ratchet rule: {text!r}")
+    expect("does NOT affect" in text or "not affect" in text,
+           f"the comment must say that lowering one member does not affect another, which is "
+           f"the specific thing readers got wrong: {text!r}")
+    # A bare "--write-baseline" reintroduces the original ambiguity: three tools accept
+    # that flag and each writes a different member.
+    expect("re-run --write-baseline" not in text,
+           f"the comment must not name a bare --write-baseline as though one gate owned it: {text!r}")
 
 
 # ── run everything ────────────────────────────────────────────────────────────────────────────

@@ -40,12 +40,36 @@ except ModuleNotFoundError:  # pragma: no cover - environment problem, not a pol
 SELF_REPO = Path(__file__).resolve().parents[1]
 DEFAULT_CONTROLS = SELF_REPO / "controls" / "api-contract.yaml"
 BASELINE_FILE = ".api-contract-baseline.json"
+# This gate's key in that co-owned file. It reads and writes this member and no other.
+# Every member is named in the output because the file's name mentions none of them, so a
+# verdict about one member reads as a verdict about the file -- and all three gates accept
+# a `--write-baseline` flag while writing different members of it.
+BASELINE_CONTROLS_KEY = "controls"
+BASELINE_CHECKS_KEY = "checks"
+# The members this gate does NOT read, mapped to the tool that does and how to refreeze
+# it. Three programs freeze debt in this one file under three vocabularies and its name
+# mentions none of them, so a verdict from any one reads as a verdict about the file.
+BASELINE_FOREIGN_KEYS = {
+    BASELINE_CHECKS_KEY: {
+        "tool": "the ihq CLI's `ihq validate` gate",
+        "refreeze": "ihq validate --repo . --write-baseline",
+        # kebab-case check names, recognised by NOT matching another ID shape
+        "id_shape": None,
+    },
+    "arch": {
+        "tool": "architecture-check (`ihq arch`)",
+        "refreeze": "ihq arch --repo . --write-baseline",
+        "id_shape": r"ARCH-\d+",
+    },
+}
 # Byte-identical to baselineComment in the ihq CLI's internal/cli/baseline.go. Both tools write
 # this key, so a difference would make the file flip between two texts as each ran, turning
 # every alternate run into a spurious diff on a line neither tool actually disagreed about.
-BASELINE_COMMENT = ("Frozen api-contract debt for this service. The gate fails if any count "
-                    "RISES; lower it by fixing violations, then re-run --write-baseline. "
-                    "Raising a number here is a reviewable, deliberate act.")
+BASELINE_COMMENT = ("Frozen debt for this service, co-owned by three gates that each read ONE member: "
+                    "'controls' is check-api-contract.py, 'checks' is `ihq validate`, 'arch' is `ihq arch`. "
+                    "Each fails if its own counts RISE. Lowering one member does NOT affect another, so "
+                    "refreeze with the tool that owns the member you changed. Raising a number here is a "
+                    "reviewable, deliberate act.")
 
 # The proto projection API-0007 compares against. Generated, never hand-written:
 #   go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components
@@ -887,6 +911,7 @@ class ServiceRepo:
         self.go_sources = self._load_go_sources()
         self._config_headers = None
         self.baseline_error = None
+        self._foreign = {}
         self.baseline = self._load_baseline()
 
     def _load_spec(self):
@@ -1004,11 +1029,28 @@ class ServiceRepo:
         if not isinstance(data, dict):
             self.baseline_error = "expected a JSON object at the top level"
             return {}
-        counts = data.get("controls", {})
+        self._foreign = {}
+        for key in BASELINE_FOREIGN_KEYS:
+            if key not in data:
+                # Absent is not zero: "that gate freezes nothing" and "that gate does not
+                # use this file" are different states, and only one is worth reporting.
+                continue
+            member = data[key]
+            self._foreign[key] = len(member) if isinstance(member, dict) else -1
+        counts = data.get(BASELINE_CONTROLS_KEY, {})
         if not isinstance(counts, dict):
-            self.baseline_error = "'controls' is not an object"
+            self.baseline_error = f"'{BASELINE_CONTROLS_KEY}' is not an object"
             return {}
         return counts
+
+    def foreign_frozen(self) -> dict:
+        """How much each other enforcer freezes in this file, keyed by member.
+
+        Members absent from the file are absent here. -1 means the member is present but
+        was not a JSON object: present is the whole point, so it must not be reported as
+        nothing frozen.
+        """
+        return getattr(self, "_foreign", {})
 
 
 # --- detectors: (ServiceRepo) -> Finding ---------------------------------------------------
@@ -1214,6 +1256,20 @@ def load_controls(path: Path) -> dict:
     return doc
 
 
+def _foreign_owner_of(key: str) -> tuple:
+    """Which other enforcer a key misfiled under `controls` belongs to.
+
+    Shape first: ARCH-0003 is architecture-check's. Anything else that is not a control
+    ID is a kebab-case ihq check name, which is the default rather than a guess, since
+    `checks` is the only remaining vocabulary in this file.
+    """
+    for name, meta in BASELINE_FOREIGN_KEYS.items():
+        shape = meta["id_shape"]
+        if shape and re.fullmatch(shape, key):
+            return name, meta
+    return BASELINE_CHECKS_KEY, BASELINE_FOREIGN_KEYS[BASELINE_CHECKS_KEY]
+
+
 def baseline_problems(repo: ServiceRepo, controls: list) -> list:
     """Reasons this repo's baseline cannot be trusted to mean what it says.
 
@@ -1243,6 +1299,21 @@ def baseline_problems(repo: ServiceRepo, controls: list) -> list:
     unknown = sorted(set(repo.baseline) - known)
     if not unknown:
         return []
+    # A key that is not shaped like a control ID is almost certainly an ihq check name that
+    # landed in the wrong member of this co-owned file. Saying "not a control in this catalog"
+    # is true but dead-ends the reader, who then renames or deletes a line that another gate
+    # depends on. Shape, not a copy of ihq's check list: a copy here would go stale, and the
+    # run that forgot to update it is the run that needs this message.
+    misfiled = [(k, *_foreign_owner_of(k)) for k in unknown
+                if not re.fullmatch(r"API-\d+", k)]
+    if misfiled:
+        return [f"{repo.name}: {BASELINE_FILE} freezes {k} under {BASELINE_CONTROLS_KEY!r}, which "
+                f"is not a control in this catalog and is not shaped like one. It belongs in the "
+                f"{key!r} member of this same file, enforced by {owner['tool']}. Under "
+                f"{BASELINE_CONTROLS_KEY!r} it is enforced by nothing: this gate has no such "
+                f"control, and that tool does not read this member. Move the line to {key!r}, or "
+                f"refreeze that gate with `{owner['refreeze']}`."
+                for k, key, owner in misfiled]
     return [f"{repo.name}: {BASELINE_FILE} freezes {k}, which is not a control in this "
             f"catalog, so the count it records is being ignored and that control is held to "
             f"zero. If {k} was renamed, rename it here too; if it was retired, drop the line. "
@@ -1286,12 +1357,13 @@ MARK = {"pass": "ok", "fail": "XX", "frozen": "==", "improved": "->", "skipped":
 
 
 def render_text(repo: ServiceRepo, results: list, threshold: int) -> None:
-    print(f"::group::api-contract: {repo.name}")
+    print(f"::group::api-contract: {repo.name} (baseline key: {BASELINE_CONTROLS_KEY!r})")
     for r in results:
         line = f"[{MARK[r['result']]}] {r['control']} [{r['severity']}] {r['title']}: {r['evidence']}"
         if r["result"] in ("frozen", "improved"):
             line += f" (baseline {r['baseline']}, now {r['count']})"
         print("  " + line)
+    _render_foreign_checks(repo)
     print("::endgroup::")
     for r in results:
         if r["result"] == "fail":
@@ -1305,6 +1377,27 @@ def render_text(repo: ServiceRepo, results: list, threshold: int) -> None:
         elif r["result"] == "improved":
             print(f"::notice::[{r['control']}] improved from {r['baseline']} to {r['count']} - "
                   f"run --write-baseline to lock the gain in")
+
+
+def _render_foreign_checks(repo: ServiceRepo) -> None:
+    """Say that part of the baseline is enforced by a gate this script does not run.
+
+    Without it, a developer whose CI failed here reads the remediation, runs the ihq
+    CLI's --write-baseline -- which writes `checks` -- and fails again on the same
+    control, with nothing in either output explaining why. That happened on
+    inboxxhq-org-service and cost a day: pushes were blocked while the baseline the
+    author had just refreshed was the wrong member of the right file.
+    """
+    foreign = repo.foreign_frozen()
+    if not foreign:
+        return
+    for key, count in sorted(foreign.items()):
+        tool = BASELINE_FOREIGN_KEYS[key]["tool"]
+        n = ("entries this gate could not parse" if count < 0
+             else f"{count} entr{'y' if count == 1 else 'ies'}")
+        print(f"  note: {key!r} in {BASELINE_FILE} freezes {n} for {tool} and is NOT read here.")
+    print(f"  note: this gate reads {BASELINE_CONTROLS_KEY!r} only, so lowering one member has no "
+          f"effect on another.")
 
 
 def build_report(repo: ServiceRepo, results: list, policy_ssot: list, fail_on: str, threshold: int) -> dict:
