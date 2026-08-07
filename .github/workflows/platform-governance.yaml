@@ -39,17 +39,28 @@ on:
         type: string
         default: InboxxHQ-CoderAxis/inboxxhq-platform-docs
       infra_repo:
-        description: "Infrastructure repo, for claims that cite the CI identity stack."
+        description: "Infrastructure repo, for the CI identity stack and the environment stacks."
         required: false
         type: string
         default: InboxxHQ-CoderAxis/inboxxhq-infra
       infra_sparse_path:
         description: >-
-          Sparse-checkout cone for the infra repo. Claims cite one directory in a large
-          Terraform tree, so the whole tree is not worth cloning to confirm a path exists.
+          Sparse-checkout cones for the infra repo. Two things read it: claims cite the CI
+          identity stack, and the deployment topology drift check reads the environment stacks
+          and the module defaults they inherit from. Everything else in a large Terraform tree
+          stays unfetched.
         required: false
         type: string
-        default: environments/management/ci-identity
+        # Widened from the ci-identity cone alone when the drift check landed. The topology
+        # catalog is transcribed from these stacks and cites these modules, and a checker cannot
+        # compare against a tree that was not fetched - it would report its own reach as a
+        # finding. `modules` is taken whole rather than named module by module, because the cone
+        # would otherwise need editing every time the catalog cited one more. The cost is small:
+        # about 2 MB of HCL, against a repo whose working tree runs to gigabytes once providers
+        # are initialised.
+        default: |
+          environments
+          modules
       actions_ref:
         description: "Ref of coderaxis/github-actions to assemble (defaults to the moving major tag)."
         required: false
@@ -192,3 +203,19 @@ jobs:
             --platform-docs "${GITHUB_WORKSPACE}/docs/${{ steps.owners.outputs.docs_name }}" \
             --workspace "${GITHUB_WORKSPACE}" \
             --chain
+
+      # The join between the architecture diagrams and the infrastructure they describe. The
+      # deployment topology catalog drives all 32 generated C4 views and was transcribed from
+      # Terraform by hand; build_c4.py proves the views match the catalog, and this proves the
+      # catalog still matches the code. Without it the one manual step in that chain had no
+      # control, and it had already drifted four times - including a preprod database the views
+      # called Multi-AZ that Terraform sets single-AZ.
+      #
+      # This job is where it has to run: the check needs the infra tree, and ADR-0110 puts the
+      # token that fetches it out of a caller's reach. --allow-unverifiable is deliberately not
+      # passed, for the same reason the claims gate above does not pass it.
+      - name: Deployment topology matches Terraform
+        working-directory: ${{ inputs.docs_path }}
+        run: |
+          python scripts/check_infra_drift.py \
+            --workspace "${GITHUB_WORKSPACE}"
