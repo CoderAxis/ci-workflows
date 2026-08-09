@@ -191,7 +191,7 @@ runs:
       if: steps.guard.outputs.skip != 'true'
       uses: actions/checkout@v4
       with:
-        repository: coderaxis/github-actions
+        repository: coderaxis/ci-workflows
         ref: v1
         path: .bump-central
         # controls/ carries module-floors.yaml. Without it the floor check finds no floors

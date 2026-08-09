@@ -36,7 +36,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync } from '
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// This script is versioned in coderaxis/github-actions but runs against the
+// This script is versioned in coderaxis/ci-workflows but runs against the
 // combined working tree that holds all the repos, so it cannot assume its own
 // parent directory is that tree. Walk up until a directory containing
 // frontend/frontend-core is found; that is the tree.
