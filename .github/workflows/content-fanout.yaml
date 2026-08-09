@@ -13,7 +13,7 @@ name: Content fan-out
 #         contents: read
 #         actions: read
 #         id-token: write
-#       uses: coderaxis/github-actions/.github/workflows/content-fanout.yaml@v1
+#       uses: coderaxis/ci-workflows/.github/workflows/content-fanout.yaml@v1
 #
 # WHAT THIS FIXES. The documentation site image is composed from two repositories: the client's
 # platform-docs and the shared core-docs, declared in the client's .platform/build-inputs.json.
@@ -123,7 +123,7 @@ jobs:
       # installation-wide token here would be reach this job has no use for.
       - name: Mint a catalog-read token
         id: catalog_token
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: ${{ inputs.catalog_owner }}
@@ -459,7 +459,7 @@ jobs:
       # is notifying and not on the fleet.
       - name: Mint release-bot token for this target
         id: bottoken
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: publish
           owner: ${{ steps.t.outputs.owner }}

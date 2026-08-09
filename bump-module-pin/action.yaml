@@ -104,7 +104,7 @@ runs:
     - name: Mint module-read token
       id: modauth
       if: steps.guard.outputs.skip != 'true'
-      uses: coderaxis/github-actions/ci-app-token@v1
+      uses: coderaxis/ci-workflows/ci-app-token@v1
       with:
         scope: read
         configure-git: "true"

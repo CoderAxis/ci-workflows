@@ -43,12 +43,12 @@ DOCS_BEGIN = (
 )
 DOCS_END = "<!-- END workflow-centralization-controls -->"
 
-# `uses: coderaxis/github-actions/.github/workflows/<name>@<ref>` — a reusable-workflow call.
-# Deliberately distinct from `coderaxis/github-actions/<action>@<ref>`, which is a composite ACTION.
+# `uses: coderaxis/ci-workflows/.github/workflows/<name>@<ref>` — a reusable-workflow call.
+# Deliberately distinct from `coderaxis/ci-workflows/<action>@<ref>`, which is a composite ACTION.
 # Conflating the two overstates how much of the fleet is centralised: a workflow that merely borrows
 # a central action still owns all of its own steps.
 CENTRAL_CALL_RE = re.compile(
-    r"uses:\s*coderaxis/github-actions/\.github/workflows/([\w.-]+)@([\w./-]+)"
+    r"uses:\s*coderaxis/ci-workflows/\.github/workflows/([\w.-]+)@([\w./-]+)"
 )
 WORKFLOW_CALL_RE = re.compile(r"^\s*workflow_call:", re.M)
 MAJOR_TAG_RE = re.compile(r"^v\d+$")

@@ -132,7 +132,7 @@ jobs:
 
       - name: Mint a read token for the private repositories
         id: token
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: ${{ steps.owners.outputs.owner }}

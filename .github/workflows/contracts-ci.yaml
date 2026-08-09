@@ -8,7 +8,7 @@ name: Contracts CI
 # installation token, minted by ci-app-token from the job's OIDC identity against AWS.
 #
 # The `inboxxhq-ci-app-token-read` trust policy conditions on `job_workflow_ref`, and its allowlist
-# entry is `coderaxis/github-actions/.github/workflows/*@refs/tags/v1`. The wildcard sits BEFORE the
+# entry is `coderaxis/ci-workflows/.github/workflows/*@refs/tags/v1`. The wildcard sits BEFORE the
 # `@`, so a matching claim must end in the literal `@refs/tags/v1`, and `job_workflow_ref` names the
 # workflow a job is DEFINED in together with the ref that definition was loaded from. A job defined
 # in `coderaxis/platform-contracts/.github/workflows/ci.yaml` therefore presents
@@ -124,7 +124,7 @@ jobs:
 
       - name: Mint Go SDK read token
         id: gotok
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: ${{ steps.r.outputs.go_owner }}
@@ -132,7 +132,7 @@ jobs:
 
       - name: Mint TS SDK read token
         id: tstok
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: ${{ steps.r.outputs.ts_owner }}
@@ -222,7 +222,7 @@ jobs:
       # allowlist, so the cross-account read is expected rather than exceptional.
       - name: Mint inboxxhq registry read token
         id: ihqtok
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: ${{ steps.r.outputs.ihq_owner }}

@@ -5,7 +5,7 @@ name: Reusable Deploy (canonical build + dev pin)
 #
 #   jobs:
 #     deploy:
-#       uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yaml@v1
+#       uses: coderaxis/ci-workflows/.github/workflows/deploy-reusable.yaml@v1
 #       with: { service_name: auth-service }
 #
 # The caller passes NO secrets — see the `workflow_call` note below. This example used to end in
@@ -194,7 +194,7 @@ jobs:
     steps:
       - name: Derive identity from the immutable repository id
         id: id
-        uses: coderaxis/github-actions/resolve-service-identity@v1
+        uses: coderaxis/ci-workflows/resolve-service-identity@v1
         with:
           assert-service: ${{ inputs.service_name }}
 
@@ -247,7 +247,7 @@ jobs:
       - name: Mint a token for the contract registry
         id: registry_token
         if: steps.preflight.outputs.run == 'true'
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: ${{ steps.preflight.outputs.registry_owner }}
@@ -258,7 +258,7 @@ jobs:
       - name: Mint a token for the release catalogue
         id: infra_token
         if: steps.preflight.outputs.run == 'true'
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: InboxxHQ-CoderAxis
@@ -525,7 +525,7 @@ jobs:
       - name: Mint a read token for the declared inputs
         id: input_token
         if: steps.declared.outputs.count != '0'
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: ${{ steps.declared.outputs.owner }}
@@ -538,7 +538,7 @@ jobs:
       - name: Mint read tokens for additional owners
         id: extra_tokens
         if: steps.declared.outputs.extra_owners != ''
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: ${{ steps.declared.outputs.owner }}
@@ -662,7 +662,7 @@ jobs:
       # do not — the modules, by contrast, are fetched by every Go build there is.
       - name: Mint module-read token for the builder
         id: module_token
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
 
@@ -782,7 +782,7 @@ jobs:
       # mint fails with AccessDenied, and renaming this file revokes the grant silently.
       - name: Mint a token that may pin the digest
         id: pin_token
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: gitops
           owner: ${{ steps.infra.outputs.owner }}
@@ -908,7 +908,7 @@ jobs:
           fi
           echo "stage=${stage}" >> "${GITHUB_OUTPUT}"
 
-      - uses: coderaxis/github-actions/ci-slack-notify@v1
+      - uses: coderaxis/ci-workflows/ci-slack-notify@v1
         with:
           status: failure
           # Forwarded because the action cannot reach `vars` itself, and in a reusable workflow

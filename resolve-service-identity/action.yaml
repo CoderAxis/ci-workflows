@@ -128,7 +128,7 @@ runs:
     # else, so an installation-wide token here would be unnecessary reach.
     - name: Mint a catalog-read token
       id: catalog_token
-      uses: coderaxis/github-actions/ci-app-token@v1
+      uses: coderaxis/ci-workflows/ci-app-token@v1
       with:
         scope: read
         owner: ${{ inputs.catalog-owner }}

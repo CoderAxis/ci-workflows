@@ -3,7 +3,7 @@
 # WHY THIS IS ITS OWN FILE, AND NOT TWO JOBS IN ci.yaml.
 #
 # The broker's read role is scoped with an OIDC `job_workflow_ref` condition, and the allowlist entry
-# is `coderaxis/github-actions/.github/workflows/*@refs/tags/v1`. The wildcard sits BEFORE the `@`,
+# is `coderaxis/ci-workflows/.github/workflows/*@refs/tags/v1`. The wildcard sits BEFORE the `@`,
 # so a matching claim must end in the literal `@refs/tags/v1`. `job_workflow_ref` names the workflow
 # a job is DEFINED in, together with the ref that definition was loaded from.
 #

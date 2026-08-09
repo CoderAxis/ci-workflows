@@ -6,7 +6,7 @@ name: Reusable Event Handling Compliance
 #
 #   jobs:
 #     event-handling-compliance:
-#       uses: coderaxis/github-actions/.github/workflows/event-handling-compliance.yaml@v1
+#       uses: coderaxis/ci-workflows/.github/workflows/event-handling-compliance.yaml@v1
 #       with:
 #         role: P                        # P | H | DK | Hybrid | E | Bridge
 #         # allowed_topics: "inboxxhq.chat.messages"   # required for DK/Hybrid

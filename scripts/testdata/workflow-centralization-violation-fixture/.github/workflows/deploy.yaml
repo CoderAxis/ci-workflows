@@ -9,4 +9,4 @@ on:
 
 jobs:
   deploy:
-    uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yaml@main
+    uses: coderaxis/ci-workflows/.github/workflows/deploy-reusable.yaml@main

@@ -93,7 +93,7 @@ jobs:
       # reaches nothing else. Short-lived (~1h) and already masked in logs.
       - name: Mint a read token for the shared frontend sources
         id: core_token
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: ${{ inputs.core_owner }}

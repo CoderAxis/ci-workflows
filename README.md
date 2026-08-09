@@ -6,7 +6,7 @@ platform CI/CD.
 Reference an action by its subfolder and a major-version tag:
 
 ```yaml
-- uses: coderaxis/github-actions/module-auth@v1
+- uses: coderaxis/ci-workflows/module-auth@v1
  with:
  app-id: ${{ secrets.CODERAXIS_APP_ID }}
  private-key: ${{ secrets.CODERAXIS_APP_PRIVATE_KEY }}
@@ -50,7 +50,7 @@ permissions:
  id-token: write
 jobs:
  deploy:
- uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yaml@v1
+ uses: coderaxis/ci-workflows/.github/workflows/deploy-reusable.yaml@v1
  with:
  service_name: auth-service
  secrets: inherit
@@ -107,7 +107,7 @@ permissions:
  contents: read
 jobs:
  seed-contract:
- uses: coderaxis/github-actions/.github/workflows/seed-contract-check.yaml@v1
+ uses: coderaxis/ci-workflows/.github/workflows/seed-contract-check.yaml@v1
 ```
 
 Every `*-core-postgres` repo carries a thin schema-compatibility caller (the only
@@ -124,7 +124,7 @@ permissions:
  contents: read
 jobs:
  schema-compatibility:
- uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yaml@v1
+ uses: coderaxis/ci-workflows/.github/workflows/schema-compatibility.yaml@v1
  with:
  table: auth_service_outbox # the repo's outbox table; omit to skip outbox conformance
  secrets: inherit # REQUIRED: inherits the module-read App creds for private go deps
@@ -150,7 +150,7 @@ permissions:
  contents: read
 jobs:
  event-handling-compliance:
- uses: coderaxis/github-actions/.github/workflows/event-handling-compliance.yaml@v1
+ uses: coderaxis/ci-workflows/.github/workflows/event-handling-compliance.yaml@v1
  with:
  role: P # P | H | DK | Hybrid | E | Bridge
  # allowed_topics: "inboxxhq.chat.messages" # required for DK/Hybrid only
@@ -172,7 +172,7 @@ permissions:
  contents: read
 jobs:
  dockerfile-standard:
- uses: coderaxis/github-actions/.github/workflows/dockerfile-standard.yaml@v1
+ uses: coderaxis/ci-workflows/.github/workflows/dockerfile-standard.yaml@v1
  with:
  capabilities: "http-api,db-owner,seed" # from dockerfile-capability-matrix.yaml
  # fail_on: minor # default is major; tighten once a repo's
@@ -262,7 +262,7 @@ Consumers can assert the behavioral contract via the workflow outputs:
 ```yaml
 jobs:
  deploy:
- uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yaml@v1
+ uses: coderaxis/ci-workflows/.github/workflows/deploy-reusable.yaml@v1
  with: { service_name: auth-service }
  secrets: inherit
  verify:
@@ -368,7 +368,7 @@ permissions:
  contents: read
 jobs:
  docs-governance:
- uses: coderaxis/github-actions/.github/workflows/docs-governance.yaml@v1
+ uses: coderaxis/ci-workflows/.github/workflows/docs-governance.yaml@v1
  with:
  docs_root: . # a docs-in-monorepo repo passes its subdir, e.g. docs/core-docs
  # fail_on: major # default; tighten to `minor` once a repo is clean
@@ -560,7 +560,7 @@ _Generated from `controls/workflow-centralization.yaml` by `scripts/check-workfl
 
 | Control | Policy | Severity | Scope | Owner | Status |
 | ------- | ------ | -------- | ----- | ----- | ------ |
-| WFC-0001 | A consumer repository MUST NOT contain a workflow whose filename matches a workflow that coderaxis/github-actions publishes as reusable (`on.workflow_call`) unless that workflow is a caller of it — that is, unless it contains `uses: coderaxis/github-actions/.github/workflows/<name>@<ref>`. | major | caller-workflow | platform-infrastructure | active |
+| WFC-0001 | A consumer repository MUST NOT contain a workflow whose filename matches a workflow that coderaxis/github-actions publishes as reusable (`on.workflow_call`) unless that workflow is a caller of it — that is, unless it contains `uses: coderaxis/ci-workflows/.github/workflows/<name>@<ref>`. | major | caller-workflow | platform-infrastructure | active |
 | WFC-0002 | A call to a coderaxis/github-actions reusable workflow MUST reference a major version tag (`@v1`, `@v2`, ...). It MUST NOT reference a branch (`@main`), an exact patch tag (`@v1.6.0`), or a commit SHA. | major | caller-workflow | platform-infrastructure | active |
 | WFC-0004 | A job whose `uses:` targets a reusable workflow MUST grant, at job level, every permission that the called workflow declares at its own workflow level, at or above the declared access (`write` satisfies `read`; `read` does not satisfy `write`). A job that declares no `permissions:` block inherits the calling workflow's, and that inherited set is what is checked. | critical | caller-workflow | platform-infrastructure | active |
 | WFC-0005 | A repository MUST NOT contain a workflow that performs a dependency bump, nor one that subscribes to a `repository_dispatch` event of the form `<module>-released`. Version propagation is performed by the central release, which resolves consumers from the platform artifact graph and opens the pull request directly. | major | caller-workflow | platform-infrastructure | active |

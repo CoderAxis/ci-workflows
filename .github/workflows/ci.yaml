@@ -105,7 +105,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: coderaxis/github-actions/.github/workflows/app-token-selftest.yaml@v1
+    uses: coderaxis/ci-workflows/.github/workflows/app-token-selftest.yaml@v1
 
   # ── delivery model (was delivery-model-guard.yaml) ──────────────────────────────────────────
   # Executable governance for the canonical reusable deploy workflow.
