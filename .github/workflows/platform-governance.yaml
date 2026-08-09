@@ -62,7 +62,7 @@ on:
           environments
           modules
       actions_ref:
-        description: "Ref of coderaxis/github-actions to assemble (defaults to the moving major tag)."
+        description: "Ref of coderaxis/ci-workflows to assemble (defaults to the moving major tag)."
         required: false
         type: string
         default: v1
@@ -104,7 +104,7 @@ jobs:
       - name: Check out github-actions (public)
         uses: actions/checkout@v4
         with:
-          repository: coderaxis/github-actions
+          repository: coderaxis/ci-workflows
           ref: ${{ inputs.actions_ref }}
           path: github-actions
 

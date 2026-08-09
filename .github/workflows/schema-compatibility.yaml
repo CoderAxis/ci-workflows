@@ -66,7 +66,7 @@ on:
         type: string
         default: go.mod
       actions_ref:
-        description: "Ref of coderaxis/github-actions providing the SSOT script (defaults to the moving major tag)."
+        description: "Ref of coderaxis/ci-workflows providing the SSOT script (defaults to the moving major tag)."
         required: false
         type: string
         default: v1
@@ -127,7 +127,7 @@ jobs:
       - name: Checkout central SSOT (schema-compat script)
         uses: actions/checkout@v4
         with:
-          repository: coderaxis/github-actions
+          repository: coderaxis/ci-workflows
           ref: ${{ inputs.actions_ref }}
           path: .coderaxis-ci
 

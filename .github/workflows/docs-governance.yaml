@@ -40,7 +40,7 @@ on:
         type: number
         default: 0
       actions_ref:
-        description: "Ref of coderaxis/github-actions providing the checker (defaults to the moving major tag)."
+        description: "Ref of coderaxis/ci-workflows providing the checker (defaults to the moving major tag)."
         required: false
         type: string
         default: v1
@@ -89,7 +89,7 @@ jobs:
       - name: Checkout central checker (SSOT)
         uses: actions/checkout@v4
         with:
-          repository: coderaxis/github-actions
+          repository: coderaxis/ci-workflows
           ref: ${{ inputs.actions_ref }}
           path: .docs-governance-tools
 
