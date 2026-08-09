@@ -79,8 +79,13 @@ jobs:
           # non-empty: a token minted for the wrong installation would still be a
           # plausible-looking string.
           slug=$(gh api /repos/coderaxis/auth-core --jq '.full_name')
-          [ "$slug" = "coderaxis/auth-core" ] || { echo "::error::unexpected repo: $slug"; exit 1; }
-          echo "read token works and resolves coderaxis/auth-core"
+          # Compared case-insensitively. GitHub answers with the owner's CANONICAL spelling, which
+          # is `CoderAxis`, while every reference across this fleet is written in lower case; a
+          # literal comparison therefore turned an owner rename into a failing self-check that had
+          # nothing to do with the credential. What this step exists to prove is which repository
+          # the token resolved, and that is unchanged by how the owner is capitalised.
+          [ "${slug,,}" = "coderaxis/auth-core" ] || { echo "::error::unexpected repo: $slug"; exit 1; }
+          echo "read token works and resolves ${slug}"
 
       - name: A read token must NOT be able to write
         env:
