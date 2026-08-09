@@ -384,7 +384,7 @@ jobs:
       - name: Check out the central checkers
         uses: actions/checkout@v4
         with:
-          repository: coderaxis/github-actions
+          repository: coderaxis/ci-workflows
           ref: v1
           path: .central
           sparse-checkout: scripts
@@ -840,7 +840,7 @@ jobs:
             else
               echo "::error file=${path}::${f} is not a permitted workflow lane."
               echo "A repository may hold ci.yaml and, if it publishes a version, release.yaml."
-              echo "Everything else runs as a job in coderaxis/github-actions service-ci.yaml, so a"
+              echo "Everything else runs as a job in coderaxis/ci-workflows service-ci.yaml, so a"
               echo "local lane is a second implementation that will drift from it. If this genuinely"
               echo "cannot be a central job, add it to the allowlist in service-ci.yaml with a reason."
             fi
@@ -989,7 +989,7 @@ jobs:
       - name: Check out the central checkers
         uses: actions/checkout@v4
         with:
-          repository: coderaxis/github-actions
+          repository: coderaxis/ci-workflows
           ref: v1
           path: .central
           sparse-checkout: scripts
@@ -1049,7 +1049,7 @@ jobs:
       - name: Check out the central checkers
         uses: actions/checkout@v4
         with:
-          repository: coderaxis/github-actions
+          repository: coderaxis/ci-workflows
           ref: v1
           path: .central
           sparse-checkout: scripts
@@ -1339,7 +1339,7 @@ jobs:
   # Three things were wrong with the per-repo form beyond the duplication:
   #   - every copy pinned `@main`, so the contract gate changed under all 38 services with no
   #     version bump. WFC-0002 did not catch it because it only checks refs into
-  #     coderaxis/github-actions, and this workflow was published by another org.
+  #     coderaxis/ci-workflows, and this workflow was published by another org.
   #   - every copy passed coderaxis-app-id, which the OIDC migration deleted.
   #   - service-name was hand-written in each file, so a rename silently pointed a service at
   #     another service's registry directory.
@@ -1400,7 +1400,7 @@ jobs:
       - name: Check out the classification guard (SSOT)
         uses: actions/checkout@v4
         with:
-          repository: coderaxis/github-actions
+          repository: coderaxis/ci-workflows
           ref: v1
           path: .classification-tools
 
@@ -1461,7 +1461,7 @@ jobs:
       - name: Check out the gateway baseline controls (SSOT)
         uses: actions/checkout@v4
         with:
-          repository: coderaxis/github-actions
+          repository: coderaxis/ci-workflows
           ref: v1
           path: .gateway-tools
 
@@ -1571,7 +1571,7 @@ jobs:
       - name: Check out the central generator guard (SSOT)
         uses: actions/checkout@v4
         with:
-          repository: coderaxis/github-actions
+          repository: coderaxis/ci-workflows
           ref: v1
           path: .central
 
