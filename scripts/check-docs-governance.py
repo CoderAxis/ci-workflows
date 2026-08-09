@@ -164,6 +164,82 @@ CODE_CITATION_RE = re.compile(
     r"`([A-Za-z0-9_./-]+\.(?:" + "|".join(CODE_EXTENSIONS) + r")(?::\d+)?)`"
 )
 
+# --- DOC-0025: normative logging rules appear only in their declared homes ------------------
+# The homes are not listed here. They are read from the log schema control file, so that the
+# schema and the check that protects it cannot disagree about which document owns the rule.
+LOG_SCHEMA_CONTROL_PATH = Path("github-actions/controls/log-schema.yaml")
+
+# A violation needs a subject AND an imperative, close together, with no citation in the block.
+# Every part of that is deliberately narrow, because the failure mode that matters for a
+# governance check is the false positive: one bad hit teaches every reader that this control
+# cries wolf, and a control nobody believes is worth less than no control. A missed restatement
+# costs one stale paragraph; a bogus one costs the control.
+#
+# Subjects come in two tiers. Tier A names something that can only be the service log. Tier B is
+# vocabulary this platform also uses elsewhere - `schema_version` is an outbox envelope field in
+# ADR-0069 and a log field here, `redact` is an event-gateway policy verb in ADR-0077 - so it
+# counts only in a sentence that is already talking about logging.
+LOG_SUBJECT_A_RE = re.compile(
+    r"""(?ix)
+    \b(?:
+        log \s (?:record|line|field|level|schema|output|format|entry|envelope)
+      | logging \s (?:client|library|call|contract|rule|configuration)
+      | (?:structured|json|access|application) \s log
+      | logrus | log/slog | slogclient | loggingclient
+      | jsonformatter | textformatter
+      | LOG_LEVEL | LOG_FORMAT
+    )\b
+    """
+)
+# Tier B is mechanism vocabulary, not subject-matter vocabulary. The distinction is load-bearing
+# and is the layering this control exists to preserve: the security and privacy standards own
+# *what* is PII and *where* it may not go - "PII must not appear in logs, Kafka payloads or
+# analytics streams" is their sentence, and it stays theirs. The log schema standard owns *how a
+# log record implements that*: which key is masked, which is dropped, what the masked form looks
+# like. So a sentence that reaches for a mechanism - redacted, masked, dropped-at-source - has
+# crossed into the schema standard's territory and must cite it. A sentence that merely names
+# logs as one sink among several has not.
+LOG_SUBJECT_B_RE = re.compile(
+    r"""(?ix)
+    \b(?:
+        schema_version | event_name
+      | redact(?:s|ed|ion|ing)? | mask(?:s|ed|ing)?
+      | stdout | stderr
+      | loki \s (?:label|index) | structured \s metadata
+      | timestamp \s format | rfc3339 | utc
+    )\b
+    """
+)
+LOG_CONTEXT_RE = re.compile(r"(?i)\blog(?:s|ged|ging|ger)?\b")
+LOG_IMPERATIVE_RE = re.compile(
+    r"""(?ix)
+    \b(?:
+        must(?:\s+not)? | shall(?:\s+not)? | never | may\s+not
+      | (?:is|are)\s+(?:required|prohibited|forbidden|mandatory)
+      | do\s+not | don't
+    )\b
+    """
+)
+# "Elevated access MUST be covered by an audit-log entry" is a rule about audit records, not
+# about how services log. The term is folded away before matching rather than excluded with a
+# lookbehind, so that `log entry` stays a single readable alternation above.
+AUDIT_LOG_RE = re.compile(r"(?i)\baudit[-\s]?log(s)?\b")
+# An imperative and a subject can share a sentence and still be two unrelated claims joined by a
+# comma - "the gauge is defined, registered and never written, and that hook only wrote a log
+# line" is a finding about metrics, not a logging rule. Requiring them inside one clause-sized
+# window is the cheapest approximation of "this sentence states a rule about logging" that does
+# not need a parser.
+LOG_CLAUSE_WINDOW = 140
+# Citing the owner is the whole point of the control, so a block that links or names the owning
+# document is never a violation, however imperative it reads. "Logs MUST follow ADR-0101" is the
+# behaviour this control is trying to produce, not the behaviour it is trying to stop.
+LOG_CITATION_RE = re.compile(
+    r"(?i)\b(?:ADR-0101|log-schema-standard(?:\.md)?|log-schema\.yaml)\b"
+)
+LIST_ITEM_RE = re.compile(r"^\s{0,3}(?:[-*+]\s|\d+[.)]\s)")
+FENCE_RE = re.compile(r"^\s{0,3}(?:```|~~~)")
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;])\s+")
+
 
 @dataclass
 class Finding:
@@ -343,10 +419,18 @@ class DocsRepo:
         self.missing_declared_roots = tuple(r for r in extra_roots if not (root / r).is_dir())
         self.doc_types = DEFAULT_DOC_TYPES | set(config.get("extra_doc_types") or ())
         self.governed: list[DocFile] = self._load_governed()
-        self.all_md: list[Path] = [p for p in sorted(root.rglob("*.md")) if ".git" not in p.parts]
+        # Dot-directories are tooling, not governed documentation. `.git` was already excluded;
+        # the general form matters because `docs/inboxxhq-platform-docs/.core-docs/` is a
+        # gitignored local mirror of the core docs, 675 files deep and as stale as whenever it
+        # was last synced. Scanning it made every content control report against a copy that CI
+        # never sees - a local failure that cannot be reproduced in CI, and a CI pass that
+        # cannot be reproduced locally.
+        self.all_md: list[Path] = [p for p in sorted(root.rglob("*.md"))
+                                   if not any(part.startswith(".") for part in p.parts)]
         self.owner_slugs, self.owner_errors = self._load_owner_registry()
         self.has_catalog = (root / "catalog").is_dir()
         self.client_scope_terms = self._load_client_scope_terms()
+        self.log_schema_homes = self._load_log_schema_homes()
         self.namespace = config.get("namespace")
         self.namespaces = self._load_namespace_registry()
         self.qualifier_aliases = self._build_qualifier_aliases()
@@ -535,6 +619,26 @@ class DocsRepo:
                             f"'{contact_key}'; omit it or set a non-empty value")
             slugs.add(slug.strip())
         return slugs, errors
+
+    def _load_log_schema_homes(self):
+        """Return the normative_homes declared by the log schema control, or None when the
+        control file is not in this checkout.
+
+        The docs repos are checked out standalone in some jobs and as a monorepo subtree in
+        others, so the control is looked for at the root and then upwards. Returning None
+        rather than [] keeps "I could not find the file" distinguishable from "the file
+        declares no homes"; the first is a skip, the second is a broken control.
+        """
+        for base in (self.root, *self.root.resolve().parents):
+            control = base / LOG_SCHEMA_CONTROL_PATH
+            if not control.exists():
+                control = base / LOG_SCHEMA_CONTROL_PATH.name
+                if base.name != "controls" or not control.exists():
+                    continue
+            data = yaml.safe_load(control.read_text(encoding="utf-8")) or {}
+            homes = data.get("normative_homes")
+            return [str(h).lstrip("./") for h in homes] if isinstance(homes, list) else []
+        return None
 
     def _load_client_scope_terms(self):
         policy = self.root / CLIENT_SCOPE_PATH
@@ -776,6 +880,131 @@ def client_scope_isolation(repo: DocsRepo) -> Finding:
         return Finding(False, f"{len(violations)} sibling-client reference(s) in {scanned} documents",
                        _capped(violations))
     return Finding(True, f"{scanned} documents scanned, 0 forbidden terms ({', '.join(terms)})")
+
+
+def _prose_blocks(text: str) -> list:
+    """Split Markdown into the units a rule can be stated in: paragraphs, list items, headings
+    and table rows. Returns [(line_number, text)].
+
+    Blocks, not lines, because these documents wrap prose - a rule split across two lines would
+    be invisible to a line-at-a-time scan. Blocks, not whole documents, because a bullet list
+    that names a field in one item and says "must" in the next is two statements, and joining
+    them would invent a rule neither item makes. Fenced code and frontmatter are skipped: a
+    `must` inside a YAML example is a value, not a claim about how services log.
+    """
+    lines = text.splitlines()
+    start = 0
+    if lines and lines[0].strip() == "---":
+        for index in range(1, len(lines)):
+            if lines[index].strip() == "---":
+                start = index + 1
+                break
+    blocks: list = []
+    buf: list = []
+    buf_line = 0
+    in_fence = False
+    for offset in range(start, len(lines)):
+        raw = lines[offset]
+        lineno = offset + 1
+        if FENCE_RE.match(raw):
+            if buf:
+                blocks.append((buf_line, " ".join(buf)))
+                buf = []
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        stripped = raw.strip()
+        breaks_block = (not stripped or stripped.startswith(("#", "|", ">"))
+                        or LIST_ITEM_RE.match(raw) is not None)
+        if breaks_block and buf:
+            blocks.append((buf_line, " ".join(buf)))
+            buf = []
+        if not stripped:
+            continue
+        if stripped.startswith(("#", "|")):
+            blocks.append((lineno, stripped))
+            continue
+        if not buf:
+            buf_line = lineno
+        buf.append(stripped)
+    if buf:
+        blocks.append((buf_line, " ".join(buf)))
+    return blocks
+
+
+# Clause boundaries that a subject and its imperative may not be on opposite sides of. Proximity
+# alone is not enough, because "never" is as common in description as in prescription: in
+#
+#   a log line exists for every attempt - useful for reconstructing what happened, including
+#   for attempts that never reach a handler-visible error
+#
+# "never" governs "reach", is 90 characters from "log line", and says nothing about logging. Every
+# character between them is on the far side of a dash and a subordinating "including". Splitting
+# first turns that from a near miss into a non-match, and costs nothing real: a rule and the thing
+# it governs are not normally separated by a full stop or a parenthesis.
+LOG_CLAUSE_SPLIT_RE = re.compile(r"(?:[.;:!?]\s|\s[-\u2013\u2014]\s|[()\[\]]|,\s+(?:including|such\s+as|e\.g\.|i\.e\.|which|useful)\b)")
+
+
+def _logging_rule_in(sentence: str):
+    """Return the matched logging subject when the sentence states a rule about it, else None."""
+    text = AUDIT_LOG_RE.sub("auditrecord", sentence)
+    if not LOG_IMPERATIVE_RE.search(text):
+        return None
+    has_context = bool(LOG_CONTEXT_RE.search(text))
+
+    # Walk clauses rather than the whole block, so an imperative can only bind to a subject it
+    # shares one with. The window still applies inside a clause; this only stops it reaching
+    # across a boundary.
+    for clause in LOG_CLAUSE_SPLIT_RE.split(text):
+        if not clause:
+            continue
+        imperatives = [m.start() for m in LOG_IMPERATIVE_RE.finditer(clause)]
+        if not imperatives:
+            continue
+        subjects = list(LOG_SUBJECT_A_RE.finditer(clause))
+        if has_context:
+            subjects += list(LOG_SUBJECT_B_RE.finditer(clause))
+        for subject in subjects:
+            if any(abs(pos - subject.start()) <= LOG_CLAUSE_WINDOW for pos in imperatives):
+                return subject.group(0)
+    return None
+
+
+def logging_rule_restatement(repo: DocsRepo) -> Finding:
+    homes = repo.log_schema_homes
+    if homes is None:
+        return Finding(True, f"{LOG_SCHEMA_CONTROL_PATH} is not present in this checkout; "
+                             f"the normative homes it declares cannot be resolved, so no "
+                             f"document is claimed to be outside them")
+    if not homes:
+        return Finding(False, f"{LOG_SCHEMA_CONTROL_PATH} declares no normative_homes",
+                       ["log-schema.yaml: normative_homes is empty or missing - with no declared "
+                        "home, every document is outside it and the control cannot be evaluated"])
+    violations: list[str] = []
+    scanned = 0
+    for path in repo.all_md:
+        rel = path.relative_to(repo.root)
+        posix = path.resolve().as_posix()
+        if any(posix.endswith(home) for home in homes) or is_template_doc(rel):
+            continue
+        scanned += 1
+        for lineno, block in _prose_blocks(path.read_text(encoding="utf-8", errors="ignore")):
+            if LOG_CITATION_RE.search(block):
+                continue
+            for sentence in SENTENCE_SPLIT_RE.split(block):
+                hit = _logging_rule_in(sentence)
+                if hit is None:
+                    continue
+                violations.append(
+                    f"{rel}:{lineno}: normative statement about '{hit}' outside its declared "
+                    f"home and without a citation: {sentence.strip()[:160]}")
+    if violations:
+        return Finding(False, f"{len(violations)} restated logging rule(s) across {scanned} "
+                              f"documents outside {len(homes)} declared home(s)",
+                       _capped(violations))
+    return Finding(True, f"{scanned} documents outside the {len(homes)} declared home(s) cite the "
+                         f"logging rules rather than restating them")
 
 
 def owner_registry_usage(repo: DocsRepo) -> Finding:
@@ -1441,6 +1670,7 @@ DETECTORS = {
     "supersession_integrity": supersession_integrity,
     "freshness_sla": freshness_sla,
     "client_scope_isolation": client_scope_isolation,
+    "logging_rule_restatement": logging_rule_restatement,
     "owner_registry_usage": owner_registry_usage,
 }
 # Domain-specific catalog schema+drift is delegated to the repo's own scripts/build_catalog.py
