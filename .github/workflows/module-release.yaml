@@ -700,8 +700,20 @@ jobs:
 
       # GitHub Attestations API availability is a platform constraint, not an auth one. The App
       # mints valid tokens and attestations: write is granted, but GitHub still rejects persistence
-      # for user-owned private repositories. Authentication stays on the App; attestation posture
-      # is tiered by repo owner type. Deployable images continue to get cosign/SLSA in CodeBuild.
+      # for a private repository unless the owner's plan includes the feature. Authentication stays
+      # on the App. Deployable images continue to get cosign/SLSA in CodeBuild, so what is at stake
+      # here is the supplementary attestation on the module's SBOMs, not image provenance.
+      #
+      # The test used to be "user-owned AND private", which was true of the personal account these
+      # repositories used to live under and stopped being true when they moved into an organisation
+      # on a Team plan. The probe kept answering "available" while the API answered "Feature not
+      # available for the CoderAxis organization", and because this step runs AFTER the tag is
+      # pushed, every release ended tagged but with no GitHub Release and no consumers bumped -
+      # the half-finished state that needs a human. Privateness is the condition that actually
+      # tracks the refusal in both cases, so that is what is tested.
+      #
+      # Revisit on a plan change: going Enterprise, or making a repository public, enables the API
+      # and this probe will still be suppressing it.
       - name: Detect GitHub Attestations availability
         id: attest
         if: steps.ver.outputs.releasable == 'true'
@@ -709,11 +721,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          owner_type="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.owner.type')"
           is_private="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.private')"
-          if [[ "${owner_type}" == "User" && "${is_private}" == "true" ]]; then
+          if [[ "${is_private}" == "true" ]]; then
             echo "available=false" >> "${GITHUB_OUTPUT}"
-            echo "::notice::GitHub Attestations API is unavailable for user-owned private repos."
+            echo "::notice::GitHub Attestations API is unavailable for private repos on this plan."
             echo "SBOMs attach to this release; image provenance uses CodeBuild cosign/SLSA."
           else
             echo "available=true" >> "${GITHUB_OUTPUT}"
