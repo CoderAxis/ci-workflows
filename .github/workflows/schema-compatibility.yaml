@@ -7,7 +7,7 @@ name: Reusable Schema Compatibility
 #
 #   jobs:
 #     ci:
-#       uses: coderaxis/github-actions/.github/workflows/service-ci.yaml@v1
+#       uses: coderaxis/ci-workflows/.github/workflows/service-ci.yaml@v1
 #
 # The header here used to document a thin per-repo caller passing `table:` and
 # `secrets: inherit`. No such caller existed in any of the 27 core-postgres
@@ -166,7 +166,7 @@ jobs:
       - name: Mint module-read token (GitHub App)
         if: hashFiles(inputs.go_version_file) != ''
         id: modauth
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           configure-git: "true"

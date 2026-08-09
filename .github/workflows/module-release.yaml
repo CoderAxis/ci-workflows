@@ -7,7 +7,7 @@ name: Module release
 #
 #   jobs:
 #     release:
-#       uses: coderaxis/github-actions/.github/workflows/module-release.yaml@v1
+#       uses: coderaxis/ci-workflows/.github/workflows/module-release.yaml@v1
 #       secrets: inherit
 #
 # WHAT REPLACED WHAT. Each core repo carried three local workflows: release.yaml (version,
@@ -128,7 +128,7 @@ jobs:
     steps:
       - name: Derive identity from the immutable repository id
         id: id
-        uses: coderaxis/github-actions/resolve-service-identity@v1
+        uses: coderaxis/ci-workflows/resolve-service-identity@v1
         with:
           catalog-owner: ${{ inputs.catalog_owner }}
           catalog-repo: ${{ inputs.catalog_repo }}
@@ -555,7 +555,7 @@ jobs:
       - name: Mint module-read token
         id: modauth
         if: steps.ver.outputs.releasable == 'true'
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           configure-git: "true"
@@ -728,7 +728,7 @@ jobs:
             --arg version "${VERSION}" \
             --arg commit "${GITHUB_SHA}" \
             --arg repo "${GITHUB_REPOSITORY}" \
-            --arg builder "coderaxis/github-actions/.github/workflows/module-release.yaml@v1" \
+            --arg builder "coderaxis/ci-workflows/.github/workflows/module-release.yaml@v1" \
             --arg run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --arg api "${ATTEST}" \
             --arg note "${note}" \
@@ -802,7 +802,7 @@ jobs:
       # it is bumping and not on the fleet.
       - name: Mint release-bot token for this target
         id: bottoken
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: publish
           owner: ${{ steps.t.outputs.owner }}
@@ -823,7 +823,7 @@ jobs:
       # a write token for the target are all already resolved in this job, so the round trip
       # bought nothing and cost 138 files across the fleet.
       - name: Bump the pin and open the PR
-        uses: coderaxis/github-actions/bump-module-pin@v1
+        uses: coderaxis/ci-workflows/bump-module-pin@v1
         with:
           target-repository: ${{ matrix.repository }}
           target-path: consumer

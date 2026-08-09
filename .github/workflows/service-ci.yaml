@@ -6,7 +6,7 @@ name: Service CI
 #
 #   jobs:
 #     ci:
-#       uses: coderaxis/github-actions/.github/workflows/service-ci.yaml@v1
+#       uses: coderaxis/ci-workflows/.github/workflows/service-ci.yaml@v1
 #       secrets: inherit
 #
 # WHY THE CALLER PASSES NOTHING. Anything a repo states about itself is a claim the platform
@@ -126,7 +126,7 @@ jobs:
       # security-critical resolution logic is the drift this whole change exists to remove.
       - name: Derive identity from the immutable repository id
         id: id
-        uses: coderaxis/github-actions/resolve-service-identity@v1
+        uses: coderaxis/ci-workflows/resolve-service-identity@v1
         with:
           catalog-owner: ${{ inputs.catalog_owner }}
           catalog-repo: ${{ inputs.catalog_repo }}
@@ -265,7 +265,7 @@ jobs:
 
       - name: Mint module-read token
         id: modauth
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           configure-git: "true"
@@ -452,7 +452,7 @@ jobs:
       # so this must fail loudly rather than degrade to scanning a subset.
       - name: Mint module-read token
         id: modauth
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           configure-git: "true"
@@ -548,7 +548,7 @@ jobs:
   events:
     name: Event handling compliance
     needs: resolve
-    uses: coderaxis/github-actions/.github/workflows/event-handling-compliance.yaml@v1
+    uses: coderaxis/ci-workflows/.github/workflows/event-handling-compliance.yaml@v1
     with:
       role: ${{ needs.resolve.outputs.role }}
       # Required whenever the role sanctions a direct producer, and passing it is what makes
@@ -562,7 +562,7 @@ jobs:
   seeding:
     name: Seeding contract
     needs: resolve
-    uses: coderaxis/github-actions/.github/workflows/seed-contract-check.yaml@v1
+    uses: coderaxis/ci-workflows/.github/workflows/seed-contract-check.yaml@v1
 
   schema:
     name: Schema compatibility
@@ -573,7 +573,7 @@ jobs:
       # job is capped by what the caller grants. Enforced by WFC-0004, which caught the omission
       # here as a startup_failure with no logs.
       id-token: write
-    uses: coderaxis/github-actions/.github/workflows/schema-compatibility.yaml@v1
+    uses: coderaxis/ci-workflows/.github/workflows/schema-compatibility.yaml@v1
     # No secrets and no inputs, both deliberate. The called workflow mints its own module-read
     # token from its OIDC identity through ci-app-token, and it discovers the outbox tables to
     # verify from the migrated schema. It used to take a `table` input naming the one table to
@@ -584,7 +584,7 @@ jobs:
     name: Dockerfile standard
     needs: resolve
     if: needs.resolve.outputs.deployable == 'true'
-    uses: coderaxis/github-actions/.github/workflows/dockerfile-standard.yaml@v1
+    uses: coderaxis/ci-workflows/.github/workflows/dockerfile-standard.yaml@v1
     with:
       capabilities: ${{ needs.resolve.outputs.capabilities }}
 
@@ -702,7 +702,7 @@ jobs:
       # change the gate under every service with nothing to review.
       - name: Mint checker-read token
         id: archauth
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
 
@@ -906,7 +906,7 @@ jobs:
 
       - name: Mint module-read token
         id: modauth
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           configure-git: "true"
@@ -979,7 +979,7 @@ jobs:
 
       - name: Mint module-read token
         id: modauth
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           configure-git: "true"
@@ -1271,7 +1271,7 @@ jobs:
       - name: Mint module-read token
         if: steps.selection.outputs.run == 'true'
         id: modauth
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           configure-git: "true"
@@ -1505,7 +1505,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: coderaxis/github-actions/.github/workflows/openapi-contract.yaml@v1
+    uses: coderaxis/ci-workflows/.github/workflows/openapi-contract.yaml@v1
     with:
       spec-file: docs/openapi.json
       contract-test-command: GOWORK=off go test ./tests/contracts/... -count=1 -v
@@ -1598,7 +1598,7 @@ jobs:
 
       - name: Mint module-read token
         id: modauth
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           configure-git: "true"
@@ -1990,7 +1990,7 @@ jobs:
       - name: Mint module-read token
         id: e2eauth
         if: steps.selection.outputs.present == 'true'
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           extra-owners: ${{ github.repository_owner }}
@@ -2042,7 +2042,7 @@ jobs:
 
       - name: Mint a catalog-read token
         id: catalog_token
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: ${{ inputs.catalog_owner }}
@@ -2091,7 +2091,7 @@ jobs:
 
       - name: Mint a catalog-read token
         id: catalog_token
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: ${{ inputs.catalog_owner }}
@@ -2236,7 +2236,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: coderaxis/github-actions/.github/workflows/deploy-reusable.yaml@v1
+    uses: coderaxis/ci-workflows/.github/workflows/deploy-reusable.yaml@v1
     with:
       # Resolved from the immutable repository id, never from anything the service repo says.
       # Previously each repo passed this literal in its own deploy.yaml, so a one-line edit to
@@ -2295,7 +2295,7 @@ jobs:
           failed="$(python3 -c 'import json,os; n=json.loads(os.environ["NEEDS"]); print(", ".join(k for k,v in n.items() if v.get("result") == "failure") or "unknown")')"
           echo "failed=${failed}" >> "${GITHUB_OUTPUT}"
 
-      - uses: coderaxis/github-actions/ci-slack-notify@v1
+      - uses: coderaxis/ci-workflows/ci-slack-notify@v1
         with:
           status: failure
           # See the note at the deploy-reusable call site: the action cannot read `vars`, and

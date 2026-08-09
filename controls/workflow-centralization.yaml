@@ -97,7 +97,7 @@ controls:
       A consumer repository MUST NOT contain a workflow whose filename matches a workflow that
       coderaxis/github-actions publishes as reusable (`on.workflow_call`) unless that workflow is a
       caller of it — that is, unless it contains
-      `uses: coderaxis/github-actions/.github/workflows/<name>@<ref>`.
+      `uses: coderaxis/ci-workflows/.github/workflows/<name>@<ref>`.
     rationale: >-
       A local copy is a fork with none of a fork's visibility. It keeps passing while the central
       version gains a check, a fix, or a security control, so the repo silently runs an older policy
@@ -106,7 +106,7 @@ controls:
       was centralised at all.
     remediation: >-
       Replace the local steps with a thin caller — `uses:
-      coderaxis/github-actions/.github/workflows/<name>@v1` plus the inputs it declares — and delete
+      coderaxis/ci-workflows/.github/workflows/<name>@v1` plus the inputs it declares — and delete
       the duplicated logic. If the repo genuinely needs behaviour the central workflow does not
       offer, add it centrally as an input so every consumer benefits, rather than forking. If the
       workflow is unrelated to the central one and merely shares its name, rename the local file.

@@ -201,7 +201,7 @@ jobs:
       - name: Mint module-read token
         id: modauth
         if: inputs['pre-test-command'] != '' || inputs['contract-test-command'] != ''
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           configure-git: "true"
@@ -247,7 +247,7 @@ jobs:
 
       - name: Mint a token that may read the registry
         id: regread
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: read
           owner: InboxxHQ-CoderAxis
@@ -305,7 +305,7 @@ jobs:
           inputs['publish-contract'] &&
           github.event_name == 'push' &&
           github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        uses: coderaxis/github-actions/ci-app-token@v1
+        uses: coderaxis/ci-workflows/ci-app-token@v1
         with:
           scope: contracts
           owner: InboxxHQ-CoderAxis
