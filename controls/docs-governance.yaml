@@ -656,3 +656,46 @@ controls:
       belongs in the platform namespace, where every other namespace could inherit it.
     detector: platform_concern_core_authority
     refs: [ADR-0084]
+
+  - id: DOC-0025
+    title: Normative logging rules appear only in their declared homes
+    owner: platform-sre
+    status: active
+    scope: document
+    severity: major
+    applies_when: always
+    policy: >-
+      A Markdown document outside the `normative_homes` list in `controls/log-schema.yaml` MUST NOT
+      state a normative rule about log records. It cites the owning document instead. A statement is
+      normative when it prescribes a field name, a field type, a timestamp format or timezone, a
+      formatter, an output stream, a log level policy, a PII or redaction rule, or a Loki label or
+      structured-metadata assignment - typically detectable by an imperative (`must`, `MUST`,
+      `required`, `never`) within a sentence naming one of those subjects. Per-service
+      `docs/operations/LOGGING_REFERENCE.md` files are in scope and are permitted to record only
+      that service's configured values and its declared deviations.
+    rationale: >-
+      The rule this control protects was, at the time it was written, stated in six places: the
+      observability standard, the ARCH-0025 lint doc comment, the service layout standard, the
+      `piiFieldMaskers` doc comment, ten `foundation.go` files, and 95 per-service
+      `LOGGING_REFERENCE.md` files. Two had already drifted into being false. The observability
+      standard claimed the timestamp rule was "already enforced by `configureLogging` in
+      `internal/bootstrap/run.go`" - a function that exists in two repositories, in neither case in
+      `run.go`, whose two copies disagree about what they return. ARCH-0025's comment named eight
+      services whose `run.go` constructed a logger when only two still imported one at all.
+
+      Neither restatement was wrong when written. That is the point: a copy has an independent
+      expiry date, and nothing about a copy announces that it has expired. A reader who finds the
+      stale copy first has no signal that a fresher one exists, and both look authoritative. The
+      duplication is therefore prevented mechanically rather than by review discipline, because
+      review discipline is what produced the six copies. ADR-0101 D9 is the decision; this is its
+      check.
+    remediation: >-
+      Delete the restated rule and replace it with a link to
+      `standards/observability/log-schema-standard.md` (for the record contract) or
+      `adrs/ADR-0101-canonical-service-logger.md` (for how the logger is built and wired). If the
+      statement is genuinely local - this service runs at `LOG_LEVEL=warn`, this gateway emits an
+      extra field - keep it and say so explicitly as a value or a declared deviation, not as a rule.
+      If the rule is right and its home is wrong, change the home: amend the owning document in the
+      same pull request rather than leaving two versions.
+    detector: logging_rule_restatement
+    refs: [ADR-0101]

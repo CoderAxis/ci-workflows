@@ -1,0 +1,634 @@
+# Log record schema - the machine-readable form of the log record contract.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# The platform previously stated its log schema only as a Markdown table, and that table had
+# never matched a single emitted log line. It required `timestamp` and `message`; every service
+# emitted `time` and `msg`, because that is what logrus.JSONFormatter writes by default. The
+# shared conformance test asserted `line["msg"]`, so the test encoded the violation and passed.
+# `org_id` was required by the same table, carried by reqcontext.Scope, and never stamped.
+#
+# None of that was a discipline failure. Prose cannot be diffed against an emitted line. This
+# file is the diffable form: one registry, three consumers.
+#
+#   1. platform-shared-go/logging - mirrors this registry in schema.go; conformance_test.go
+#      asserts EMITTED LINES against it, and check-log-schema.py asserts the mirror is faithful.
+#   2. Grafana Alloy - derives its structured-metadata promotion allowlist from `loki: meta`.
+#   3. docs governance (DOC-0025) - the allowlist of files permitted to state a logging rule.
+#
+# A field's PII class and Loki tier are properties OF THE FIELD, declared once here, rather
+# than properties of whichever code path happens to emit it. That is the whole reason a
+# registry beats a convention: a second emitter of `http_target` inherits `pii: mask` without
+# anyone remembering to apply it.
+#
+# HUMAN SSOT
+# ----------
+# docs/core-docs/standards/observability/log-schema-standard.md is the normative document; this
+# file is its machine-readable twin and MUST change in the same pull request. `version` below
+# is the on-the-wire `schema_version` and MUST equal that document's `log_schema_version`
+# frontmatter key. check-log-schema.py fails the build when they diverge.
+#
+# CHANGING THIS FILE
+# ------------------
+# Adding an optional field or an event_name value is additive and does not bump `version`.
+# Renaming a field, removing one, narrowing a type, or moving a field between Loki tiers DOES
+# bump it, and commits both shapes to being simultaneously ingestable for one full retention
+# period - records already in Loki cannot be rewritten. See the standard, section 8.
+
+version: 1
+domain: observability
+policy_ssot:
+  - standards/observability/log-schema-standard.md
+  - ADR-0101
+
+# ---------------------------------------------------------------------------------------------
+# Transport - properties of the byte stream, not of any one field.
+# ---------------------------------------------------------------------------------------------
+transport:
+  encoding: json
+  framing: single-line
+  stream: stdout
+  timestamp_format: RFC3339Nano
+  timezone: UTC # emitted value MUST end in "Z"; asserted under a non-UTC TZ
+  # text is interactive local use only. Deployment manifests MUST NOT set LOG_FORMAT=text.
+  permitted_formats: [json, text]
+  default_format: json
+  default_level: info
+
+# ---------------------------------------------------------------------------------------------
+# Field registry.
+#
+#   presence: always | scoped | record | optional
+#     always  - on every record without exception
+#     scoped  - whenever the value is in scope; omitted otherwise
+#     record  - only on records of a particular kind (see `records` below)
+#     optional- emitter's choice
+#
+#   pii: none | mask | drop
+#     none - emitted verbatim
+#     mask - partially revealed (j***@acme.com, ***1234)
+#     drop - key AND value removed from the record entirely
+#
+#   loki: label | meta | body
+#     label - Loki index label; bounded, long-lived, set by the collector. Adding one is a
+#             permanent change to storage shape and requires platform-sre review.
+#     meta  - Loki structured metadata; filterable without a parser, bloom-accelerated,
+#             outside the stream index. The home for high-cardinality join keys.
+#     body  - present in the JSON line only.
+#
+#   owner: application | collector
+#     A field has exactly one writer. Two writers means a conflict with no resolution rule.
+# ---------------------------------------------------------------------------------------------
+fields:
+  # --- core envelope ---------------------------------------------------------------------
+  - name: timestamp
+    type: string
+    presence: always
+    pii: none
+    loki: body
+    owner: application
+    notes: RFC 3339 nanosecond precision, UTC, always ends in Z.
+
+  - name: level
+    type: string
+    presence: always
+    pii: none
+    loki: meta
+    owner: application
+    enum: [debug, info, warn, error]
+    notes: >-
+      Structured metadata rather than an index label: a label would split every service into
+      four streams, quadrupling chunk count so that a query about all levels loads four times
+      the chunks. Promoting the explicit value also makes Loki's detected_level exact rather
+      than heuristic.
+
+  - name: message
+    type: string
+    presence: always
+    pii: none
+    loki: body
+    owner: application
+    notes: >-
+      Constant per call site. An interpolated message defeats line filters, defeats
+      sum by (message), and is the commonest way an id reaches an undeclared field.
+
+  - name: service
+    type: string
+    presence: always
+    pii: none
+    loki: body
+    owner: application
+    notes: >-
+      MUST equal the service_name index label. One value in three places - SERVICE_NAME, the
+      Kubernetes app.kubernetes.io/name label, and the catalog service id. Collapses to
+      service.name on OTLP export.
+
+  - name: schema_version
+    type: integer
+    presence: always
+    pii: none
+    loki: meta
+    owner: application
+    notes: Equals `version` at the top of this file.
+
+  - name: event_name
+    type: string
+    presence: record
+    pii: none
+    loki: meta
+    owner: application
+    notes: >-
+      Names the kind of LOG RECORD, from the closed `records` vocabulary below. Distinct from
+      event_type, which names a domain event. A publish line carries both.
+
+  - name: logger
+    type: string
+    presence: optional
+    pii: none
+    loki: body
+    owner: application
+    notes: Emitting subsystem, e.g. outbox.relay.
+
+  # --- correlation -----------------------------------------------------------------------
+  - name: trace_id
+    type: string
+    presence: scoped
+    pii: none
+    loki: meta
+    owner: application
+    notes: 32 hex chars from the active OTel span. The Loki-to-Tempo join key.
+
+  - name: span_id
+    type: string
+    presence: scoped
+    pii: none
+    loki: meta
+    owner: application
+
+  - name: correlation_id
+    type: string
+    presence: scoped
+    pii: none
+    loki: meta
+    owner: application
+    notes: The business thread, stable across a whole workflow.
+
+  - name: request_id
+    type: string
+    presence: scoped
+    pii: none
+    loki: meta
+    owner: application
+    notes: Unique per inbound request hop.
+
+  - name: causation_id
+    type: string
+    presence: scoped
+    pii: none
+    loki: body
+    owner: application
+
+  # --- tenant and actor ------------------------------------------------------------------
+  - name: org_id
+    type: string
+    presence: scoped
+    pii: none
+    loki: meta
+    owner: application
+    notes: >-
+      Structured metadata, never a label - tenant count is unbounded over the life of the
+      platform, which is the same reason observability-standards forbids it as a metric label.
+
+  - name: actor_type
+    type: string
+    presence: scoped
+    pii: none
+    loki: body
+    owner: application
+    enum: [user, service, system, api_key]
+
+  - name: actor_id
+    type: string
+    presence: scoped
+    pii: none
+    loki: body
+    owner: application
+    notes: Opaque id. Never an email, phone, or display name.
+
+  - name: user_id
+    type: string
+    presence: scoped
+    pii: none
+    loki: body
+    owner: application
+
+  # --- error -----------------------------------------------------------------------------
+  - name: error
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    notes: The error message. Alert on error_code instead - a message is prose that gets reworded.
+
+  - name: error_code
+    type: string
+    presence: optional
+    pii: none
+    loki: meta
+    owner: application
+    notes: Stable machine code from common.v1.ErrorCode.
+
+  - name: error_kind
+    type: string
+    presence: optional
+    pii: none
+    loki: body
+    owner: application
+
+  - name: stack
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    notes: >-
+      Panic records only, and deliberately never promoted. Loki enforces per-line structured
+      metadata size limits and a stack trace is the one field large enough to breach them;
+      promoting it would cause ingest rejection of exactly the records an incident needs.
+
+  # --- http ------------------------------------------------------------------------------
+  - name: http_method
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+
+  - name: http_route
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    notes: >-
+      Templated route only (/orders/{id}); empty string when the router did not match. Safe to
+      aggregate on precisely because it can be empty rather than falling back to a raw path.
+
+  - name: http_target
+    type: string
+    presence: record
+    pii: mask
+    loki: body
+    owner: application
+    notes: >-
+      Concrete request path with the query string stripped. Split from http_route because one
+      field that held the template on a match and the raw path on a miss meant two things, and
+      put an unbounded PII-bearing value into the field dashboards group by - on 404s and
+      scanner traffic, where raw paths are most hostile.
+
+  - name: http_status_code
+    type: integer
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+
+  - name: http_duration_ms
+    type: float
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    notes: >-
+      Float. The prior integer truncation recorded every sub-millisecond request as 0, which is
+      most cache hits and every health probe.
+
+  - name: http_request_bytes
+    type: integer
+    presence: optional
+    pii: none
+    loki: body
+    owner: application
+
+  - name: http_response_bytes
+    type: integer
+    presence: optional
+    pii: none
+    loki: body
+    owner: application
+
+  - name: client_ip
+    type: string
+    presence: record
+    pii: mask
+    loki: body
+    owner: application
+
+  - name: user_agent
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+
+  # --- messaging -------------------------------------------------------------------------
+  - name: messaging_system
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    enum: [kafka, rabbitmq, outbox]
+
+  - name: messaging_destination
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+
+  - name: messaging_operation
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    enum: [publish, receive, process, dlq]
+
+  - name: event_type
+    type: string
+    presence: record
+    pii: none
+    loki: meta
+    owner: application
+    notes: >-
+      The DOMAIN event type (contact.created.v1). Promoted because "every log line touching this
+      event type across all services" is a routine question during an event-flow incident, and
+      parsing every line first is the slow path.
+
+  - name: event_id
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    notes: UUIDv7, fresh per physical event row (ADR-0071).
+
+  - name: idempotency_key
+    type: string
+    presence: optional
+    pii: none
+    loki: body
+    owner: application
+    notes: Deterministic UUIDv5 identifying the logical occurrence (ADR-0071).
+
+  - name: aggregate_type
+    type: string
+    presence: optional
+    pii: none
+    loki: body
+    owner: application
+
+  - name: aggregate_id
+    type: string
+    presence: optional
+    pii: none
+    loki: body
+    owner: application
+
+  - name: partition
+    type: integer
+    presence: optional
+    pii: none
+    loki: body
+    owner: application
+
+  - name: offset
+    type: integer
+    presence: optional
+    pii: none
+    loki: body
+    owner: application
+
+  - name: delivery_attempt
+    type: integer
+    presence: optional
+    pii: none
+    loki: body
+    owner: application
+    notes: 1-based. Greater than 1 is the shape of a stuck consumer.
+
+  # --- collector-owned -------------------------------------------------------------------
+  # A service MUST NOT emit any of these. The process does not reliably know them (the Downward
+  # API is per-manifest and silently absent when omitted), two writers means a conflict with no
+  # resolution rule, and Alloy reads them from the Kubernetes API for free.
+  - name: cluster
+    type: string
+    presence: always
+    pii: none
+    loki: label
+    owner: collector
+
+  - name: environment
+    type: string
+    presence: always
+    pii: none
+    loki: label
+    owner: collector
+    enum: [local, dev, staging, preprod, production]
+
+  - name: namespace
+    type: string
+    presence: always
+    pii: none
+    loki: label
+    owner: collector
+
+  - name: service_name
+    type: string
+    presence: always
+    pii: none
+    loki: label
+    owner: collector
+    notes: From the Kubernetes app.kubernetes.io/name label. MUST equal the body `service` field.
+
+  - name: container
+    type: string
+    presence: always
+    pii: none
+    loki: label
+    owner: collector
+
+  - name: pod
+    type: string
+    presence: always
+    pii: none
+    loki: meta
+    owner: collector
+    notes: >-
+      Deliberately NOT an index label even though Loki's defaults still include it. Pod names
+      change on every deploy, so a pod label multiplies stream count by the deploy rate and
+      fragments a service's history into thousands of short streams. Grafana's guidance for new
+      installations is to move k8s.pod.name out of index labels; this platform starts there.
+
+  - name: node
+    type: string
+    presence: always
+    pii: none
+    loki: meta
+    owner: collector
+
+  - name: stream
+    type: string
+    presence: always
+    pii: none
+    loki: meta
+    owner: collector
+    enum: [stdout, stderr]
+    notes: >-
+      The container runtime's stdout/stderr split, which the CRI stage recovers from the log
+      envelope. Two values, so it is bounded enough to be an index label and is deliberately not
+      one: it would double the stream count for a distinction no routine query makes, because
+      ADR-0101 puts every conforming record on stdout. Kept because that is exactly what makes it
+      worth searching - a line on stderr is something writing around the logger, usually a runtime
+      panic or the runtime itself, and `stream="stderr"` is the query that finds them.
+
+# ---------------------------------------------------------------------------------------------
+# Closed vocabulary for event_name. A closed set is what lets a dashboard enumerate record kinds
+# instead of discovering them. Adding a value is additive and does not bump `version`.
+# ---------------------------------------------------------------------------------------------
+records:
+  - name: http_request_completed
+    emitted_by: shared access-log middleware
+    requires: [http_method, http_route, http_target, http_status_code, http_duration_ms, client_ip, user_agent]
+  - name: http_request_panicked
+    emitted_by: shared recovery middleware
+    requires: [http_method, http_route, stack]
+  - name: grpc_call_completed
+    emitted_by: shared gRPC interceptor
+    requires: []
+  - name: event_published
+    emitted_by: outbox relay and producers
+    requires: [messaging_system, messaging_destination, messaging_operation, event_type, event_id]
+  - name: event_consumed
+    emitted_by: consumers
+    requires: [messaging_system, messaging_destination, messaging_operation, event_type, event_id]
+  - name: event_dropped
+    emitted_by: consumers, on DLQ routing
+    requires: [messaging_system, messaging_destination, event_type, error]
+  - name: job_started
+    emitted_by: scheduled and background jobs
+    requires: []
+  - name: job_completed
+    emitted_by: scheduled and background jobs
+    requires: []
+  - name: service_started
+    emitted_by: bootstrap
+    requires: []
+  - name: service_stopped
+    emitted_by: graceful shutdown
+    requires: []
+  - name: deprecated_endpoint
+    emitted_by: deprecation middleware (ADR-0037)
+    requires: [http_route]
+
+# ---------------------------------------------------------------------------------------------
+# Redaction. Matched case-insensitively against the field key, recursively to `max_depth`, on
+# every path into the logger including the shared middleware.
+#
+# `drop` is a distinct class from `mask` and it is new in schema v1. The standard has always
+# said "do not log JWT payloads, secrets, or credentials at any log level" and nothing enforced
+# it. Masking would not have been enough if it had: a masked token is still a credential
+# fragment in a store with a long retention, and still an audit finding.
+# ---------------------------------------------------------------------------------------------
+redaction:
+  max_depth: 4
+  non_string_placeholder: "[redacted]"
+
+  mask:
+    email: [email, user_email, admin_email, customer_email, recipient]
+    phone: [phone, phone_number, from_phone, to_phone, msisdn]
+    path: [http_target]
+    ip: [client_ip]
+
+  # `name` is deliberately absent. On this platform the overwhelming majority of name-suffixed
+  # keys are service_name, event_name, table_name, file_name; masking them would destroy non-PII
+  # data on every line to catch a rare case. Person names belong under actor_name, which the
+  # registry excludes outright - the correct handling of a display name is not to log it.
+  never_mask: [name, service_name, event_name, table_name, file_name, field_name, column_name]
+
+  drop:
+    - password
+    - passwd
+    - secret
+    - client_secret
+    - token
+    - access_token
+    - refresh_token
+    - id_token
+    - jwt
+    - api_key
+    - apikey
+    - authorization
+    - cookie
+    - set_cookie
+    - private_key
+    - session_id
+    - otp
+    - pin
+    - card_number
+    - cvv
+
+# ---------------------------------------------------------------------------------------------
+# Loki. Derived views of the `fields` registry above - never edited independently of it.
+# ---------------------------------------------------------------------------------------------
+loki:
+  # Every distinct label-value combination is a stream, and Loki's default ceiling is 15 index
+  # labels. Five bounded, long-lived labels that describe the ORIGIN of a record.
+  # Storage floor for the tiering below. Structured metadata lives in chunk format V4, which Loki
+  # uses only at schema v13 on the tsdb store. Below this floor the middle tier does not exist and
+  # every high-cardinality join key has to be either an index label or body text. Recorded here so
+  # a deployment that cannot meet it fails a check rather than silently getting a worse schema.
+  requires:
+    loki_version: ">=3.0.0"
+    schema: v13
+    store: tsdb
+    allow_structured_metadata: true
+
+  index_labels: [cluster, environment, namespace, service_name, container]
+
+  # Closed allowlist. Loki enforces per-line structured-metadata size and count limits, so
+  # promoting everything reintroduces at ingest exactly the cost the tiering exists to avoid.
+  structured_metadata:
+    from_log_line: [level, schema_version, event_name, event_type, trace_id, span_id, correlation_id, request_id, org_id, error_code]
+
+    # Collector-derived rather than read from the line. Each one arrives as a label by default --
+    # from Kubernetes discovery for pod/node, from the CRI envelope for stream -- and each is
+    # demoted here instead. `pod` is the reason this list exists: as a label it is one stream per
+    # pod, replaced on every rollout.
+    from_kubernetes: [pod, node, stream]
+
+  ingest:
+    # Reversal of the platform's earlier "do not parse JSON at ingest" position, safe only
+    # because the schema and ADR-0101 together eliminated non-JSON lines - including the
+    # startup-failure lines stdlib `log` used to write to stderr.
+    parse_json: true
+    # A malformed line during an incident is evidence. A pipeline that discards it to protect a
+    # schema has inverted its purpose.
+    drop_malformed: false
+    # Promotion is a copy, not a move: the record stays self-describing when exported or replayed.
+    keep_promoted_fields_in_body: true
+
+# ---------------------------------------------------------------------------------------------
+# DOC-0025 allowlist: the only files permitted to state a normative logging rule. Everything
+# else - service-layout-standard, ARCH rule doc comments, every foundation.go, every
+# docs/operations/LOGGING_REFERENCE.md - cites and does not restate.
+#
+# The failure this replaces was not a wrong rule. It was the same rule written in six places,
+# two of which had drifted into being false.
+# ---------------------------------------------------------------------------------------------
+normative_homes:
+  - docs/core-docs/standards/observability/log-schema-standard.md
+  - docs/core-docs/adrs/ADR-0101-canonical-service-logger.md
+  - github-actions/controls/log-schema.yaml
