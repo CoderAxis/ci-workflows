@@ -481,7 +481,7 @@ Two paired controls close it, because either alone is escapable:
 ```bash
 # in platform-shared-go, redirected into this repo
 go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components \
-  > ../github-actions/controls/common-v1-components.json
+  > ../ci-workflows/controls/common-v1-components.json
 ```
 
 The floor makes a service *depend on* a current contract module; API-0007 makes it actually *publish*

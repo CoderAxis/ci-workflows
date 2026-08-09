@@ -181,13 +181,15 @@ ihq_guard_frontend_topology() {
     *) return 0 ;;
   esac
 
-  # Prefer the copy inside this repo, which is the versioned one. The bare
-  # scripts/ path is the pre-2026-08-06 location: it sat in a plain directory
-  # that no repository tracked, so the only gate against shared-package drift
-  # existed on a single machine (G-38). It is still accepted, as a symlink there
-  # keeps older trees working.
+  # Prefer the copy inside this repo, which is the versioned one. The
+  # github-actions/ path is what this directory was called before the
+  # 2026-08-09 rename to ci-workflows, and the bare scripts/ path is the
+  # pre-2026-08-06 location: it sat in a plain directory that no repository
+  # tracked, so the only gate against shared-package drift existed on a single
+  # machine (G-38). Both are still accepted, so an older tree keeps working.
   local checker=""
   for candidate in \
+    "${tree}/ci-workflows/scripts/check-shared-package-topology.mjs" \
     "${tree}/github-actions/scripts/check-shared-package-topology.mjs" \
     "${tree}/scripts/check-shared-package-topology.mjs"; do
     [[ -f "${candidate}" ]] && { checker="${candidate}"; break; }
