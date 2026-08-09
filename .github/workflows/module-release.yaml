@@ -192,7 +192,34 @@ jobs:
     runs-on: ubuntu-latest
     # Generous, because it is waiting for the repository's full CI lane rather than doing work. The
     # timeout is a refusal, not a pass: running out of time fails the gate.
-    timeout-minutes: 45
+    #
+    # 45 minutes was below the median. Measured across the last 258 completed ci.yaml runs in the
+    # coderaxis-owned module repos, wall clock ran median 41m, p90 88m, p99 190m, worst 200m - and
+    # 51% of runs exceeded the 40 minutes the polling loop below actually allowed. Almost none of
+    # that is work: user-core run 31300469584 took 1h36m wall clock for roughly 13 minutes of job
+    # time, because its first job sat 51m42s in the GitHub-hosted runner queue before starting. So
+    # this gate was refusing releases on a coin flip, and it did: ten recorded refusals between
+    # 2026-08-04 and 2026-08-08, user-core four consecutively, product-core and chat-search-core
+    # three each, every one of them "still running when this gate timed out" on a commit whose CI
+    # then passed. No tag was cut, so consumers stayed pinned to pseudo-versions that CI cannot
+    # resolve, and that broke service pipelines downstream of them.
+    #
+    # A high ceiling is close to free, which is why this one is high rather than merely higher. The
+    # loop polls, so a fast CI exits in minutes and never reaches the ceiling, and a red CI is
+    # decided by the failure branch below rather than by waiting - raising this delays nothing that
+    # was previously prompt. The only runs billed the extra minutes are the ones that would
+    # otherwise have been refused, and those already cost these minutes, plus a discarded CI run
+    # and a manual re-release. Too low refuses a good release; too high spends idle runner minutes
+    # on the tail. Those are not comparable, so this is set to cover the whole observed
+    # distribution rather than most of it.
+    #
+    # It mitigates the queue and does not fix it. Queue depth is a property of the ACCOUNT: these
+    # module repos belong to the personal account `coderaxis`, whose concurrency is far tighter
+    # than the org `InboxxHQ-CoderAxis`, where runs start in about two seconds. The self-hosted ARC
+    # pool registers against that org, so it cannot serve these repos at all. Until they move, this
+    # gate can only outwait a queue it has no way to shorten - so treat a rise here as evidence the
+    # queue got worse, and expect this number to come back down if the repos ever move.
+    timeout-minutes: 250
     steps:
       - name: Require a successful ci.yaml run for the exact commit being released
         env:
@@ -211,7 +238,15 @@ jobs:
           set -euo pipefail
 
           api="repos/${GITHUB_REPOSITORY}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=${SHA}&per_page=100"
-          deadline=$(( SECONDS + 40 * 60 ))
+
+          # The REAL limit, and deliberately under the job's timeout-minutes so that this is the one
+          # that fires. Every recorded refusal stopped here at 40 minutes while the job cap of 45 sat
+          # unreached, so raising only timeout-minutes would have changed nothing. Losing the race to
+          # the job cap is worse than it looks: GitHub kills the step and the run carries no
+          # annotation, and a refusal that cannot say what it refused sends the next reader to the
+          # wrong problem. The margin only has to exceed one poll interval; it is minutes because
+          # there is no reason to make it tight.
+          deadline=$(( SECONDS + 240 * 60 ))
 
           while :; do
             # An API error and "no runs yet" must never collapse into the same answer. Both refuse
