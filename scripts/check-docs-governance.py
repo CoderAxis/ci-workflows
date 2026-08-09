@@ -85,7 +85,7 @@ DECISION_FOLDERS = ("adrs", "rfcs")
 
 # --- identifier vocabulary: one width, one shape, everywhere ------------------------------
 # Every identifier on this platform is 4-digit zero-padded: ADR-0001, RFC-0001, PRD-0001, and
-# the control ids in github-actions/controls/. Mixed widths are not cosmetic - `DOC-0001` and
+# the control ids in ci-workflows/controls/. Mixed widths are not cosmetic - `DOC-0001` and
 # `DOC-0001` are different strings, so a grep for one silently misses citations written as the
 # other, and any tool that sorts ids lexically interleaves the two families. 4 digits is also
 # the width at which zero-padded sort order matches numeric order for every id this platform
@@ -101,7 +101,7 @@ DOCUMENT_FILENAME_RE = re.compile(
 # Files that legitimately live in a numbered-document folder without being one: the generated
 # indexes, folder READMEs, and `_`-prefixed partials.
 NON_DOCUMENT_STEMS = re.compile(r"^(README|_.*|[A-Z]+_INDEX)$")
-# Control ids in github-actions/controls/*.yaml (DOC-0001, API-0001, DM-0001, DS-0001,
+# Control ids in ci-workflows/controls/*.yaml (DOC-0001, API-0001, DM-0001, DS-0001,
 # WFC-0001). Enforced here because until now `load_controls` only required `id` to be
 # non-empty, so `DOC-1`, `doc-0001` or a bare `1` would all have been accepted.
 CONTROL_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*-\d{4}$")
@@ -167,7 +167,7 @@ CODE_CITATION_RE = re.compile(
 # --- DOC-0025: normative logging rules appear only in their declared homes ------------------
 # The homes are not listed here. They are read from the log schema control file, so that the
 # schema and the check that protects it cannot disagree about which document owns the rule.
-LOG_SCHEMA_CONTROL_PATH = Path("github-actions/controls/log-schema.yaml")
+LOG_SCHEMA_CONTROL_PATH = Path("ci-workflows/controls/log-schema.yaml")
 
 # A violation needs a subject AND an imperative, close together, with no citation in the block.
 # Every part of that is deliberately narrow, because the failure mode that matters for a

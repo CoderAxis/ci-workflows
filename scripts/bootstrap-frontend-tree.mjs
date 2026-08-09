@@ -21,8 +21,8 @@
 // reported, and only replaced with --fix.
 //
 // Usage:
-//   node github-actions/scripts/bootstrap-frontend-tree.mjs          # report
-//   node github-actions/scripts/bootstrap-frontend-tree.mjs --fix    # create
+//   node ci-workflows/scripts/bootstrap-frontend-tree.mjs          # report
+//   node ci-workflows/scripts/bootstrap-frontend-tree.mjs --fix    # create
 
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url';
 const FIX = process.argv.includes('--fix');
 
 // The tree root is the directory holding the sibling clones. Found by walking up
-// from this script (github-actions/scripts/) rather than assumed, so the script
+// from this script (ci-workflows/scripts/) rather than assumed, so the script
 // works from any cwd and survives being run through the scripts/ symlink.
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MANIFEST = join(REPO_ROOT, 'frontend/frontend-core/shared-packages.manifest.json');
@@ -158,5 +158,5 @@ if (!FIX && created.length > 0) {
 console.log(
   `\nfrontend tree ready — ${links.length} declared link(s) in place.\n` +
     `Next: (cd ${join(REPO_ROOT, 'frontend')} && pnpm install), then\n` +
-    `      node ${join(REPO_ROOT, 'github-actions/scripts/check-shared-package-topology.mjs')}`,
+    `      node ${join(REPO_ROOT, 'ci-workflows/scripts/check-shared-package-topology.mjs')}`,
 );

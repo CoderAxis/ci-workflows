@@ -631,4 +631,4 @@ loki:
 normative_homes:
   - docs/core-docs/standards/observability/log-schema-standard.md
   - docs/core-docs/adrs/ADR-0101-canonical-service-logger.md
-  - github-actions/controls/log-schema.yaml
+  - ci-workflows/controls/log-schema.yaml

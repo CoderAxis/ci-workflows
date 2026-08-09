@@ -5,7 +5,7 @@ The contract exists in three places, and it has to:
 
   * ``docs/core-docs/standards/observability/log-schema-standard.md`` - the normative document.
     People read this one.
-  * ``github-actions/controls/log-schema.yaml`` - the machine-readable twin. Grafana Alloy derives
+  * ``ci-workflows/controls/log-schema.yaml`` - the machine-readable twin. Grafana Alloy derives
     its structured-metadata allowlist from it, the docs governance checker reads its
     ``normative_homes``, and the compliance evidence pack reads its PII classes.
   * ``shared/platform-shared-go/logging/schema.go`` - the registry the Go logger actually enforces
@@ -25,8 +25,8 @@ number on the wire and must be one number in the tree.
 
 Usage:
 
-    python3 github-actions/scripts/check-log-schema.py
-    python3 github-actions/scripts/check-log-schema.py --repo-root /path/to/monorepo
+    python3 ci-workflows/scripts/check-log-schema.py
+    python3 ci-workflows/scripts/check-log-schema.py --repo-root /path/to/monorepo
 
 The three paths can also be given individually, because in CI the three repositories are checked
 out side by side rather than in the monorepo layout:
@@ -51,7 +51,7 @@ try:
 except ImportError:  # pragma: no cover - CI installs it; local runs get a usable message
     sys.exit("::error::check-log-schema.py requires PyYAML (pip install pyyaml)")
 
-CONTROL_PATH = Path("github-actions/controls/log-schema.yaml")
+CONTROL_PATH = Path("ci-workflows/controls/log-schema.yaml")
 STANDARD_PATH = Path("docs/core-docs/standards/observability/log-schema-standard.md")
 GO_MODULE_PATH = Path("shared/platform-shared-go")
 DUMP_PACKAGE = "./cmd/logschema"
