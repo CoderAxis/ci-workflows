@@ -84,6 +84,17 @@ on:
         required: false
         type: string
         default: ""
+      sha:
+        description: >-
+          The commit to release. Left blank it is the commit that triggered the caller, which is
+          what a tag push or a manual dispatch means. A caller triggered by `workflow_run` MUST
+          pass `github.event.workflow_run.head_sha` instead: that event carries the default
+          branch's head rather than the commit CI actually judged, and those are different commits
+          whenever anything lands while CI is running. Releasing the wrong one would publish a tree
+          no CI result covers while reporting the green run of another.
+        required: false
+        type: string
+        default: ""
 
 # No `secrets:` block, deliberately. Every credential this workflow needs - the module-reader App
 # key, the release bot that dispatches into consumer repositories, and the Slack bot token - is
@@ -221,7 +232,7 @@ jobs:
           # is the commit the tag points at. Either way it is the exact tree that would be published,
           # which is what has to have been tested - a green run on a later or earlier commit says
           # nothing about this one.
-          SHA: ${{ github.sha }}
+          SHA: ${{ inputs.sha || github.sha }}
           # Addressed by FILE PATH, not by the `name:` field. WFC-0006 permits exactly ci.yaml and
           # release.yaml, and service-ci.yaml's `lanes` job asserts ci.yaml exists for every core,
           # schema and shared-library repo, so the path is fixed by control while the display name is
@@ -349,6 +360,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # conventional-commit versioning needs the full history and all tags
+          # The same commit ci-gate cleared. Defaulting to the event's head would tag whatever the
+          # branch happens to point at now, which is not necessarily what was verified.
+          ref: ${{ inputs.sha || github.sha }}
 
       - name: Resolve version (tag, explicit input, or conventional commits)
         id: ver
