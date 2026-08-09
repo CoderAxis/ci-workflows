@@ -32,7 +32,7 @@ Usage:
   check-dockerfile-standard.py --write-docs README.md
   check-dockerfile-standard.py --verify-docs README.md
 
-SSOT: this file lives in coderaxis/github-actions and is invoked by the central reusable
+SSOT: this file lives in coderaxis/ci-workflows and is invoked by the central reusable
 workflow .github/workflows/dockerfile-standard.yaml.
 """
 from __future__ import annotations

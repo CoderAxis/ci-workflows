@@ -95,7 +95,7 @@ controls:
     applies_to_capabilities: []
     policy: >-
       A consumer repository MUST NOT contain a workflow whose filename matches a workflow that
-      coderaxis/github-actions publishes as reusable (`on.workflow_call`) unless that workflow is a
+      coderaxis/ci-workflows publishes as reusable (`on.workflow_call`) unless that workflow is a
       caller of it — that is, unless it contains
       `uses: coderaxis/ci-workflows/.github/workflows/<name>@<ref>`.
     rationale: >-
@@ -121,7 +121,7 @@ controls:
     severity: major
     applies_to_capabilities: []
     policy: >-
-      A call to a coderaxis/github-actions reusable workflow MUST reference a major version tag
+      A call to a coderaxis/ci-workflows reusable workflow MUST reference a major version tag
       (`@v1`, `@v2`, ...). It MUST NOT reference a branch (`@main`), an exact patch tag (`@v1.6.0`),
       or a commit SHA.
     rationale: >-
@@ -276,7 +276,7 @@ controls:
       pattern written for one spelling silently skips every file using the other, which is how a
       checker comes to report a clean fleet it never actually looked at.
     remediation: >-
-      Move the logic into a job in coderaxis/github-actions service-ci.yaml, gated on the catalog
+      Move the logic into a job in coderaxis/ci-workflows service-ci.yaml, gated on the catalog
       fact that decides whether it applies, and delete the local file. If the repository is not a
       catalog service and genuinely has a different lifecycle - Terraform plan/apply, GitOps
       promotion - it needs a defined lane set of its own, added to `allowed_lanes` here with a

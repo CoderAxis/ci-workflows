@@ -1,4 +1,4 @@
-# coderaxis/github-actions
+# coderaxis/ci-workflows
 
 Shared **reusable composite actions** and **reusable workflows** for the coderaxis
 platform CI/CD.
@@ -560,8 +560,8 @@ _Generated from `controls/workflow-centralization.yaml` by `scripts/check-workfl
 
 | Control | Policy | Severity | Scope | Owner | Status |
 | ------- | ------ | -------- | ----- | ----- | ------ |
-| WFC-0001 | A consumer repository MUST NOT contain a workflow whose filename matches a workflow that coderaxis/github-actions publishes as reusable (`on.workflow_call`) unless that workflow is a caller of it — that is, unless it contains `uses: coderaxis/ci-workflows/.github/workflows/<name>@<ref>`. | major | caller-workflow | platform-infrastructure | active |
-| WFC-0002 | A call to a coderaxis/github-actions reusable workflow MUST reference a major version tag (`@v1`, `@v2`, ...). It MUST NOT reference a branch (`@main`), an exact patch tag (`@v1.6.0`), or a commit SHA. | major | caller-workflow | platform-infrastructure | active |
+| WFC-0001 | A consumer repository MUST NOT contain a workflow whose filename matches a workflow that coderaxis/ci-workflows publishes as reusable (`on.workflow_call`) unless that workflow is a caller of it — that is, unless it contains `uses: coderaxis/ci-workflows/.github/workflows/<name>@<ref>`. | major | caller-workflow | platform-infrastructure | active |
+| WFC-0002 | A call to a coderaxis/ci-workflows reusable workflow MUST reference a major version tag (`@v1`, `@v2`, ...). It MUST NOT reference a branch (`@main`), an exact patch tag (`@v1.6.0`), or a commit SHA. | major | caller-workflow | platform-infrastructure | active |
 | WFC-0004 | A job whose `uses:` targets a reusable workflow MUST grant, at job level, every permission that the called workflow declares at its own workflow level, at or above the declared access (`write` satisfies `read`; `read` does not satisfy `write`). A job that declares no `permissions:` block inherits the calling workflow's, and that inherited set is what is checked. | critical | caller-workflow | platform-infrastructure | active |
 | WFC-0005 | A repository MUST NOT contain a workflow that performs a dependency bump, nor one that subscribes to a `repository_dispatch` event of the form `<module>-released`. Version propagation is performed by the central release, which resolves consumers from the platform artifact graph and opens the pull request directly. | major | caller-workflow | platform-infrastructure | active |
 | WFC-0006 | A repository's `.github/workflows` directory MUST contain only `ci.yaml`, `release.yaml`, workflows that the repository itself PUBLISHES as reusable (`on.workflow_call`), and thin callers - a file named after a workflow this platform publishes that does nothing but call that same workflow. Any other workflow file is a finding, whether or not its behaviour duplicates something central. Every YAML file on the platform MUST use the `.yaml` extension; `.yml` is a finding on its own, independent of the filename. | major | caller-workflow | platform-infrastructure | active |

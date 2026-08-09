@@ -36,7 +36,7 @@ Usage:
   check-delivery-model.py --write-docs README.md      # regenerate the docs block
   check-delivery-model.py --verify-docs README.md     # fail if the docs block drifted
 
-SSOT: this file lives in coderaxis/github-actions and is invoked by the self-CI
+SSOT: this file lives in coderaxis/ci-workflows and is invoked by the self-CI
 delivery-model-guard workflow. It is the delivery-model analogue of
 scripts/check-seed-contract.py.
 """

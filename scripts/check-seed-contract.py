@@ -48,7 +48,7 @@ the file/data checks do not apply because the data SSOT is not in this repo.
 
 This is the single-repo enforcement twin of the seeding standard's §6b.
 
-SSOT: this file lives in coderaxis/github-actions and is invoked by the central
+SSOT: this file lives in coderaxis/ci-workflows and is invoked by the central
 reusable workflow .github/workflows/seed-contract-check.yaml. Service repos carry
 only a thin caller; they do NOT vendor this script.
 """
