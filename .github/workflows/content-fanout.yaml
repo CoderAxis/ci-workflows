@@ -347,6 +347,14 @@ jobs:
           api="repos/${GITHUB_REPOSITORY}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=${SHA}&per_page=100"
           deadline=$(( SECONDS + 40 * 60 ))
 
+          # A much shorter limit for the case where no CI run exists for the commit AT ALL, which is
+          # not the same wait and must not be charged as if it were. This loop occupies a billed
+          # runner while it sleeps, and a run that is going to exist appears almost immediately now
+          # that these repos start in a median of 0s; if none has appeared after this long, the
+          # commit was excluded by ci.yaml's path filters and no amount of further waiting will
+          # produce one. Reaching that conclusion used to cost the full ceiling in billed sleep.
+          no_run_deadline=$(( SECONDS + 5 * 60 ))
+
           while :; do
             # An API error and "no runs yet" must never collapse into the same answer. Both refuse
             # here, but they refuse for different reasons and the message has to say which, or the
@@ -384,7 +392,11 @@ jobs:
             fi
 
             if [[ "${running}" -gt 0 || "${total}" -eq 0 ]]; then
-              if [[ ${SECONDS} -ge ${deadline} ]]; then
+              limit="${deadline}"
+              if [[ "${total}" -eq 0 ]]; then
+                limit="${no_run_deadline}"
+              fi
+              if [[ ${SECONDS} -ge ${limit} ]]; then
                 if [[ "${total}" -eq 0 ]]; then
                   # The likeliest cause on a content repository, and the one worth naming. core-docs'
                   # ci.yaml carries `paths:` filters on its push trigger, so a commit touching only
