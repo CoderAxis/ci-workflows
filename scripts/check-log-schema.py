@@ -199,6 +199,60 @@ def compare_events(control: dict, go: dict) -> list[str]:
     return problems
 
 
+def compare_constructors(control: dict, go: dict) -> list[str]:
+    """The catalogue's claim that a kind has an emitter, checked against the emitter.
+
+    This is the half that did not exist before Core ADR-0104, and its absence is why nine of eleven
+    kinds could sit in the vocabulary with no code able to produce them. Every comparison in the
+    rest of this file is between two DESCRIPTIONS of the schema; these are between the description
+    and the thing described.
+    """
+    problems: list[str] = []
+    go_constructors = go.get("constructors") or {}
+    go_record_fields = go.get("record_fields") or {}
+
+    for record in control.get("records") or []:
+        if not isinstance(record, dict):
+            continue
+        name = record.get("name")
+
+        declared = record.get("constructor")
+        if not declared:
+            problems.append(f"record '{name}' declares no `constructor`; a kind with no emitter is "
+                            f"a name a dashboard can select on and nothing can produce")
+            continue
+
+        built = go_constructors.get(name)
+        if built is None:
+            problems.append(f"record '{name}' is in {CONTROL_PATH} but no Go type in the logging "
+                            f"catalogue emits it; add one implementing the closed Record interface")
+            continue
+        if built != declared:
+            problems.append(f"record '{name}': {CONTROL_PATH} names constructor {declared!r} but "
+                            f"the catalogue registers {built!r}")
+
+        # `requires` is a promise about the emitted record, so it is checked against the fields the
+        # constructor actually writes for a zero value -- that is, unconditionally. A field emitted
+        # only when some optional input is non-nil does not satisfy a requirement, and reading it
+        # off the zero value is what makes the difference detectable.
+        emitted = set(go_record_fields.get(name) or [])
+        for required in record.get("requires") or []:
+            if required not in emitted:
+                problems.append(f"record '{name}' requires '{required}' but {built} does not emit "
+                                f"it unconditionally; a conditionally-present field satisfies the "
+                                f"contract in the type and not in the record")
+
+        if not record.get("requires"):
+            problems.append(f"record '{name}' declares no required fields; a kind whose only "
+                            f"content is the envelope cannot support an alert")
+
+    for name in sorted(set(go_constructors) - {r.get("name") for r in control.get("records") or []
+                                               if isinstance(r, dict)}):
+        problems.append(f"the logging catalogue registers a constructor for '{name}', which is not "
+                        f"a declared record kind in {CONTROL_PATH}")
+    return problems
+
+
 def compare_loki(control: dict) -> list[str]:
     """The Loki tiers on fields and the Alloy allowlists are two statements of one decision."""
     problems: list[str] = []
@@ -290,6 +344,7 @@ def main() -> None:
                 + compare_fields(control, go)
                 + compare_redaction(control, go)
                 + compare_events(control, go)
+                + compare_constructors(control, go)
                 + compare_loki(control))
     if problems:
         fail(problems)

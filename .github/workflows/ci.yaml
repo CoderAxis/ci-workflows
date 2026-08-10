@@ -1010,6 +1010,101 @@ jobs:
       # halves above are what CI can prove alone: the detector discriminates in both directions,
       # and it is wired to the catalog end to end.
 
+  # ── log record kinds (Core ADR-0104) ─────────────────────────────────────────────────────────
+  # This checker exists because its sibling could not fail. `check-log-schema.py` compares the
+  # control file, the Go registry and the standard's frontmatter - three DESCRIPTIONS of the
+  # schema - and stayed green for the life of schema v1 while nine of eleven declared record kinds
+  # had no emitter and six undeclared kinds were being written under the key `event`. So a
+  # self-test that only proved this one runs would repeat the original mistake at one remove.
+  #
+  # Hence both directions, and a third case the other checkers in this file do not have: the
+  # checker is pointed at a tree with no Go in it and must exit 2 rather than 0. That is the exact
+  # failure this whole ADR is about - a gate that reads nothing reporting what a clean repository
+  # reports - and it is reachable by a plain mistake, because service-ci runs the checker with
+  # `--repo-root .` against a repository layout the script has to be told about.
+  log-record-kinds:
+    name: Log record kinds - catalogue detector self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      # The positive half. Also pins the layout behaviour, which is the part most likely to regress
+      # unnoticed: the adoption ratchet asks whether a kind is emitted ANYWHERE, which one
+      # repository cannot answer, so it must report itself skipped rather than fail a service for
+      # the eleven kinds it does not happen to emit.
+      - name: The conformant fixture must pass
+        run: |
+          set -euo pipefail
+          out="$(python3 scripts/check-log-record-kinds.py \
+            --repo-root fixtures/log-record-kinds-conformant \
+            --layout repo --control controls/log-schema.yaml 2>&1)"
+          echo "$out"
+          if ! echo "$out" | grep -q "Adoption ratchet skipped"; then
+            echo "::error::the adoption ratchet ran against a single repository. It asks whether a"
+            echo "::error::kind is emitted anywhere in the fleet, which one repo cannot answer, so"
+            echo "::error::every service would fail on the kinds it does not emit."
+            exit 1
+          fi
+
+      # The negative half, asserted rule by rule. A single "it failed" would pass while two of the
+      # three rules had stopped matching, and the copied-middleware rule is the one most likely to
+      # go quiet, because it is the only one that fires on a declaration nobody calls.
+      - name: Mutation test - the violating fixture must fail every rule
+        run: |
+          set -euo pipefail
+          set +e
+          out="$(python3 scripts/check-log-record-kinds.py \
+            --repo-root fixtures/log-record-kinds-violating \
+            --layout repo --control controls/log-schema.yaml 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the violating fixture passed; the record-kind detectors are not firing"
+            exit 1
+          fi
+          while IFS='|' read -r rule anchor; do
+            if ! echo "$out" | grep -qF "$anchor"; then
+              echo "::error::$rule did not fire against the violating fixture"
+              exit 1
+            fi
+          done <<'RULES'
+              rule 1 (one discriminator)|is not a record-kind discriminator
+              rule 2 (reached through a constructor)|event_name is set by hand
+              rule 4 (one access-log implementation)|re-implements the http_request_completed emitter
+              rule 5 (one logger interface)|re-declares the logger interface
+              RULES
+          echo "all three file-reading rules fired as expected (exit $rc)"
+
+      # The third direction. Distinct exit code, because "could not run" and "ran and found
+      # violations" call for different responses and a shared code makes the first look like the
+      # second until someone reads the log.
+      - name: Mutation test - an empty tree must be unrunnable, not clean
+        run: |
+          set -euo pipefail
+          empty="$(mktemp -d)"
+          set +e
+          out="$(python3 scripts/check-log-record-kinds.py \
+            --repo-root "$empty" --layout repo --control controls/log-schema.yaml 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 2 ]; then
+            echo "::error::a tree with no Go files exited $rc, expected 2. A gate that reads"
+            echo "::error::nothing must not be indistinguishable from one that found nothing."
+            exit 1
+          fi
+
   # ── release drift (the major tag against main) ───────────────────────────────────────────────
   # Consumers pin `@v1`, a MOVING major tag. So the fleet does not run what main says; it runs
   # whatever v1 last pointed at, and the two are only equal because somebody moved the tag.

@@ -738,6 +738,55 @@ jobs:
         # sources in reach of any later step that walks the tree.
         run: rm -rf .archcheck
 
+      # ── log record kinds (Core ADR-0104) ──────────────────────────────────────────────────
+      # The gate that had no fleet-facing half. `check-log-schema.py` runs in platform-shared-go
+      # and compares the control file, the Go registry and the standard's frontmatter - three
+      # DESCRIPTIONS of the schema. It passed for the life of schema v1 while nine of eleven
+      # declared record kinds had no emitter at all and six undeclared kinds were being written
+      # under the key `event`, because nothing in CI had ever read a service. This step is the
+      # half that reads services, so it belongs here rather than beside its sibling.
+      #
+      # From this repository at the moving major tag, like the guards below: a service must not be
+      # able to weaken the vocabulary it is judged by, nor to allowlist its own file.
+      - name: Check out the record-kind catalogue (SSOT)
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/ci-workflows
+          ref: v1
+          path: .log-record-tools
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install guard dependencies
+        shell: bash
+        run: python3 -m pip install --upgrade PyYAML
+
+      # --layout repo is explicit rather than detected. Detection keys on the presence of the
+      # monorepo's top-level trees, and a service repo that happens to hold a `services/` or
+      # `tools/` directory would be silently scanned as if it were the fleet - which would skip
+      # most of its own files and run the adoption ratchet against one repository. Naming the
+      # layout costs one line and removes the guess.
+      #
+      # Exit 2 means the checker could not run and is deliberately not swallowed, for the same
+      # reason it is not swallowed on the architecture step above: an empty scan reports exactly
+      # what a conforming repository reports.
+      - name: One record-kind vocabulary, reached through its constructors (ADR-0104)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .log-record-tools/scripts/check-log-record-kinds.py \
+            --repo-root . \
+            --layout repo \
+            --control .log-record-tools/controls/log-schema.yaml
+
+      - name: Remove the catalogue checkout
+        if: always()
+        shell: bash
+        run: rm -rf .log-record-tools
+
   # ── workflow lanes (WFC-0006) ────────────────────────────────────────────────────────────────
   # Absorbed from the per-repo pipeline-policy.yml, which asserted that thirteen named workflow
   # files EXISTED in the repository - quality-check.yml, security-scan.yml, codeql.yml,
