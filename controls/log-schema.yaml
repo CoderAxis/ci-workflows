@@ -131,6 +131,19 @@ fields:
     owner: application
     notes: Equals `version` at the top of this file.
 
+  - name: service_version
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    notes: >-
+      The build identity of the running process, on lifecycle records only. It is what makes
+      service_started answer "which build is this" rather than merely "something restarted", and it
+      is the join between a behaviour change and the deploy that caused it. Required on the
+      lifecycle records for that reason: those two records carry no other payload, and a record
+      kind whose whole content is the envelope is a name rather than a contract.
+
   - name: event_name
     type: string
     presence: record
@@ -332,6 +345,136 @@ fields:
     loki: body
     owner: application
 
+  # --- rpc -------------------------------------------------------------------------------
+  # Named for OpenTelemetry's `rpc.*` group, for the same reason the HTTP fields are named for
+  # `http.*`: these collapse to the semconv attribute on OTLP export and a second name would have
+  # to be translated somewhere.
+  #
+  # This group is new in the record-kind catalog and it replaces a shipped emitter that used the
+  # key `event` and the value `grpc_request_completed` - neither of which this file declared, on
+  # roughly 27 service roots.
+  - name: rpc_method
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    notes: >-
+      The fully-qualified method, /authz.v1.AuthzService/CheckPermission. Bounded by the generated
+      service surface and safe to aggregate on, which is what makes it the gRPC counterpart of
+      http_route rather than of http_target.
+
+  - name: rpc_grpc_status_code
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    enum: [OK, Canceled, Unknown, InvalidArgument, DeadlineExceeded, NotFound, AlreadyExists,
+           PermissionDenied, ResourceExhausted, FailedPrecondition, Aborted, OutOfRange,
+           Unimplemented, Internal, Unavailable, DataLoss, Unauthenticated]
+    notes: >-
+      The canonical status name rather than its integer. gRPC's numeric codes are stable but nobody
+      reads a dashboard that says 7. The casing is grpc-go's own `codes.Code.String()` output, which
+      is Go camelCase and spells the second value `Canceled` with one L - the enum records what the
+      emitter actually produces rather than a tidier spelling a query would then never match.
+
+  - name: rpc_duration_ms
+    type: float
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    notes: >-
+      Float, for the reason http_duration_ms is. The emitter this replaces used
+      `time.Since(start).Milliseconds()`, the same integer truncation the HTTP path removed, and an
+      in-cluster gRPC call is far more often sub-millisecond than an HTTP request is.
+
+  - name: rpc_stream
+    type: boolean
+    presence: optional
+    pii: none
+    loki: body
+    owner: application
+    notes: True when the call was streaming. Absent means unary.
+
+  # --- jobs ------------------------------------------------------------------------------
+  - name: job_name
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    notes: Stable identifier of the schedule or worker, not a per-run id.
+
+  - name: job_duration_ms
+    type: float
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+
+  - name: job_outcome
+    type: string
+    presence: record
+    pii: none
+    loki: body
+    owner: application
+    enum: [success, failure]
+    notes: >-
+      Carried on job_completed rather than split into a separate job_failed record kind, which is
+      the same shape as http_request_completed carrying http_status_code instead of there being an
+      http_request_failed. One kind per lifecycle transition, outcome as a field: a dashboard that
+      wants the failure rate divides two counts of one kind instead of joining two kinds.
+
+  # --- security --------------------------------------------------------------------------
+  # Authentication and session events. Before the catalog these were emitted by
+  # platform-identity under the undeclared key `event`, which meant the platform's
+  # highest-consequence records were the ones no query could reach at index speed.
+  #
+  # One record kind with a typed subject field, not one kind per occurrence. That is the same split
+  # already made for messaging - event_published names the record, event_type names the domain
+  # event - and it keeps the closed vocabulary small enough to enumerate while leaving room for a
+  # thirteenth authentication event that is not an architectural change.
+  - name: security_event_type
+    type: string
+    presence: record
+    pii: none
+    loki: meta
+    owner: application
+    notes: >-
+      The specific occurrence, e.g. platform.token.reuse_detected. Promoted because "every token
+      reuse across the fleet in the last hour" is the question this family exists to answer, and
+      parsing every line first is the slow path.
+
+      Deliberately un-enumerated here. The vocabulary belongs to the emitting service and
+      platform-identity's is already fixed in three places - its service.contract.yaml, the
+      platform_security_events table, and EVENT_REFERENCE.md. A fourth copy in this file would be a
+      second spelling of the same twelve events, and the Loki query would stop matching the SQL one
+      the first time they drifted. The values are verbatim what the row carries, so both sides of an
+      investigation filter on one string.
+
+  - name: security_outcome
+    type: string
+    presence: record
+    pii: none
+    loki: meta
+    owner: application
+    enum: [success, failure]
+    notes: >-
+      Promoted alongside security_event_type because the alert is almost always on the failure half
+      of a type, and a filter that has to parse to find it reads the whole chunk.
+
+  - name: security_reason
+    type: string
+    presence: optional
+    pii: none
+    loki: body
+    owner: application
+    notes: >-
+      Why the outcome was what it was. Constant per call site like `message`: it is a classification
+      such as `refresh token replayed after rotation`, never an interpolated string carrying an id.
+
   # --- messaging -------------------------------------------------------------------------
   - name: messaging_system
     type: string
@@ -497,41 +640,162 @@ fields:
 # ---------------------------------------------------------------------------------------------
 # Closed vocabulary for event_name. A closed set is what lets a dashboard enumerate record kinds
 # instead of discovering them. Adding a value is additive and does not bump `version`.
+#
+# `event_name` IS THE ONLY RECORD-KIND DISCRIMINATOR. A record does not carry its kind under
+# `event`, `kind`, `log_type` or any other key. This is stated because it was violated: an emitter
+# on roughly 27 service roots wrote `event: grpc_request_completed`, and because `event` is not in
+# the promotion allowlist below, the kind of the platform's second most numerous record was
+# unreachable without a parser. check-log-record-kinds.py rule 1 now makes that a build failure.
+# See Core ADR-0104.
+#
+# `constructor` names the Go type in platform-shared-go/logging that produces the record. It is not
+# documentation: check-log-schema.py asserts the type exists and implements the closed Record
+# interface, and check-log-record-kinds.py asserts the fleet reaches every kind through it. A kind
+# with no constructor is a name, which is what nine of these were.
+#
+# `requires` is never empty. A kind whose only content is the envelope cannot support an alert, and
+# five of these previously declared no fields at all - so `grpc_call_completed` was satisfied by a
+# record that said nothing about which call, how long it took, or whether it succeeded.
 # ---------------------------------------------------------------------------------------------
 records:
   - name: http_request_completed
     emitted_by: shared access-log middleware
+    constructor: HTTPRequestCompleted
     requires: [http_method, http_route, http_target, http_status_code, http_duration_ms, client_ip, user_agent]
   - name: http_request_panicked
     emitted_by: shared recovery middleware
+    constructor: HTTPRequestPanicked
     requires: [http_method, http_route, stack]
   - name: grpc_call_completed
     emitted_by: shared gRPC interceptor
-    requires: []
+    constructor: GRPCCallCompleted
+    requires: [rpc_method, rpc_grpc_status_code, rpc_duration_ms]
   - name: event_published
     emitted_by: outbox relay and producers
+    constructor: EventPublishedRecord
     requires: [messaging_system, messaging_destination, messaging_operation, event_type, event_id]
   - name: event_consumed
     emitted_by: consumers
+    constructor: EventConsumedRecord
     requires: [messaging_system, messaging_destination, messaging_operation, event_type, event_id]
   - name: event_dropped
     emitted_by: consumers, on DLQ routing
+    constructor: EventDroppedRecord
     requires: [messaging_system, messaging_destination, event_type, error]
   - name: job_started
     emitted_by: scheduled and background jobs
-    requires: []
+    constructor: JobStarted
+    requires: [job_name]
   - name: job_completed
     emitted_by: scheduled and background jobs
-    requires: []
+    constructor: JobCompleted
+    requires: [job_name, job_duration_ms, job_outcome]
   - name: service_started
     emitted_by: bootstrap
-    requires: []
+    constructor: ServiceStarted
+    requires: [service_version]
   - name: service_stopped
     emitted_by: graceful shutdown
-    requires: []
-  - name: deprecated_endpoint
-    emitted_by: deprecation middleware (ADR-0037)
-    requires: [http_route]
+    constructor: ServiceStopped
+    requires: [service_version]
+  # There is no deprecated_endpoint kind. ADR-0037 requires Deprecation and Sunset headers and a
+  # log line per call to a deprecated route, and none of it was built: no middleware exists in the
+  # shared module or in any service, and no Go file in the fleet sets either header. Declaring the
+  # kind made this vocabulary claim an observation the platform cannot produce - which is the exact
+  # defect ADR-0104 exists to remove. It returns in the change that builds the middleware.
+  - name: security_event
+    emitted_by: platform-identity authentication and session handling
+    constructor: SecurityEvent
+    requires: [security_event_type, security_outcome, client_ip]
+
+# ---------------------------------------------------------------------------------------------
+# Adoption ratchet, read by check-log-record-kinds.py.
+#
+# Everything above this line is a statement about the schema, and every check on it compares two
+# descriptions of the schema to each other. This block is the only part of the file that makes a
+# claim about the FLEET, and it exists because that was the missing half: for the life of schema
+# v1 the vocabulary declared eleven kinds, two had emitters, and no build ever failed - because
+# nothing in CI had ever looked at a service.
+#
+# `pending` is every kind the fleet does not emit yet. The list MAY ONLY SHRINK. A kind on it that
+# gains a call site fails the build until it is removed, and a kind not on it that has no call site
+# fails the build outright. That direction is deliberate: the failure mode being prevented is a
+# vocabulary that grows faster than its emitters, so the ratchet makes adding a kind without
+# adopting it a visible, dated debt rather than a silent one.
+# ---------------------------------------------------------------------------------------------
+adoption:
+  # Every remaining entry is blocked on the same thing, and it is worth naming because it is an
+  # ordering constraint rather than a backlog. These kinds are emitted by code in OTHER repositories
+  # - the CDC relay in event-gateway-core, ten worker loops in the *-core modules, a dozen bespoke
+  # Kafka consumers - and every one of those repositories reaches logging.Emit through a pinned
+  # module version. The symbol does not exist in v1.31.2. So the emitters cannot be written until
+  # platform-shared-go is released and each consumer is bumped, and this list is what holds that
+  # window open honestly instead of letting a half-adopted vocabulary look finished.
+  #
+  # service_started and service_stopped came off the list by being wired into foundation.New and
+  # foundation.Close, which every service already calls - one emitter for the whole fleet.
+  #
+  # event_consumed and event_dropped came off the same way, and for a reason worth recording: they
+  # were blocked not by the release ordering above but by the shape of events.ConsumerLogger, which
+  # took no context. The one component whose job is to carry correlation from a message header into
+  # the work it triggers logged through an interface with nowhere to put it. Collapsing that
+  # interface onto logging.Logger made both kinds emittable from the shared consumer, which is one
+  # emitter for every service that consumes from Kafka through it.
+  pending:
+    - event_published
+    - job_started
+    - job_completed
+
+  # Files permitted to use the bare key `event` in a map literal. `event` is banned as a log field
+  # because it was the platform's second record-kind discriminator, unpromoted and undeclared; these
+  # are the places where the identifier means something else entirely - a provider's webhook payload
+  # field, a websocket frame type on the wire, a chat message's metadata, or a column in the audit
+  # table. None of them reach a log line, and renaming them would change a contract with a consumer
+  # that has nothing to do with logging.
+  event_key_allowlist:
+    - services/communication/inboxxhq-communication-service/internal/adapters/inbound/http/webhook_handler.go
+    - services/voice-ai-agent/inboxxhq-voice-ai-agent-service/internal/adapters/inbound/http/voice_stream_bridge.go
+    - gateways/inboxxhq-realtime-gateway/internal/adapters/inbound/ws/hub.go
+    # Chat message metadata, sent to the chat service and rendered in a thread.
+    - gateways/inboxxhq-voice-gateway/internal/adapters/inbound/http/webhook_handler.go
+    - gateways/inboxxhq-voice-gateway/internal/adapters/inbound/http/call_handler.go
+    # Audit detail persisted as a JSON column, not a log field.
+    - services/org/org-core/application/commands/onboarding_commands.go
+    - services/org/org-core/application/command/onboarding/register_org_usecase.go
+
+# ---------------------------------------------------------------------------------------------
+# Sole implementations.
+#
+# The access records - one per request, per call - are not written at call sites. They are written
+# by middleware, and middleware is copied. Before this block the fleet held thirteen implementations
+# of the gRPC access log: the shared one, which runs, and twelve per-service copies, which did not.
+# All twelve were unreachable, every one of them had passing unit tests, and every one emitted a
+# shape the catalogue does not describe - `method` instead of rpc_method, an integer millisecond
+# that rounds a sub-millisecond in-cluster call to 0, a raw `path` and even a raw `query` where the
+# schema requires the query string stripped.
+#
+# Dead code with passing tests is worse than dead code, because the tests are what make it look
+# maintained. It is also how the duplicate comes back: the next author greps for
+# UnaryLoggingInterceptor, finds the copy next door rather than the shared one, and follows it.
+#
+# So a record kind that is emitted by shared infrastructure has exactly one implementation, and this
+# block names where. A function matching one of these shapes, declared outside its owner, fails the
+# build - whether or not anything calls it.
+# ---------------------------------------------------------------------------------------------
+sole_implementations:
+  emitters:
+    - record: grpc_call_completed
+      owner: shared/platform-shared-go/platform/grpccommon
+      name_pattern: '\w*(LoggingInterceptor|AccessLogInterceptor)'
+
+    - record: http_request_completed
+      owner: shared/platform-shared-go/platform/ginmiddleware
+      name_pattern: '\w*(AccessLog|RequestLog|LoggingMiddleware|LoggerMiddleware)\w*'
+
+  # Genuine exceptions, by path. Empty by intent: every entry here is a second implementation of a
+  # record the platform has agreed has one, so an addition is a design decision and should read like
+  # one in review.
+  allowlist: []
 
 # ---------------------------------------------------------------------------------------------
 # Redaction. Matched case-insensitively against the field key, recursively to `max_depth`, on
@@ -601,7 +865,8 @@ loki:
   # Closed allowlist. Loki enforces per-line structured-metadata size and count limits, so
   # promoting everything reintroduces at ingest exactly the cost the tiering exists to avoid.
   structured_metadata:
-    from_log_line: [level, schema_version, event_name, event_type, trace_id, span_id, correlation_id, request_id, org_id, error_code]
+    from_log_line: [level, schema_version, event_name, event_type, trace_id, span_id, correlation_id,
+                    request_id, org_id, error_code, security_event_type, security_outcome]
 
     # Collector-derived rather than read from the line. Each one arrives as a label by default --
     # from Kubernetes discovery for pod/node, from the CRI envelope for stream -- and each is
@@ -631,4 +896,5 @@ loki:
 normative_homes:
   - docs/core-docs/standards/observability/log-schema-standard.md
   - docs/core-docs/adrs/ADR-0101-canonical-service-logger.md
+  - docs/core-docs/adrs/ADR-0104-log-record-kind-catalogue.md
   - ci-workflows/controls/log-schema.yaml
