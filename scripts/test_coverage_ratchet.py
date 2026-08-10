@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Self-test for the coverage ratchet. Run from the github-actions repo root:
+"""Self-test for the coverage ratchet. Run from the ci-workflows repo root:
 
     python3 scripts/test_coverage_ratchet.py
 

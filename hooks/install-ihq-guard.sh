@@ -15,7 +15,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUARD_SRC="${HERE}/ihq-guard.sh"
-BEGIN="# >>> ihq-guard (managed by github-actions/hooks/install-ihq-guard.sh) >>>"
+BEGIN="# >>> ihq-guard (managed by ci-workflows/hooks/install-ihq-guard.sh) >>>"
 END="# <<< ihq-guard <<<"
 
 DRY_RUN=0

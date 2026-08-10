@@ -4,7 +4,7 @@ name: Platform Governance (multi-repo)
 #
 # WHY THIS IS SEPARATE FROM docs-governance.yaml. That workflow enforces generic markdown
 # policy against a single caller and deliberately needs nothing else checked out. These gates
-# are the opposite: the claims manifest cites code in github-actions and infra, the capability
+# are the opposite: the claims manifest cites code in ci-workflows and infra, the capability
 # certification gate reads core-docs' catalog, the client capability registry in platform-docs
 # and the fleet source at once. Mixing them would give every governed docs repo a multi-repo
 # checkout it has no use for.
@@ -92,7 +92,7 @@ jobs:
       #   $GITHUB_WORKSPACE/
       #     docs/core-docs/                 <- the caller
       #     docs/inboxxhq-platform-docs/
-      #     github-actions/
+      #     ci-workflows/
       #     infra/inboxxhq-infra/
       - name: Check out the calling docs repository
         uses: actions/checkout@v4
@@ -100,13 +100,13 @@ jobs:
           path: ${{ inputs.docs_path }}
 
       # Public, so this one needs no credential. Worth stating: it is the reason the claims
-      # manifest's github-actions references can be resolved before any token exists.
-      - name: Check out github-actions (public)
+      # manifest's ci-workflows references can be resolved before any token exists.
+      - name: Check out ci-workflows (public)
         uses: actions/checkout@v4
         with:
           repository: coderaxis/ci-workflows
           ref: ${{ inputs.actions_ref }}
-          path: github-actions
+          path: ci-workflows
 
       - name: Resolve private repository owners
         id: owners
@@ -166,7 +166,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for d in "${{ inputs.docs_path }}" github-actions \
+          for d in "${{ inputs.docs_path }}" ci-workflows \
                    "docs/${{ steps.owners.outputs.docs_name }}" \
                    "infra/${{ steps.owners.outputs.infra_name }}"; do
             if [ -d "${GITHUB_WORKSPACE}/${d}" ]; then
