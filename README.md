@@ -295,6 +295,54 @@ The delivery-model checker is the twin of
 [`scripts/check-seed-contract.py`](scripts/check-seed-contract.py): both encode an
 enterprise standard as a language-agnostic, stdlib-light gate rather than prose.
 
+## UUID version policy (UUIDv7 everywhere, v5 only where it is declared)
+
+Policy SSOT (in `coderaxis/microservices`): `ADR-0071` (outbox `event_id` /
+`idempotency_key` split), `ADR-0035` (HTTP `Idempotency-Key` accepts v4/v7/ULID),
+`RFC-0032` §4.1, and the
+[Outbox DDL Standard](https://github.com/coderaxis/microservices/blob/main/docs/core-docs/standards/infrastructure/outbox-ddl-standard.md)
+§2.1. Control catalog: [`controls/uuid-policy.yaml`](controls/uuid-policy.yaml).
+Enforcement: [`scripts/check-uuid-version-policy.py`](scripts/check-uuid-version-policy.py)
+driving [`tools/uuidscan`](tools/uuidscan), run by the `uuid-policy` job in
+[`service-ci.yaml`](.github/workflows/service-ci.yaml) against every Go repository.
+
+The policy is "identifiers the platform mints are UUIDv7, and a deterministic v3/v5
+is used only where a documented reason exists". Before this gate nothing verified
+it, in either direction. The DDL cannot: `DEFAULT uuidv7()` never fires on
+`event_id`, because the shared INSERT names the column. `outboxverify` cannot: it
+introspects `pg_catalog` and never reads a value. `outboxwritepath` samples rows
+but checks no version. So a caller supplying a v5 `event_id` passed all three, and
+one did.
+
+Three design choices are worth knowing before changing it:
+
+- **It parses, it does not grep.** The fixed form of the real regression quotes
+  both `uuid.NewSHA1` and `uuid.Must(uuid.NewV7())` in a doc comment explaining
+  the bug it removed, so a text scan reports the fix as the defect.
+  `go/parser` keeps comments out of the AST. The scan is syntax-only — no type
+  checking, no `go mod download`, no private-module credentials — which is what
+  makes it cheap enough to run on every repository from here, with no Go module
+  bump anywhere in the fleet.
+- **The exception is declared at the call site**, as
+  `//uuid:v5 reason=<token> adr=ADR-NNNN`, with `<token>` drawn from a closed
+  vocabulary in `controls/uuid-policy.yaml`. The claim and the code it justifies
+  land in one diff hunk, in front of the reviewer who can judge it; and because
+  each marker is paired with the constructor it covers, a marker that outlives its
+  code fails CI instead of silently authorising the next one.
+- **Only three columns are in scope**, because those are the only three for which
+  a document states a version. §2.1 records the other six outbox UUID columns as
+  "Unspecified — no doc states a version" and says the standard MUST NOT invent
+  one; a gate that flagged them would be inventing policy, and that is the noise
+  that gets a gate switched off.
+
+[`scripts/uuid-version-probe.sql`](scripts/uuid-version-probe.sql) is the runtime
+companion for the half no static pass can decide: a UUID carried in from another
+service has no syntactic origin in the repo that writes it. It is deliberately
+**not** wired into PR CI — the CI database is migrated from empty and holds no
+rows, so it would report a clean bill of health over zero data. It is an
+operational check against a populated environment, and the missing detection for
+`OINV-OUTBOX-IDEMPOTENCY-KEY-PER-OCCURRENCE`.
+
 ## Dockerfile standard (one canonical pattern, capability-declared variation)
 
 Policy SSOT (in `coderaxis/microservices`): `ADR-0072` (Enterprise Dockerfile Standard) and

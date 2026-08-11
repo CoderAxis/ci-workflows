@@ -1,0 +1,325 @@
+# UUID version-policy control catalog (declarative policy-as-code).
+#
+# The policy this encodes: identifiers the platform mints are UUIDv7, and a
+# name-based deterministic version (UUIDv3/UUIDv5) is used ONLY where a
+# documented reason exists. Until now nothing verified that sentence. Two
+# defects shipped through the gap; both are pinned as fixtures under
+# fixtures/uuid-policy-* and re-run on every push to this repo.
+#
+# What this catalog is, and is not. It is the single source of WHICH UUID
+# invariants are enforced, WHICH sinks have a documented required version, and
+# WHICH reasons are sanctioned grounds for a deterministic exception. It does not
+# describe detection: each control's `detector` key binds it to an implementation
+# in scripts/check-uuid-version-policy.py (which drives tools/uuidscan, a
+# syntax-only go/ast scanner) and that implementation may evolve without a change
+# here.
+#
+# Control IDs (UUID-NNNN) are STABLE and permanent. Never rename or recycle an
+# ID: retire a control by setting `status`, change intent by adding a new ID.
+#
+# Schema (validated by the checker):
+#   required per control: id, title, owner, scope, status, severity, stage,
+#                         policy, rationale, remediation, detector, refs
+#   severity: critical | major | minor
+#   stage:    enforce | warn | observe
+#             enforce -> a finding fails CI
+#             warn    -> a finding is a ::warning:: and does not fail CI
+#             observe -> counted in the summary only
+#   waivable: false means no declaration marker can silence the control. The
+#             three-column version contract is a MUST in an accepted ADR; a
+#             per-call-site comment is not the instrument for amending it.
+#
+# Policy SSOT (this catalog enforces; it does not decide):
+#   ADR-0071 - Outbox event_id / idempotency_key split (event_id v7 MUST,
+#              idempotency_key deterministic v5 MUST)
+#   ADR-0035 - HTTP Idempotency-Key header accepts UUIDv4, UUIDv7 or ULID
+#   RFC-0032 - Canonical transactional outbox schema, section 4.1
+#   docs/core-docs/standards/infrastructure/outbox-ddl-standard.md section 2.1
+
+version: 1
+domain: uuid-version-policy
+policy_ssot:
+  - ADR-0071
+  - ADR-0035
+  - RFC-0032
+  - standards/infrastructure/outbox-ddl-standard.md
+
+# ---------------------------------------------------------------------------
+# Constructor vocabulary: which call mints which kind of UUID.
+# ---------------------------------------------------------------------------
+# `kind` is the scanner's token, not a UUID version number, because what the
+# policy cares about is the PROPERTY (derived from inputs vs fresh per call), and
+# two different versions can share a property.
+constructors:
+  - pkg: github.com/google/uuid
+    func: NewSHA1
+    kind: deterministic-v5
+  - pkg: github.com/google/uuid
+    func: NewMD5
+    kind: deterministic-v3
+  - pkg: github.com/google/uuid
+    func: NewV7
+    kind: fresh-v7
+  - pkg: github.com/google/uuid
+    func: New
+    kind: random-v4
+  - pkg: github.com/google/uuid
+    func: NewRandom
+    kind: random-v4
+  - pkg: github.com/google/uuid
+    func: NewString
+    kind: random-v4
+  # The shared minting helpers. Named here so a repo that routes through
+  # platform-shared-go is classified identically to one calling uuid directly.
+  - pkg: github.com/coderaxis/platform-shared-go/ids
+    func: MustUUIDv7
+    kind: fresh-v7
+  - pkg: github.com/coderaxis/platform-shared-go/ids
+    func: MustUUIDv7String
+    kind: fresh-v7
+
+# Calls that pass UUID-ness through to an argument or a receiver, so
+# uuid.Must(uuid.NewV7()) and deriveKey(...).String() classify as their inner
+# expression rather than as unknown.
+unwrappers:
+  - github.com/google/uuid.Must
+  - String
+  - Bytes
+  - URN
+
+# ---------------------------------------------------------------------------
+# Sinks: the fields whose required UUID version a document actually states.
+# ---------------------------------------------------------------------------
+# This list is deliberately SHORT. outbox-ddl-standard section 2.1 classifies all
+# 24 canonical outbox columns and finds a documented version for exactly three;
+# for aggregate_id, org_id, actor_id, correlation_id, causation_id and request_id
+# it records "Unspecified - no doc states a version" and says the standard MUST
+# NOT invent one. A gate that flagged those would be inventing policy, and would
+# be the noise that gets a gate switched off. `id` is not listed because the
+# shared INSERT omits the column, so DEFAULT uuidv7() always fires and
+# outboxverify already covers it.
+sinks:
+  - field: EventID
+    types: [outbox.Event, Event]
+    requires: fresh-v7
+    rejects: [deterministic-v5, deterministic-v3]
+    control: UUID-0001
+    authority: ADR-0071 decision 1
+    column: event_id
+  - field: IdempotencyKey
+    types: [outbox.Event, Event]
+    requires: deterministic-v5
+    rejects: [fresh-v7, random-v4]
+    control: UUID-0002
+    authority: ADR-0071 decision 2
+    column: idempotency_key
+
+# ---------------------------------------------------------------------------
+# Sanctioned reasons: the closed vocabulary a declaration marker may cite.
+# ---------------------------------------------------------------------------
+# This is the mechanism that turns "unless necessary" into something CI can read.
+# A deterministic constructor is admissible only when a marker adjacent to it
+# names one of these tokens together with the ADR that sanctions it:
+#
+#     //uuid:v5 reason=<token> adr=ADR-NNNN
+#
+# A token cannot be invented at the call site: adding one is a reviewed PR
+# against this file, which is the point. The reason a marker is required at the
+# CALL SITE rather than in a central allowlist is reviewability: the claim and
+# the code it justifies appear in the same diff hunk, in front of the reviewer
+# who can judge it. A central allowlist puts the excuse in another repository's
+# diff, which is how log-schema.yaml's event_key_allowlist accumulated entries no
+# check can now prove are still needed.
+reasons:
+  - token: outbox-idempotency-key
+    adr: ADR-0071
+    description: >-
+      The deterministic dedup identity of an outbox row. ADR-0071 decision 2
+      requires UUIDv5 over the identifying tuple; the consumer idempotency ledger
+      keys on it.
+  - token: consumer-dedup-ledger
+    adr: ADR-0071
+    description: >-
+      A consumer-side idempotency ledger key derived from the message identity,
+      so a redelivery collapses onto one row.
+  - token: deterministic-actor-ref
+    adr: ADR-0071
+    description: >-
+      A stable synthetic principal reference for an actor with no platform
+      identity (an inbound phone number, an AI agent), where a fresh id per
+      message would scatter one participant across single-use identities. Needs
+      an ADR of its own; ADR-0071 is cited as the nearest authority and this
+      token is the marker that the debt exists.
+  - token: seed-well-known-id
+    adr: ADR-0071
+    description: >-
+      A well-known seeded entity id that must be identical across every
+      environment and every re-run of the seeder.
+  - token: provider-webhook-dedup
+    adr: ADR-0071
+    description: >-
+      A dedup key derived from an external provider's event id (Stripe, Twilio)
+      so that provider redeliveries of one event collapse.
+
+# ---------------------------------------------------------------------------
+# Scan scope
+# ---------------------------------------------------------------------------
+scan:
+  skip_dirs: [vendor, node_modules, testdata, .git, .central, dist, build]
+  # Test files mint arbitrary UUIDs to build fixtures. Including them would
+  # produce exactly the noisy suppressions that get a gate disabled.
+  skip_test_files: true
+  marker_pattern: 'uuid:(?P<version>v[0-9])\s+reason=(?P<reason>[A-Za-z0-9._-]+)\s+adr=(?P<adr>[A-Za-z]+-[0-9]{4})'
+  determinism_name_pattern: '(?i)(deterministic|derive|stable|canonical)'
+
+controls:
+  - id: UUID-0001
+    title: A deterministic UUID never becomes an outbox event_id
+    owner: platform-eventing
+    scope: source
+    status: active
+    severity: critical
+    stage: enforce
+    waivable: false
+    policy: >-
+      An outbox row's event_id is a fresh per-occurrence UUIDv7. A value produced
+      by a name-based deterministic constructor (uuid.NewSHA1 / uuid.NewMD5),
+      directly or through a helper, MUST NOT be supplied as Event.EventID.
+    rationale: >-
+      ADR-0071 decision 1 makes event_id occurrence identity and says explicitly
+      it is not deterministic; the deterministic identity is idempotency_key.
+      Nothing enforced this. The DDL cannot: DEFAULT uuidv7() never fires because
+      the shared INSERT names the column. outboxverify cannot: it introspects the
+      catalog and never reads a value. outboxwritepath samples rows but checks no
+      version. So a caller supplying a v5 event_id passed every existing gate,
+      which is what the voice-gateway emitter and teardown handler did.
+    remediation: >-
+      Leave Event.EventID zero and let outbox.resolveEventID mint the v7; put the
+      derived value on Event.IdempotencyKey, which is the field ADR-0071 gives it.
+    detector: sink_version_contract
+    refs: [ADR-0071, RFC-0032]
+
+  - id: UUID-0002
+    title: A fresh UUID never becomes an outbox idempotency_key
+    owner: platform-eventing
+    scope: source
+    status: active
+    severity: critical
+    stage: enforce
+    waivable: false
+    policy: >-
+      An outbox row's idempotency_key is deterministic. A freshly generated
+      value (uuid.NewV7, uuid.New, uuid.NewRandom, ids.MustUUIDv7), directly or
+      through a helper, MUST NOT be supplied as Event.IdempotencyKey.
+    rationale: >-
+      This is the inverse of UUID-0001 and the more dangerous direction: a fresh
+      idempotency_key is silently accepted by the DDL (no default, NOT NULL,
+      satisfied) and by outboxwritepath's non-null check, while every consumer
+      ledger keyed on it stops deduplicating. The failure is invisible until a
+      redelivery is double-processed.
+    remediation: >-
+      Derive the key with outbox.DeriveIdempotencyKey, or with uuid.NewSHA1 over
+      a namespace and the identifying tuple, and declare it with
+      //uuid:v5 reason=outbox-idempotency-key adr=ADR-0071.
+    detector: sink_version_contract
+    refs: [ADR-0071, RFC-0032]
+
+  - id: UUID-0003
+    title: A function that ignores its inputs is not deterministic
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: critical
+    stage: enforce
+    waivable: false
+    policy: >-
+      A function that declares parameters, references none of them, and returns
+      a freshly generated UUID is a defect regardless of what it is named and
+      regardless of where its result flows.
+    rationale: >-
+      This is the mustUUIDv7 shape that appeared in at least eleven repositories:
+      func mustUUIDv7(_ uuid.UUID, _ []byte) uuid.UUID { return
+      uuid.Must(uuid.NewV7()) }. Every call site read as a derivation and every
+      call returned a different value, so dedup keys, actor references and seeded
+      well-known ids silently stopped being stable. It is not a version-policy
+      question at all - it is a function that cannot do what its signature
+      promises - which is why it is unwaivable and why it is detectable without
+      knowing anything about the sink.
+    remediation: >-
+      Either derive the value from the parameters (uuid.NewSHA1(namespace, data))
+      or delete the parameters and rename the function to say it mints a fresh id.
+    detector: unused_parameter_determinism
+    refs: [ADR-0071]
+
+  - id: UUID-0004
+    title: A name that promises derivation has a derivation behind it
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    stage: enforce
+    waivable: false
+    policy: >-
+      A function whose identifier claims the result is derived (deterministic*,
+      derive*, stable*, canonical*) MUST have at least one return path producing
+      a deterministic UUID.
+    rationale: >-
+      Catches the wrapper form of UUID-0003, where the lie is one hop away from
+      the generator: voice-ai-agent-core-postgres had
+      deterministicCallUUID(callSID) calling the mustUUIDv7 stub, so the
+      parameters were used, the name still promised derivation, and nothing was
+      derived. Requiring only ONE deterministic return path is what keeps the
+      legitimate shape passing - a deriver that falls back to a fresh id on empty
+      input has a deterministic path and is not flagged.
+    remediation: >-
+      Derive on the main path, or rename the function after what it does.
+    detector: determinism_claim
+    refs: [ADR-0071]
+
+  - id: UUID-0005
+    title: A deterministic UUID outside a documented sink carries a declaration
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    stage: warn
+    waivable: true
+    policy: >-
+      Every uuid.NewSHA1 / uuid.NewMD5 call site whose value does not flow into a
+      sink with a documented deterministic requirement MUST carry an adjacent
+      marker naming a sanctioned reason and its ADR:
+      //uuid:v5 reason=<token> adr=ADR-NNNN.
+    rationale: >-
+      This is the "unless a documented reason exists" half of the policy, and the
+      only control that needs a declaration mechanism at all. A call site feeding
+      Event.IdempotencyKey is self-declaring - ADR-0071 already documents that
+      reason - so the marker is required exactly where the ground is NOT already
+      written down. The fleet has 15 such call sites today, which is why a
+      per-site declaration is tractable rather than noise.
+    remediation: >-
+      Add the marker on the line above the constructor with a token from
+      `reasons` in this file, or add a new token here in a reviewed PR.
+    detector: undeclared_deterministic
+    refs: [ADR-0071, RFC-0032]
+
+  - id: UUID-0006
+    title: A declaration marker does not outlive the code it excused
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    stage: enforce
+    waivable: false
+    policy: >-
+      A //uuid:vN marker that no longer sits adjacent to a deterministic
+      constructor is a violation, as is a marker citing a reason token absent
+      from `reasons` in this file.
+    rationale: >-
+      Staleness is the failure mode that kills allowlist mechanisms. Pairing
+      every marker with the call site it covers makes staleness locally decidable
+      at zero cost: when the constructor is deleted or moved, the orphaned excuse
+      fails CI in the same diff instead of silently authorising the next one.
+    remediation: >-
+      Delete the marker, or move it back beside the constructor it describes.
+    detector: orphan_marker
+    refs: [ADR-0071]

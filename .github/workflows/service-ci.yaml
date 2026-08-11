@@ -1023,6 +1023,81 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
 
+  # ── UUID version policy ─────────────────────────────────────────────────────────────────────
+  # Executable form of the "UUIDv7 everywhere, deterministic v3/v5 only where a documented reason
+  # exists" rule in ADR-0071 and outbox-ddl-standard §2.1. Until this job existed the rule had no
+  # gate at all: the DDL's DEFAULT uuidv7() never fires because the shared INSERT names event_id,
+  # outboxverify reads the catalog and never a value, and outboxwritepath samples rows but checks no
+  # version. A caller supplying a v5 event_id passed all three, which is what shipped.
+  #
+  # It runs here rather than in platform-shared-go on purpose. The equivalent runtime guard would be
+  # four lines in outbox.resolveEventID and would be strictly more complete, but it lands in a module
+  # with ~86 consumers and buys nothing for the mustUUIDv7 shape, which never reaches the outbox at
+  # all. This job ships to the whole fleet by moving the v1 tag on this repository, with no Go module
+  # bump anywhere. The runtime guard is still worth doing; it should ride an already-planned
+  # shared-go bump rather than force one.
+  #
+  # No module-read token and no `go mod download`: uuidscan is stdlib-only and parses with
+  # go/parser, so it needs neither the repo's dependencies nor a build that succeeds. That is what
+  # makes it cheap enough to run on every repository.
+  uuid-policy:
+    name: UUID version policy
+    needs: resolve
+    if: needs.resolve.outputs.language == 'go'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Check out the central checker and control catalog
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/ci-workflows
+          ref: v1
+          path: .uuid-tools
+          sparse-checkout: |
+            scripts
+            controls
+            tools
+
+      - name: Install guard dependencies
+        shell: bash
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: UUID version policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Built once, out of tree, with the proxy off: the scanner has no
+          # requires, so a network fetch here could only be a supply-chain
+          # surprise.
+          GOWORK=off GOFLAGS=-mod=mod GOPROXY=off \
+            go build -C .uuid-tools/tools/uuidscan -o "$RUNNER_TEMP/uuidscan" .
+          UUIDSCAN_BIN="$RUNNER_TEMP/uuidscan" \
+            python3 .uuid-tools/scripts/check-uuid-version-policy.py \
+              --repo-root . \
+              --control .uuid-tools/controls/uuid-policy.yaml \
+              --report uuid-policy-report.json
+
+      - name: Upload the finding report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uuid-policy-report
+          path: uuid-policy-report.json
+          if-no-files-found: ignore
+
+      - name: Remove the central checkout
+        if: always()
+        shell: bash
+        run: rm -rf .uuid-tools
+
   # ── generated-code and query drift ──────────────────────────────────────────────────────────
   sqlc:
     name: SQLC drift and raw-SQL guard
