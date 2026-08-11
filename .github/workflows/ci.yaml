@@ -1079,12 +1079,12 @@ jobs:
               exit 1
             fi
           done <<'RULES'
-              rule 1 (one discriminator)|is not a record-kind discriminator
-              rule 2 (reached through a constructor)|event_name is set by hand
-              rule 4 (one access-log implementation)|re-implements the http_request_completed emitter
-              rule 5 (one logger interface)|re-declares the logger interface
-              RULES
-          echo "all three file-reading rules fired as expected (exit $rc)"
+          rule 1 (one discriminator)|is not a record-kind discriminator
+          rule 2 (reached through a constructor)|event_name is set by hand
+          rule 4 (one access-log implementation)|re-implements the http_request_completed emitter
+          rule 5 (one logger interface)|re-declares the logger interface
+          RULES
+          echo "all four file-reading rules fired as expected (exit $rc)"
 
       # The third direction. Distinct exit code, because "could not run" and "ran and found
       # violations" call for different responses and a shared code makes the first look like the
