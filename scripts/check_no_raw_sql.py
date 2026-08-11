@@ -23,6 +23,19 @@ import re
 import sys
 
 SKIP_DIRS = {".git", "vendor", "node_modules"}
+# Every dot-prefixed directory goes too, and it is load-bearing rather than tidiness. service-ci
+# checks ci-workflows out INTO the repository under test (`.central` for this very script, and
+# `.uuid-tools` / `.gateway-tools` / `.archcheck` for its siblings), so an os.walk of the caller's
+# tree also walks the checker's own tree — including scripts/testdata/raw-sql/, which exists to
+# contain exactly what this guard rejects. Nothing fires today only because that checkout is sparse
+# to `scripts` AND the raw-SQL fixtures happen to sit under a `testdata` segment this guard already
+# exempts; both are accidents, not decisions. Excluding dot-directories cannot weaken the control:
+# the Go toolchain itself ignores them, so Go source under one is never part of the module being
+# built and cannot be the data access this guard governs.
+
+
+def is_tooling_dir(name: str) -> bool:
+    return name.startswith(".")
 GENERATED_DIR_SEGMENTS = {"sqlc", "rootsqlc"}
 EXCEPTION_PATH_SEGMENTS = ("seed", "migrations", "schema", "testdata")
 
@@ -109,7 +122,8 @@ def main() -> int:
     violations: list[str] = []
 
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        dirnames[:] = [d for d in dirnames
+                       if d not in SKIP_DIRS and not is_tooling_dir(d)]
         for fn in filenames:
             if not fn.endswith(".go") or fn.endswith("_test.go"):
                 continue

@@ -1025,7 +1025,13 @@ def doc_root_naming(repo: "DocsRepo") -> "Finding":
                        "(a typo here governs nothing and reports nothing)")
     for name, plural in SINGULAR_FOLDER_FIXES.items():
         for found in sorted(repo.root.rglob(name)):
-            if not found.is_dir() or ".git" in found.parts:
+            # Dot-prefixed components are skipped for the same reason the document scans above skip
+            # them: docs-governance.yaml checks this repository out into the caller at
+            # .docs-governance-tools/, so a folder of ours would otherwise be reported as the
+            # caller's misnamed doc root — and since the scans ignore dot-directories, no document
+            # inside one is governed anyway, which makes naming it a finding with no remedy.
+            if not found.is_dir() or any(p.startswith(".") for p in
+                                         found.relative_to(repo.root).parts):
                 continue
             details.append(f"{found.relative_to(repo.root)}/: document folders are plural - "
                            f"rename to '{plural}'")

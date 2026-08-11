@@ -12,12 +12,13 @@
     }
   ],
   "dictionaries": ["platform", "en_US", "softwareTerms", "typescript", "go", "sql", "bash", "companies", "filetypes"],
-  "//ignorePaths": "Generated artifacts and vendored trees are not authored prose. `.core-docs` is a vendored copy of another namespace and is spellchecked in its own repository, not twice.",
+  "//ignorePaths": "Generated artifacts and vendored trees are not authored prose. `.core-docs` is a vendored copy of another namespace and is spellchecked in its own repository, not twice. `.docs-governance-tools` is ci-workflows itself, checked out INTO the caller to supply this policy: its README and fixtures are ours, so spellchecking them reports findings against a tree the caller cannot edit.",
   "ignorePaths": [
     "**/node_modules/**",
     "**/.git/**",
     "**/generated/**",
     "**/.core-docs/**",
+    "**/.docs-governance-tools/**",
     "**/*.generated.*",
     "**/CHANGELOG.md"
   ],
