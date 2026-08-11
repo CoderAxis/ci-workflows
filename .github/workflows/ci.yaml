@@ -51,6 +51,57 @@ jobs:
   #   check-delivery-model.py                           -> delivery-model job
   #   check-workflow-centralization.py                  -> workflow-centralization job
   # This job covers the rest, and new central checkers should arrive with a self-test here.
+  central-scripts-uuid-policy:
+    name: Central scripts - UUID version policy precision and recall
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Install guard dependencies
+        run: python3 -m pip install --upgrade PyYAML
+
+      # Recall is pinned by control id AND line on both defects that actually shipped: the UUIDv5
+      # supplied as an outbox event_id, and the mustUUIDv7 stub that ignored its arguments. Precision
+      # is pinned harder: the conformant fixture must produce ZERO findings, because it is a
+      # catalogue of the places a non-v7 UUID is legitimately fine (the ADR-0035 Idempotency-Key
+      # header, ids the standard declines to version, vendor ids, seeded constants, a deriver with a
+      # fresh fallback, a declared exception, a test file). A gate that cries wolf gets switched off.
+      - name: Fixtures pin both detection and the false-positive rate
+        run: python3 scripts/test_uuid_version_policy.py
+
+      # A checker that stops matching must not read as a pass. The violating fixture is known dirty,
+      # so a zero exit here means the detector broke, and the specific control ids prove it is still
+      # the RIGHT detector rather than something else failing the tree.
+      - name: Mutation test - the checker still fails a dirty tree
+        run: |
+          set -euo pipefail
+          GOWORK=off GOPROXY=off go build -C tools/uuidscan -o "$RUNNER_TEMP/uuidscan" .
+          set +e
+          out=$(UUIDSCAN_BIN="$RUNNER_TEMP/uuidscan" python3 scripts/check-uuid-version-policy.py \
+            --repo-root fixtures/uuid-policy-violating 2>&1)
+          code=$?
+          set -e
+          printf '%s\n' "$out"
+          if [[ $code -eq 0 ]]; then
+            echo "::error::the uuid-policy checker passed a fixture that is known to violate"
+            exit 1
+          fi
+          for id in UUID-0001 UUID-0002 UUID-0003 UUID-0004 UUID-0006; do
+            grep -q "\[$id\]" <<<"$out" || {
+              echo "::error::$id no longer fires on the violating fixture"; exit 1; }
+          done
+
   central-scripts-raw-sql:
     name: Central scripts - raw-SQL guard precision and recall
     runs-on: ubuntu-latest
