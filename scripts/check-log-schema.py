@@ -171,6 +171,35 @@ def compare_redaction(control: dict, go: dict) -> list[str]:
     never_mask = set(redaction.get("never_mask") or [])
     for name in sorted(never_mask & set(go_mask)):
         problems.append(f"redaction: '{name}' is in never_mask but the Go logger masks it")
+
+    # The suffix rule protects more keys than the exact list does, so a control file that
+    # described only the exact list would understate the coverage the evidence pack claims -
+    # and the two could then drift apart silently, which is the whole reason this file exists.
+    control_suffix = sorted({s for ss in (redaction.get("mask_suffix") or {}).values()
+                             for s in (ss or [])})
+    go_suffix = sorted(go.get("mask_suffixes") or [])
+    for name in sorted(set(control_suffix) - set(go_suffix)):
+        problems.append(f"redaction: suffix '{name}' is mask-class in {CONTROL_PATH} but the Go "
+                        f"logger does not match it, so those keys are emitted verbatim")
+    for name in sorted(set(go_suffix) - set(control_suffix)):
+        problems.append(f"redaction: the Go logger masks by suffix '{name}' but {CONTROL_PATH} "
+                        f"does not declare it; the control file is what the compliance evidence "
+                        f"pack reads")
+
+    control_exempt = sorted(redaction.get("never_mask_suffix") or [])
+    go_exempt = sorted(go.get("never_mask_suffix") or [])
+    for name in sorted(set(control_exempt) ^ set(go_exempt)):
+        problems.append(f"redaction: suffix exemption '{name}' is declared in one of "
+                        f"{CONTROL_PATH} and the Go logger but not the other; an exemption that "
+                        f"exists in only one place is a key masked in prod and not in the audit, "
+                        f"or the reverse")
+
+    # An exemption that matches no suffix protects nothing and is a comment pretending to be a
+    # rule -- most likely a key that was renamed after the exemption was written for it.
+    for name in go_exempt:
+        if not any(name.endswith(s) for s in go_suffix):
+            problems.append(f"redaction: '{name}' is in never_mask_suffix but ends in no masked "
+                            f"suffix, so it exempts nothing")
     return problems
 
 
