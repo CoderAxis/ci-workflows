@@ -607,6 +607,45 @@ _Generated from `controls/ci-identity.yaml` by `scripts/check-ci-identity.py --w
 
 <!-- END ci-identity-controls -->
 
+## Run triage (`controls/run-triage.yaml`)
+
+Tells a job GitHub **refused to start** apart from a gate that ran and failed.
+
+On 2026-08-11 the organisation's Actions budget was reached with `prevent_further_usage: true`, and
+between 07:33:15Z and 08:01:11Z GitHub declined to dispatch 121 jobs across 24 repositories. Eight
+port-drift pull requests opened inside that window each reported the same failing step — `Resolve
+service identity` — and each went green on rerun. Eight identical failures is a strong argument for a
+defect in the resolver, and it was read as one for most of a day.
+
+It was not. `resolve` is the root of `service-ci.yaml`'s job graph, so on a freshly triggered run it is
+the only job that even attempts to start; everything else is then marked `skipped` for a "failed"
+dependency. The refused job is whichever job tried to start inside the window, and nothing about it is
+specific to identity resolution — in the same incident, `inboxxhq-voice-ai-agent-service` run
+`31469306219` resolved identity successfully and then had `Build and test (go)` and `Integration
+tests` refused eleven seconds later.
+
+A refusal is distinguishable from a verdict, but only in one field. It has `conclusion: failure` like
+any other failure, no log blob at all (`/logs` returns 404 `BlobNotFound`), an annotation attached to
+`.github` rather than to a source file — and an **empty `steps` array**, which is written by the runner
+and therefore cannot be non-empty unless the runner ran. That is the discriminator, and it is the one
+signal a misleading annotation cannot forge.
+
+```bash
+# From a live run — the attempt matters, because a rerun replaces the job list on the run itself.
+./scripts/classify-run-failure.py --repo OWNER/REPO --run 31471327806 --attempt 1
+./scripts/classify-run-failure.py --bundle captured.json --format json
+```
+
+Exit codes are the interface: `0` means believe the red X, `75` means the attempt carries no verdict
+about the commit. One genuine failure outranks any number of refusals, because a rerun will not clear
+it.
+
+**There is deliberately no retry here, and none is possible.** A refusal happens before a runner claims
+the job, so `continue-on-error`, step-level retries and in-workflow loops are all unreachable — there is
+no step in which to run. `Notify on failure` is refused by the same budget, so the Slack alert does not
+fire either. Nothing that can be added to `service-ci.yaml` prevents this class of failure; only the
+budget does. These controls make it legible, and they never excuse a job that actually ran.
+
 ## Versioning
 
 - Consumers pin the **major** tag `@v1`, which is a moving tag updated to the latest `v1.x.y`.
