@@ -110,8 +110,18 @@ runs:
           exit 0
         fi
 
-        python3 <<'PY'
+        # See ci-app-token/action.yaml for why this reaches one level above its own directory:
+        # http_retry.py is a helper shared by both actions, and the full repository - not just
+        # this action's own subdirectory - is what GitHub downloads to resolve a composite
+        # action reference, so the sibling scripts/lib tree is already on disk.
+        REPO_ROOT="$(dirname "${GITHUB_ACTION_PATH}")"
+
+        python3 - "$REPO_ROOT" <<'PY'
         import json, os, subprocess, sys, urllib.error, urllib.request
+
+        repo_root = sys.argv[1]
+        sys.path.insert(0, os.path.join(repo_root, "scripts", "lib"))
+        import http_retry
 
         ROLE = "arn:aws:iam::063088900996:role/inboxxhq-ci-slack-notify"
         SECRET = "inboxxhq/ci/slack/bot-token"
@@ -126,7 +136,16 @@ runs:
         def skip(msg):
             # A warning, never an error. But never silence either: the whole point
             # of centralising this was that the old guard failed without saying so.
+            #
+            # Exits here rather than only printing: every call site below is followed by code
+            # that assumes the PRECEDING step succeeded (an id_token to hand to AWS, credentials
+            # to read the bot token, a token to post with). Without this exit, a step that had
+            # nothing to do with a slow network - a malformed `fields` input, an unauthorised
+            # role - fell through into that assumption, hit a bare NameError or KeyError on the
+            # first undefined name, and failed the job anyway: the exact false alarm this
+            # function exists to prevent, just one line further down.
             print(f"::warning::Slack notification not sent: {msg}")
+            sys.exit(0)
 
         def run_aws(argv, *, env=None):
             """Never let a slow AWS response turn a notification into a red job.
@@ -171,11 +190,26 @@ runs:
         fields.append({"title": "Run", "value": run_url, "short": False})
 
         # 1. Prove identity to AWS. Unauthenticated call: the OIDC token is the proof.
+        #
+        # A missing request token is a caller configuration error - the job forgot
+        # `permissions: id-token: write` - not a network blip. Checked up front rather than
+        # left to surface as a bare KeyError, and reported without spending any of the retry
+        # budget on a call that will never answer usefully.
+        oidc_token_env = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+        if not oidc_token_env:
+            skip("no ACTIONS_ID_TOKEN_REQUEST_TOKEN. The calling job needs "
+                 "'permissions: id-token: write'.")
         oidc_url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=sts.amazonaws.com"
-        req = urllib.request.Request(oidc_url)
-        req.add_header("Authorization", f"bearer {os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']}")
+
+        def make_oidc_request():
+            req = urllib.request.Request(oidc_url)
+            req.add_header("Authorization", f"bearer {oidc_token_env}")
+            return req
+
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with http_retry.request(make_oidc_request,
+                                    description="fetching the GitHub OIDC token",
+                                    endpoint="token.actions.githubusercontent.com") as r:
                 id_token = json.load(r)["value"]
         except Exception as e:
             skip(f"could not obtain an OIDC token ({e})")
@@ -228,12 +262,16 @@ runs:
                 "fields": fields,
             }],
         }
-        req = urllib.request.Request("https://slack.com/api/chat.postMessage",
-                                     data=json.dumps(body).encode(), method="POST")
-        req.add_header("Authorization", f"Bearer {token}")
-        req.add_header("Content-Type", "application/json; charset=utf-8")
+        def make_slack_request():
+            req = urllib.request.Request("https://slack.com/api/chat.postMessage",
+                                         data=json.dumps(body).encode(), method="POST")
+            req.add_header("Authorization", f"Bearer {token}")
+            req.add_header("Content-Type", "application/json; charset=utf-8")
+            return req
+
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with http_retry.request(make_slack_request, description="posting to Slack",
+                                    endpoint="slack.com/api/chat.postMessage") as r:
                 resp = json.load(r)
         except Exception as e:
             skip(f"Slack API call failed ({e})")
