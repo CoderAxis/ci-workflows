@@ -41,6 +41,37 @@
 # job was denied, EVERY request from that file was refused, so the negative job passed for the wrong
 # reason and would have kept passing even if the publish allowlist had been wrongly widened. A
 # negative assertion is only worth what the corresponding positive one proves.
+#
+# THE POSITIVE CASE IS ALSO EVENT-SHAPED, AND DELIBERATELY SO. `job_workflow_ref` matching is only
+# half of what the read role's trust policy checks; the other half is `sub`, which names WHICH
+# REPOSITORY AND EVENT drove the run, not what code ran. inboxxhq-infra's `ci_caller_subs` (see
+# environments/management/ci-identity/ci-app-token.tf) admits exactly three `sub` shapes per caller
+# owner: `repo:<owner>/*:ref:refs/heads/main`, `repo:<owner>/*:pull_request`, and
+# `repo:<owner>/*:ref:refs/tags/*`. A push to a feature branch mints
+# `repo:CoderAxis/ci-workflows:ref:refs/heads/<branch>`, which matches none of the three - so
+# `admits-central` gets a real `AccessDenied` on `sts:AssumeRoleWithWebIdentity` there (confirmed from
+# a real run's logs: real steps executed, a genuine STS error, not a billing refusal), while the
+# identical commit's `pull_request` run mints `repo:CoderAxis/ci-workflows:pull_request` and passes.
+# Push to `main`, and a tag push, both match and both pass too - it is specifically the feature-branch
+# push shape that has no admitted `sub`, which is why this was dismissed three times as "pre-existing"
+# without anyone finding a code bug: there wasn't one.
+#
+# That gap is intentional scope, not an oversight worth widening. `ci_caller_subs` is deliberately
+# enumerated rather than wildcarded ("Listing them keeps the policy from being 'scoped to all', which
+# AWS rejects outright") - minting the module-reader App key is restricted to reviewed states
+# (a merged-to-main commit, a reviewable pull request, a released tag) and withheld from an arbitrary
+# push to an arbitrary branch, which is a strictly larger set of actors (anyone who can push a branch,
+# not just anyone who can land on main or open a PR). Widening the AWS trust policy to admit
+# `refs/heads/*` would erase that distinction fleet-wide - it is not a change scoped to this guard,
+# since the same role is what every consumer's CI mints from - and this repository does not own that
+# policy or touch it for this fix.
+#
+# So `admits-central` is gated below to the three event shapes the trust policy actually admits. It is
+# not testing "does the broker work on this branch" (it never was designed to); it is testing "does the
+# broker work from a caller shape the policy is supposed to admit", which a feature-branch push is not.
+# `refuses-unlisted-workflow` carries no such gate: its denial comes from `job_workflow_ref` alone
+# (this workflow is never on the publish allowlist), which every `StringEquals`/`StringLike` condition
+# pair enforces regardless of `sub`, so it is a real, event-independent assertion on every run already.
 name: App token self-check
 
 on:
@@ -54,6 +85,19 @@ jobs:
   admits-central:
     name: App token - admits a job defined in a central workflow
     runs-on: ubuntu-latest
+    # Skip (not fail) on a caller shape the read role's trust policy was never asked to admit. See
+    # the file-level comment above for the exact `sub` patterns this mirrors
+    # (`ci_caller_subs` in inboxxhq-infra): a `pull_request` run, a push that lands on `main`, and a
+    # tag push all mint an admitted `sub`, so this job runs and asserts for real on each. Anything
+    # else - chiefly a push to a feature branch, but also e.g. a `workflow_dispatch` off one - mints
+    # a `sub` the policy was deliberately never given, so running the assertion there would report a
+    # red X for a broker that is working exactly as scoped. Kept in sync by
+    # scripts/test_app_token_gate.py, which ci.yaml's `app-token-gate` job runs: it evaluates this
+    # exact string, extracted from this file rather than hand-copied, against those cases.
+    if: |
+      github.event_name == 'pull_request' ||
+      github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: read
       # The broker mints from an AWS role via OIDC; without this the composite action exits with

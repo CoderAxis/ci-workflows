@@ -138,6 +138,57 @@ jobs:
       id-token: write
     uses: coderaxis/ci-workflows/.github/workflows/app-token-selftest.yaml@v1
 
+  # ── the app-token self-check's own event gate ───────────────────────────────────────────────
+  # `admits-central` in the workflow above only asserts on caller shapes AWS is prepared to admit,
+  # and it decides that with an `if:` expression. That expression is the one place the broker's
+  # positive assertion can be switched off without anything going red, because a skipped job
+  # reports exactly like a passing one: narrow it - drop the `pull_request` arm, or write
+  # `github.ref == 'refs/tags/'` where a prefix test was meant - and the guard silently stops
+  # running on the shapes it exists to cover. Widen or delete it and the feature-branch
+  # `AccessDenied` comes back, which is the failure that was dismissed as "pre-existing" three
+  # times before anyone traced it to `ci_caller_subs` being correctly scoped rather than to a bug.
+  #
+  # The test READS the gate out of app-token-selftest.yaml and EVALUATES it, and both halves are
+  # load-bearing. A hand-copied expression would assert about the copy and drift from the file
+  # GitHub actually reads the first time somebody edited one of them - while still passing, which
+  # is the worst available outcome for a guard whose subject is a silent skip. And a substring
+  # check for `refs/tags/` would pass against `github.ref == 'refs/tags/'`, against arms joined
+  # with `&&`, and against the whole condition negated; only running it tells those apart.
+  #
+  # A SEPARATE JOB rather than a step, for the reason given at the top of this file: each guard
+  # here is an independent verdict, and folding this into another one would mean a red run no
+  # longer says which of the two stopped holding. `ci-app-token` above is the natural neighbour
+  # and cannot host it in any case - a `uses:` job has no steps of its own.
+  #
+  # It is deliberately CREDENTIAL-FREE. This is a static test of an expression, so it gets no
+  # `id-token: write` and inherits only the workflow-level `contents: read`; a check on the gate
+  # that guards the broker has no business being able to reach the broker.
+  #
+  # WHAT IT CANNOT SEE, because the comment it makes true must not overclaim: `ci_caller_subs`
+  # lives in inboxxhq-infra (environments/management/ci-identity/ci-app-token.tf) and nothing in
+  # this repository reads it. This job proves the gate admits and skips the `sub` shapes it was
+  # WRITTEN for; it cannot prove those are still the shapes AWS admits. If that policy is widened
+  # or narrowed, this stays green while the gate drifts out of step with it, so realigning the two
+  # remains a human obligation on any change to that file.
+  app-token-gate:
+    name: App token gate - the event gate matches the admitted sub shapes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: The gate admits and skips exactly the caller shapes it is meant to
+        run: python3 scripts/test_app_token_gate.py
+
   # ── delivery model (was delivery-model-guard.yaml) ──────────────────────────────────────────
   # Executable governance for the canonical reusable deploy workflow.
   #
