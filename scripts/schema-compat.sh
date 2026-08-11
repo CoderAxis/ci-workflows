@@ -125,10 +125,16 @@ run_migrate() {
 
 static_lint() {
   local found=0 f
+  # The second walk of the caller's tree in this script, and it carries the same exposure as
+  # check_schema_layout: our own checkout at .coderaxis-ci/ is not the caller's migration chain.
+  # Nothing matched it today only because the .sql we ship sits at scripts/, outside */migrations/*
+  # and */schema/*; a harness file that ever landed under either would be judged as the caller's
+  # migration, and "found" alone would suppress the no-migrations notice for a repo with no DDL.
   while IFS= read -r -d '' f; do
     found=1
     [[ -s "${f}" ]] || { echo "::error file=${f}::migration SQL file is empty"; exit 1; }
-  done < <(find . -type f -name '*.sql' \( -path '*/migrations/*' -o -path '*/schema/*' \) -print0)
+  done < <(find . -type f -name '*.sql' \( -path '*/migrations/*' -o -path '*/schema/*' \) \
+    -not -path './.coderaxis-ci/*' -print0)
   [[ "${found}" -eq 1 ]] || log "no migrations found; schema compatibility not required for this repo"
 }
 
