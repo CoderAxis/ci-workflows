@@ -125,10 +125,20 @@ runs:
         cleanup() { find "${WORK}" -type f -exec shred -u {} + 2>/dev/null || true; rm -rf "${WORK}"; }
         trap cleanup EXIT
 
-        python3 - "$WORK" "$ROLE" "$SECRET" <<'PY'
+        # Repo root, not the action's own directory: http_retry.py is a shared helper used by
+        # both ci-app-token and ci-slack-notify, and github.action_path points one level too
+        # deep for either to reach it. Full-repository access via action_path (not just this
+        # action's own subdirectory) is documented GitHub Actions behaviour: the runner
+        # downloads the whole repository to resolve a composite action, not a sparse checkout
+        # of the referenced subdirectory alone.
+        REPO_ROOT="$(dirname "${GITHUB_ACTION_PATH}")"
+
+        python3 - "$WORK" "$ROLE" "$SECRET" "$REPO_ROOT" <<'PY'
         import base64, json, os, subprocess, sys, time, urllib.error, urllib.request
 
-        work, role, secret_id = sys.argv[1], sys.argv[2], sys.argv[3]
+        work, role, secret_id, repo_root = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+        sys.path.insert(0, os.path.join(repo_root, "scripts", "lib"))
+        import http_retry
 
         def fail(msg):
             print(f"::error::{msg}")
@@ -173,29 +183,59 @@ runs:
             fail(f"{what} did not complete after {attempts} attempts: {last}")
 
         def api(url, *, token=None, method="GET", body=None, bearer=False):
-            req = urllib.request.Request(url, method=method)
-            req.add_header("Accept", "application/vnd.github+json")
-            req.add_header("X-GitHub-Api-Version", "2022-11-28")
-            if token:
-                req.add_header("Authorization", f"{'Bearer' if bearer else 'token'} {token}")
             data = json.dumps(body).encode() if body is not None else None
-            if data:
-                req.add_header("Content-Type", "application/json")
+
+            def make_request():
+                req = urllib.request.Request(url, data=data, method=method)
+                req.add_header("Accept", "application/vnd.github+json")
+                req.add_header("X-GitHub-Api-Version", "2022-11-28")
+                if token:
+                    req.add_header("Authorization", f"{'Bearer' if bearer else 'token'} {token}")
+                if data:
+                    req.add_header("Content-Type", "application/json")
+                return req
+
             try:
-                with urllib.request.urlopen(req, data, timeout=30) as r:
+                with http_retry.request(make_request, description=f"{method} {url}",
+                                        endpoint=url) as r:
                     return json.load(r)
             except urllib.error.HTTPError as e:
+                # Reached only for a non-retryable status (4xx, per http_retry.is_retryable): a
+                # decisive answer from GitHub, not a network blip, so it fails on the first try.
                 fail(f"{method} {url} -> {e.code} {e.read()[:200].decode(errors='replace')}")
+            except http_retry.RetryExhausted as e:
+                fail(str(e))
 
         # 1. Ask GitHub who this job is. The claims are minted by GitHub, so the
         #    repository cannot alter them by editing a workflow.
+        #
+        # A missing or empty request token is a caller configuration error - the job forgot
+        # `permissions: id-token: write` - not a network blip, so it is checked and reported
+        # before the retrying request ever runs, rather than surfacing as a generic failure
+        # after burning the whole retry budget on a URL that will never answer usefully.
+        oidc_token_env = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+        if not oidc_token_env:
+            fail("no ACTIONS_ID_TOKEN_REQUEST_TOKEN. The calling job needs "
+                 "'permissions: id-token: write'.")
         oidc_url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=sts.amazonaws.com"
-        req = urllib.request.Request(oidc_url)
-        req.add_header("Authorization", f"bearer {os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']}")
+
+        def make_oidc_request():
+            req = urllib.request.Request(oidc_url)
+            req.add_header("Authorization", f"bearer {oidc_token_env}")
+            return req
+
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with http_retry.request(make_oidc_request,
+                                    description="fetching the GitHub OIDC token",
+                                    endpoint="token.actions.githubusercontent.com") as r:
                 id_token = json.load(r)["value"]
-        except Exception as e:
+        except urllib.error.HTTPError as e:
+            # Reached only for a non-retryable status: 401/403 means this job's identity is not
+            # trusted to mint an OIDC token at all, and 400 means the request itself (e.g. the
+            # audience) is malformed. Neither is fixed by asking again.
+            fail(f"could not obtain an OIDC token: GitHub's OIDC issuer returned "
+                 f"{e.code} {e.read()[:200].decode(errors='replace')}")
+        except http_retry.RetryExhausted as e:
             fail(f"could not obtain an OIDC token: {e}")
 
         # 2. Exchange it for AWS credentials. A deny here means the trust policy
