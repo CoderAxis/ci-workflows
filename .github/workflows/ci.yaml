@@ -1105,6 +1105,217 @@ jobs:
             exit 1
           fi
 
+  # ── run triage (a refused job against a gate verdict) ────────────────────────────────────────
+  # Asserts that the one signal distinguishing "GitHub would not start this job" from "this gate
+  # ran and failed" still works, because for 28 minutes on 2026-08-11 nothing did.
+  #
+  # The organisation's Actions budget was reached with `prevent_further_usage: true`, and GitHub
+  # refused 121 jobs across 24 repositories between 07:33:15Z and 08:01:11Z. Eight port-drift pull
+  # requests opened inside that window each reported `Resolve service identity` as the failing
+  # step and each passed on rerun. That is not flakiness and it is not a resolver defect: the
+  # resolve job is the root of service-ci.yaml's graph, so on a fresh run it is the only job that
+  # attempts to start, and every other job is then marked `skipped` for a "failed" dependency.
+  # Eight identical failures therefore argued for a code bug while being evidence of a hard stop.
+  #
+  # There is deliberately no retry anywhere in this change. A refusal happens before a runner
+  # claims the job, so no step-level retry, `continue-on-error` or in-workflow loop can reach it -
+  # and `Notify on failure` is refused by the same budget, so the alert does not fire either.
+  # Nothing addable to service-ci.yaml prevents this; only the budget does. What this job protects
+  # is the ability to TELL, so the next window is not spent looking for a race that is not there.
+  #
+  # Both fixtures are captured verbatim from the incident rather than written by hand, because the
+  # discriminator is a field GitHub populates and a synthetic fixture would only assert this
+  # repository's belief about its shape.
+  run-triage:
+    name: Run triage - refusal against gate verdict self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out ci-workflows
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      # The positive half, and the one that would have saved the eight misdiagnoses: the real
+      # refused attempt must be reported as carrying no verdict, with the distinct exit code.
+      - name: A refused attempt must be classified as carrying no verdict
+        run: |
+          set -euo pipefail
+          set +e
+          out="$(python3 scripts/classify-run-failure.py \
+            --bundle fixtures/run-triage-refused/bundle.json \
+            --controls controls/run-triage.yaml 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 75 ]; then
+            echo "::error::the refused attempt exited $rc, expected 75. A job GitHub never"
+            echo "::error::dispatched must not share an exit code with a gate that ran and failed:"
+            echo "::error::the first calls for a billing fix, the second for a code fix."
+            exit 1
+          fi
+          # Asserted per control rather than as "it exited 75", because the resolve job is the one
+          # the incident misattributed and the notify job is the reason nobody was told.
+          for job in "Resolve service identity" "Notify on failure"; do
+            if ! echo "$out" | grep -qF "[refused] RT-0001 ci / $job"; then
+              echo "::error::RT-0001 did not fire on '$job'; the billing signature is not matching"
+              exit 1
+            fi
+          done
+          if echo "$out" | grep -q "::error::"; then
+            echo "::error::a refused attempt reported a gate error; refusals carry no verdict"
+            exit 1
+          fi
+
+      # The negative half, and the one that keeps the triage from becoming a laundering route: a
+      # job the runner actually ran must stay a failure no matter what its annotation says. The
+      # fixture's failing job carries an `exit code 1` annotation AND a Node deprecation warning,
+      # so this is a real red run rather than a synthetic one.
+      - name: Mutation test - a gate that ran must never be excused
+        run: |
+          set -euo pipefail
+          out="$(python3 scripts/classify-run-failure.py \
+            --bundle fixtures/run-triage-genuine/bundle.json \
+            --controls controls/run-triage.yaml 2>&1)"
+          echo "$out"
+          if ! echo "$out" | grep -qF "::error::[RT-0003] ci / Repository structure"; then
+            echo "::error::RT-0003 did not fire on a job that ran 20 steps and failed. The step"
+            echo "::error::array is the only evidence a misleading annotation cannot forge, so if"
+            echo "::error::this stops matching, every real violation becomes excusable as billing."
+            exit 1
+          fi
+          if echo "$out" | grep -q "\[refused\]"; then
+            echo "::error::a job that ran steps was classified as refused"
+            exit 1
+          fi
+          # The verdict must also COUNT the steps it saw. Classifying correctly while reporting
+          # "ran 0 steps" for a 20-step job is a reader-facing lie in the one line a reader uses to
+          # decide whether to rerun or read logs, and it is reachable by a fallthrough that keeps
+          # the classification right and the evidence wrong.
+          if ! echo "$out" | grep -qF "ran 20 step(s)"; then
+            echo "::error::RT-0003 fired but did not report the real step count. The evidence line"
+            echo "::error::is the whole product here; a correct verdict with invented evidence"
+            echo "::error::sends the reader looking in the wrong place."
+            exit 1
+          fi
+
+      # The fail-closed direction, which no captured fixture exercises because both of them are
+      # recognised. GitHub has reworded these annotations before, and the moment it does the
+      # refusal arrives in a shape this catalog does not know. Whichever way that unknown is
+      # resolved becomes the default for a message nobody has read yet, so it must resolve towards
+      # "believe the red X": a wrong "needs fixing" costs an investigation, a wrong "infrastructure,
+      # just rerun" costs a merged violation.
+      - name: Mutation test - an unrecognised refusal shape must not be excused
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib
+          refused = json.loads(
+              pathlib.Path("fixtures/run-triage-refused/bundle.json").read_text())
+          for anns in refused["annotations"].values():
+              for a in anns:
+                  a["message"] = "The job was not started for a reason GitHub has not used before."
+          pathlib.Path("/tmp/unknown-bundle.json").write_text(json.dumps(refused))
+          PY
+          set +e
+          out="$(python3 scripts/classify-run-failure.py --bundle /tmp/unknown-bundle.json \
+            --controls controls/run-triage.yaml 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 0 ] || echo "$out" | grep -q "\[refused\]"; then
+            echo "::error::a zero-step job with an annotation this catalog does not recognise was"
+            echo "::error::excused as a refusal. Then any reworded message becomes an automatic"
+            echo "::error::'just rerun it', which is how a real failure gets merged. Unknown shapes"
+            echo "::error::must fall through to RT-0003 and be reported as needing a human."
+            exit 1
+          fi
+          if ! echo "$out" | grep -qF "::error::[RT-0003]"; then
+            echo "::error::the unrecognised shape produced no gate error at all, so it would read"
+            echo "::error::as a clean run rather than as something nobody has classified yet"
+            exit 1
+          fi
+
+      # The step array is what makes RT-0003 true, and the fixtures alone do not pin it: the
+      # genuine fixture's annotations contain no billing wording, so deleting the step check from
+      # RT-0001 leaves both fixtures classified exactly as before. Mutation testing found that
+      # while this job was being written. The hole is not hypothetical - a failing test in
+      # inboxxhq-billing-service or inboxxhq-payment-service puts those words in an annotation on
+      # a job that really ran - so the guard is asserted directly, against a job carrying twenty
+      # steps AND the verbatim refusal text.
+      - name: Mutation test - billing wording must not excuse a job that ran steps
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib
+          genuine = json.loads(
+              pathlib.Path("fixtures/run-triage-genuine/bundle.json").read_text())
+          refused = json.loads(
+              pathlib.Path("fixtures/run-triage-refused/bundle.json").read_text())
+          billing = next(a for anns in refused["annotations"].values() for a in anns)
+          ran = next(j for j in genuine["jobs"] if j["conclusion"] == "failure" and j["steps"])
+          # The same job, still red, still 20 steps, now wearing the refusal's annotation.
+          genuine["annotations"][str(ran["id"])] = [billing]
+          pathlib.Path("/tmp/disguised-bundle.json").write_text(json.dumps(genuine))
+          PY
+          out="$(python3 scripts/classify-run-failure.py --bundle /tmp/disguised-bundle.json \
+            --controls controls/run-triage.yaml 2>&1)"
+          echo "$out"
+          if echo "$out" | grep -q "\[refused\]"; then
+            echo "::error::a job that ran 20 steps was excused as a refusal because its annotation"
+            echo "::error::carried billing wording. The step array is the only evidence the runner"
+            echo "::error::writes and an annotation cannot forge; if RT-0001 stops consulting it,"
+            echo "::error::any red job can be relabelled infrastructure by its own output."
+            exit 1
+          fi
+          if ! echo "$out" | grep -qF "::error::[RT-0003] ci / Repository structure"; then
+            echo "::error::RT-0003 did not fire on the disguised job"
+            exit 1
+          fi
+
+      # The third direction, which neither fixture alone covers and which the incident actually
+      # produced: run 31469306219 resolved identity, failed Go formatting for real, and had ten
+      # further jobs refused. A triage tool that reports "no verdict" there would tell someone to
+      # rerun a run whose formatting failure no rerun can clear.
+      - name: Mutation test - a mixed attempt must not be excused as a refusal
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib
+          bundle = json.loads(
+              pathlib.Path("fixtures/run-triage-refused/bundle.json").read_text())
+          genuine = json.loads(
+              pathlib.Path("fixtures/run-triage-genuine/bundle.json").read_text())
+          ran = next(j for j in genuine["jobs"]
+                     if j["conclusion"] == "failure" and j["steps"])
+          bundle["jobs"].append(ran)
+          bundle["annotations"][str(ran["id"])] = genuine["annotations"][str(ran["id"])]
+          pathlib.Path("/tmp/mixed-bundle.json").write_text(json.dumps(bundle))
+          PY
+          set +e
+          out="$(python3 scripts/classify-run-failure.py --bundle /tmp/mixed-bundle.json \
+            --controls controls/run-triage.yaml 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::a mixed attempt exited $rc, expected 0. One genuine failure outranks"
+            echo "::error::any number of refusals: there is something to fix, so the caller must"
+            echo "::error::not be told the run carried no verdict."
+            exit 1
+          fi
+          if ! echo "$out" | grep -q "::warning::mixed attempt"; then
+            echo "::error::a mixed attempt was not reported as mixed, so the refused jobs would"
+            echo "::error::read as gate verdicts and the genuine one as something a rerun clears"
+            exit 1
+          fi
+
   # ── release drift (the major tag against main) ───────────────────────────────────────────────
   # Consumers pin `@v1`, a MOVING major tag. So the fleet does not run what main says; it runs
   # whatever v1 last pointed at, and the two are only equal because somebody moved the tag.

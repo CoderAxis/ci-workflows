@@ -1,0 +1,1383 @@
+{
+  "_provenance": "Captured verbatim from InboxxHQ-CoderAxis/inboxxhq-configuration-service run 31471377341 attempt 2, which failed check-log-record-kinds on a real source violation. Present so a genuine red X can never be classified as a refusal.",
+  "jobs": [
+    {
+      "id": 93718737920,
+      "name": "ci / Resolve service identity",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:17:08Z",
+      "completed_at": "2026-08-11T08:17:16Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718737920",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Derive identity from the immutable repository id",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Post Derive identity from the immutable repository id",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817115,
+      "name": "ci / Repository structure",
+      "status": "completed",
+      "conclusion": "failure",
+      "started_at": "2026-08-11T08:17:31Z",
+      "completed_at": "2026-08-11T08:18:06Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817115",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Run actions/setup-go@v5",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Required files, directories and Make targets",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Go formatting",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Mint checker-read token",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Check out the architecture checker",
+          "conclusion": "success"
+        },
+        {
+          "number": 8,
+          "name": "Architecture conformance",
+          "conclusion": "success"
+        },
+        {
+          "number": 9,
+          "name": "Remove the checker checkout",
+          "conclusion": "success"
+        },
+        {
+          "number": 10,
+          "name": "Check out the record-kind catalogue (SSOT)",
+          "conclusion": "success"
+        },
+        {
+          "number": 11,
+          "name": "Set up Python",
+          "conclusion": "success"
+        },
+        {
+          "number": 12,
+          "name": "Install guard dependencies",
+          "conclusion": "success"
+        },
+        {
+          "number": 13,
+          "name": "One record-kind vocabulary, reached through its constructors (ADR-0104)",
+          "conclusion": "failure"
+        },
+        {
+          "number": 14,
+          "name": "Remove the catalogue checkout",
+          "conclusion": "success"
+        },
+        {
+          "number": 24,
+          "name": "Post Set up Python",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 25,
+          "name": "Post Check out the record-kind catalogue (SSOT)",
+          "conclusion": "success"
+        },
+        {
+          "number": 26,
+          "name": "Post Check out the architecture checker",
+          "conclusion": "success"
+        },
+        {
+          "number": 27,
+          "name": "Post Run actions/setup-go@v5",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 28,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 29,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817124,
+      "name": "ci / CodeQL",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:17:58Z",
+      "completed_at": "2026-08-11T08:20:05Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817124",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Run actions/setup-go@v5",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Mint module-read token",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Configure private module access",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Run github/codeql-action/init@v3",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Run github/codeql-action/autobuild@v3",
+          "conclusion": "success"
+        },
+        {
+          "number": 8,
+          "name": "Detect Code scanning availability",
+          "conclusion": "success"
+        },
+        {
+          "number": 9,
+          "name": "Upload CodeQL results",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 10,
+          "name": "Analyze without upload (no Code scanning entitlement)",
+          "conclusion": "success"
+        },
+        {
+          "number": 17,
+          "name": "Post Analyze without upload (no Code scanning entitlement)",
+          "conclusion": "success"
+        },
+        {
+          "number": 18,
+          "name": "Post Run github/codeql-action/init@v3",
+          "conclusion": "success"
+        },
+        {
+          "number": 19,
+          "name": "Post Run actions/setup-go@v5",
+          "conclusion": "success"
+        },
+        {
+          "number": 20,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 21,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817137,
+      "name": "ci / Language is supported",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:17:40Z",
+      "completed_at": "2026-08-11T08:17:44Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817137",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Refuse a language this pipeline cannot build",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817175,
+      "name": "ci / Repository standards",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:18:20Z",
+      "completed_at": "2026-08-11T08:18:31Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817175",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Pull rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Check out the service repo",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Lint workflow definitions",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Scan for committed secrets",
+          "conclusion": "success"
+        },
+        {
+          "number": 10,
+          "name": "Post Check out the service repo",
+          "conclusion": "success"
+        },
+        {
+          "number": 11,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817185,
+      "name": "ci / Build and test (go)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:17:23Z",
+      "completed_at": "2026-08-11T08:20:13Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817185",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Initialize containers",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Check out the service repo",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Set up Go",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Mint module-read token",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Download private modules",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Lint",
+          "conclusion": "success"
+        },
+        {
+          "number": 8,
+          "name": "Point the tests at the throwaway database",
+          "conclusion": "success"
+        },
+        {
+          "number": 9,
+          "name": "Tests with coverage",
+          "conclusion": "success"
+        },
+        {
+          "number": 10,
+          "name": "Check out the central checkers",
+          "conclusion": "success"
+        },
+        {
+          "number": 11,
+          "name": "Enforce the tier's coverage threshold",
+          "conclusion": "success"
+        },
+        {
+          "number": 12,
+          "name": "Contract tests when present",
+          "conclusion": "success"
+        },
+        {
+          "number": 13,
+          "name": "Upload coverage",
+          "conclusion": "success"
+        },
+        {
+          "number": 23,
+          "name": "Post Check out the central checkers",
+          "conclusion": "success"
+        },
+        {
+          "number": 24,
+          "name": "Post Set up Go",
+          "conclusion": "success"
+        },
+        {
+          "number": 25,
+          "name": "Post Check out the service repo",
+          "conclusion": "success"
+        },
+        {
+          "number": 26,
+          "name": "Stop containers",
+          "conclusion": "success"
+        },
+        {
+          "number": 27,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817340,
+      "name": "ci / SQLC drift and raw-SQL guard",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:18:24Z",
+      "completed_at": "2026-08-11T08:18:35Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817340",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Run actions/setup-go@v5",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Mint module-read token",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Check out the central checkers",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Verify sqlc generated code is current",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Raw SQL guard",
+          "conclusion": "success"
+        },
+        {
+          "number": 12,
+          "name": "Post Check out the central checkers",
+          "conclusion": "success"
+        },
+        {
+          "number": 13,
+          "name": "Post Run actions/setup-go@v5",
+          "conclusion": "success"
+        },
+        {
+          "number": 14,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 15,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817357,
+      "name": "ci / Contract classification",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:17:41Z",
+      "completed_at": "2026-08-11T08:17:54Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817357",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Check out the service repo",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Check out the classification guard (SSOT)",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Set up Python",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Install guard dependencies",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "The published contracts must match the declared transport (ADR-0093)",
+          "conclusion": "success"
+        },
+        {
+          "number": 10,
+          "name": "Post Set up Python",
+          "conclusion": "success"
+        },
+        {
+          "number": 11,
+          "name": "Post Check out the classification guard (SSOT)",
+          "conclusion": "success"
+        },
+        {
+          "number": 12,
+          "name": "Post Check out the service repo",
+          "conclusion": "success"
+        },
+        {
+          "number": 13,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817365,
+      "name": "ci / Service documentation",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:17:52Z",
+      "completed_at": "2026-08-11T08:18:05Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817365",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Mint a catalog-read token",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Check out the documentation standard",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Validate against the central standard",
+          "conclusion": "success"
+        },
+        {
+          "number": 9,
+          "name": "Post Check out the documentation standard",
+          "conclusion": "success"
+        },
+        {
+          "number": 10,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 11,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817370,
+      "name": "ci / Required workflow lanes",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:18:38Z",
+      "completed_at": "2026-08-11T08:18:43Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817370",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Required and forbidden workflow lanes",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817375,
+      "name": "ci / Integration tests",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:18:17Z",
+      "completed_at": "2026-08-11T08:20:56Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817375",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Initialize containers",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Run actions/setup-go@v5",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Resolve service endpoints",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Decide whether integration coverage is owed",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Mint module-read token",
+          "conclusion": "success"
+        },
+        {
+          "number": 8,
+          "name": "Download private modules",
+          "conclusion": "success"
+        },
+        {
+          "number": 9,
+          "name": "Start Redpanda",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 10,
+          "name": "Run integration tests",
+          "conclusion": "success"
+        },
+        {
+          "number": 18,
+          "name": "Post Run actions/setup-go@v5",
+          "conclusion": "success"
+        },
+        {
+          "number": 19,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 20,
+          "name": "Stop containers",
+          "conclusion": "success"
+        },
+        {
+          "number": 21,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817382,
+      "name": "ci / End-to-end",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:18:22Z",
+      "completed_at": "2026-08-11T08:18:29Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817382",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Decide whether an end-to-end suite is owed",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Run actions/setup-go@v5",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 5,
+          "name": "Set up a builder that can export layer cache",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 6,
+          "name": "Restore the image layer cache",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 7,
+          "name": "Mint module-read token",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 8,
+          "name": "Run the end-to-end suite",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 16,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 17,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817389,
+      "name": "ci / Source invariants",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:18:42Z",
+      "completed_at": "2026-08-11T08:18:56Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817389",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Mint a catalog-read token",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Check out the source-invariant standard",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Scan this checkout against the central controls",
+          "conclusion": "success"
+        },
+        {
+          "number": 9,
+          "name": "Post Check out the source-invariant standard",
+          "conclusion": "success"
+        },
+        {
+          "number": 10,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 11,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817416,
+      "name": "ci / Gateway security baseline",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:18:54Z",
+      "completed_at": "2026-08-11T08:19:07Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817416",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Check out the service repo",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Check out the gateway baseline controls (SSOT)",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Set up Python",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Install guard dependencies",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Gateways enforce the shared security baseline (RFC-0039)",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Upload the baseline report",
+          "conclusion": "success"
+        },
+        {
+          "number": 12,
+          "name": "Post Set up Python",
+          "conclusion": "success"
+        },
+        {
+          "number": 13,
+          "name": "Post Check out the gateway baseline controls (SSOT)",
+          "conclusion": "success"
+        },
+        {
+          "number": 14,
+          "name": "Post Check out the service repo",
+          "conclusion": "success"
+        },
+        {
+          "number": 15,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817462,
+      "name": "ci / Dependency review",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:18:42Z",
+      "completed_at": "2026-08-11T08:18:51Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817462",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Detect Dependency graph availability",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Run actions/dependency-review-action@v4",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 8,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 9,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817471,
+      "name": "ci / ADR and API contract validation",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:18:41Z",
+      "completed_at": "2026-08-11T08:18:48Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817471",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Check out the central checkers",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "ADR structure",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "OpenAPI contract",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "OperationId governance",
+          "conclusion": "success"
+        },
+        {
+          "number": 11,
+          "name": "Post Check out the central checkers",
+          "conclusion": "success"
+        },
+        {
+          "number": 12,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 13,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817485,
+      "name": "ci / Seeding contract / Seed contract",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:17:26Z",
+      "completed_at": "2026-08-11T08:17:32Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817485",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Checkout service (caller)",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Checkout central checker",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Run seed-contract guard",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Post Checkout central checker",
+          "conclusion": "success"
+        },
+        {
+          "number": 8,
+          "name": "Post Checkout service (caller)",
+          "conclusion": "success"
+        },
+        {
+          "number": 9,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817502,
+      "name": "ci / Event handling compliance / Event handling compliance",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:17:20Z",
+      "completed_at": "2026-08-11T08:17:28Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817502",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Checkout service (caller)",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Checkout central SSOT (event-compliance script)",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Event handling compliance",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Post Checkout central SSOT (event-compliance script)",
+          "conclusion": "success"
+        },
+        {
+          "number": 8,
+          "name": "Post Checkout service (caller)",
+          "conclusion": "success"
+        },
+        {
+          "number": 9,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817555,
+      "name": "ci / Vulnerabilities",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:18:55Z",
+      "completed_at": "2026-08-11T08:22:34Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817555",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "High-signal secret scan",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Run actions/setup-go@v5",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Mint module-read token",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Known vulnerabilities in dependencies",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Static analysis (advisory)",
+          "conclusion": "success"
+        },
+        {
+          "number": 8,
+          "name": "Trivy filesystem scan",
+          "conclusion": "success"
+        },
+        {
+          "number": 14,
+          "name": "Post Trivy filesystem scan",
+          "conclusion": "success"
+        },
+        {
+          "number": 15,
+          "name": "Post Run actions/setup-go@v5",
+          "conclusion": "success"
+        },
+        {
+          "number": 16,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 17,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817567,
+      "name": "ci / Dockerfile standard / Dockerfile standard invariants",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:17:28Z",
+      "completed_at": "2026-08-11T08:17:38Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817567",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Checkout caller repo",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Checkout coderaxis/ci-workflows (checker SSOT)",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Set up Python",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Install checker dependency",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Enforce Dockerfile standard (ADR-0072)",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Upload dockerfile-standard report (machine-readable)",
+          "conclusion": "success"
+        },
+        {
+          "number": 12,
+          "name": "Post Set up Python",
+          "conclusion": "success"
+        },
+        {
+          "number": 13,
+          "name": "Post Checkout coderaxis/ci-workflows (checker SSOT)",
+          "conclusion": "success"
+        },
+        {
+          "number": 14,
+          "name": "Post Checkout caller repo",
+          "conclusion": "success"
+        },
+        {
+          "number": 15,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718817589,
+      "name": "ci / Schema compatibility / Schema compatibility",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-08-11T08:17:20Z",
+      "completed_at": "2026-08-11T08:18:09Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718817589",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Initialize containers",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Checkout service (caller)",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Checkout central SSOT (schema-compat script)",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Applied migrations are immutable",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Resolve Postgres connection URL",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Set up Go",
+          "conclusion": "success"
+        },
+        {
+          "number": 8,
+          "name": "Mint module-read token (GitHub App)",
+          "conclusion": "success"
+        },
+        {
+          "number": 9,
+          "name": "Configure private module access",
+          "conclusion": "success"
+        },
+        {
+          "number": 10,
+          "name": "Schema compatibility + canonical outbox conformance",
+          "conclusion": "success"
+        },
+        {
+          "number": 17,
+          "name": "Post Set up Go",
+          "conclusion": "success"
+        },
+        {
+          "number": 18,
+          "name": "Post Checkout central SSOT (schema-compat script)",
+          "conclusion": "success"
+        },
+        {
+          "number": 19,
+          "name": "Post Checkout service (caller)",
+          "conclusion": "success"
+        },
+        {
+          "number": 20,
+          "name": "Stop containers",
+          "conclusion": "success"
+        },
+        {
+          "number": 21,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93718818169,
+      "name": "ci / API contract",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:17:17Z",
+      "completed_at": "2026-08-11T08:17:16Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718818169",
+      "steps": []
+    },
+    {
+      "id": 93718818326,
+      "name": "ci / OpenAPI generator",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:17:17Z",
+      "completed_at": "2026-08-11T08:17:17Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93718818326",
+      "steps": []
+    },
+    {
+      "id": 93720027694,
+      "name": "ci / Notify on failure",
+      "status": "completed",
+      "conclusion": "failure",
+      "started_at": "2026-08-11T08:22:37Z",
+      "completed_at": "2026-08-11T08:22:45Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93720027694",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Summarise which gates failed",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Run coderaxis/ci-workflows/ci-slack-notify@v1",
+          "conclusion": "failure"
+        },
+        {
+          "number": 4,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 93720028338,
+      "name": "ci / Canonical build and GitOps pin",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:22:35Z",
+      "completed_at": "2026-08-11T08:22:34Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-configuration-service/actions/runs/31471377341/job/93720028338",
+      "steps": []
+    }
+  ],
+  "annotations": {
+    "93718817115": [
+      {
+        "annotation_level": "warning",
+        "path": ".github",
+        "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-go@v5, actions/setup-python@v5. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+      },
+      {
+        "annotation_level": "failure",
+        "path": ".github",
+        "message": "Process completed with exit code 1."
+      },
+      {
+        "annotation_level": "failure",
+        "path": ".github",
+        "message": "inboxxhq-configuration-service/internal/platform/grpc/interceptors.go:17: UnaryLoggingInterceptor re-implements the grpc_call_completed emitter that shared/platform-shared-go/platform/grpccommon owns. Call the shared one instead - a copy drifts from the catalogue the moment either side changes, and an unreferenced copy drifts silently while its own tests keep passing (Core ADR-0104 D5)"
+      }
+    ],
+    "93720027694": [
+      {
+        "annotation_level": "failure",
+        "path": ".github",
+        "message": "Process completed with exit code 1."
+      },
+      {
+        "annotation_level": "warning",
+        "path": ".github",
+        "message": "Slack notification not sent: this job is not authorised to read the Slack bot token. Expected when a repository calls the central workflows from a fork or an unlisted ref. Details: aws: [ERROR]: An error occurred (AccessDenied) when calling the AssumeRoleWithWebIdentity operation: Not authorized to perform sts:AssumeRoleWithWebIdentity"
+      }
+    ]
+  }
+}

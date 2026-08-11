@@ -1,0 +1,271 @@
+{
+  "_provenance": "Captured verbatim from InboxxHQ-CoderAxis/inboxxhq-auth-service run 31471327806 attempt 1 (2026-08-11T08:00:27Z), one of 121 jobs across 24 repositories that the organisation Actions budget refused between 07:33:15Z and 08:01:11Z.",
+  "jobs": [
+    {
+      "id": 93715079634,
+      "name": "ci / Resolve service identity",
+      "status": "completed",
+      "conclusion": "failure",
+      "started_at": "2026-08-11T08:00:27Z",
+      "completed_at": "2026-08-11T08:00:29Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715079634",
+      "steps": []
+    },
+    {
+      "id": 93715090259,
+      "name": "ci / Repository standards",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090259",
+      "steps": []
+    },
+    {
+      "id": 93715090491,
+      "name": "ci / Build and test (${{ needs.resolve.outputs.language }})",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090491",
+      "steps": []
+    },
+    {
+      "id": 93715090553,
+      "name": "ci / Notify on failure",
+      "status": "completed",
+      "conclusion": "failure",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:32Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090553",
+      "steps": []
+    },
+    {
+      "id": 93715090575,
+      "name": "ci / Repository structure",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090575",
+      "steps": []
+    },
+    {
+      "id": 93715090621,
+      "name": "ci / Service documentation",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090621",
+      "steps": []
+    },
+    {
+      "id": 93715090641,
+      "name": "ci / Integration tests",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090641",
+      "steps": []
+    },
+    {
+      "id": 93715090723,
+      "name": "ci / End-to-end",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090723",
+      "steps": []
+    },
+    {
+      "id": 93715090782,
+      "name": "ci / Language is supported",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090782",
+      "steps": []
+    },
+    {
+      "id": 93715090833,
+      "name": "ci / Event handling compliance",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090833",
+      "steps": []
+    },
+    {
+      "id": 93715090849,
+      "name": "ci / Required workflow lanes",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090849",
+      "steps": []
+    },
+    {
+      "id": 93715090851,
+      "name": "ci / SQLC drift and raw-SQL guard",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090851",
+      "steps": []
+    },
+    {
+      "id": 93715090854,
+      "name": "ci / Schema compatibility",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090854",
+      "steps": []
+    },
+    {
+      "id": 93715090868,
+      "name": "ci / Gateway security baseline",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090868",
+      "steps": []
+    },
+    {
+      "id": 93715090901,
+      "name": "ci / Dockerfile standard",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090901",
+      "steps": []
+    },
+    {
+      "id": 93715090904,
+      "name": "ci / OpenAPI generator",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090904",
+      "steps": []
+    },
+    {
+      "id": 93715090905,
+      "name": "ci / Seeding contract",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090905",
+      "steps": []
+    },
+    {
+      "id": 93715090940,
+      "name": "ci / CodeQL",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090940",
+      "steps": []
+    },
+    {
+      "id": 93715090994,
+      "name": "ci / Vulnerabilities",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715090994",
+      "steps": []
+    },
+    {
+      "id": 93715091028,
+      "name": "ci / Source invariants",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715091028",
+      "steps": []
+    },
+    {
+      "id": 93715091069,
+      "name": "ci / Dependency review",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715091069",
+      "steps": []
+    },
+    {
+      "id": 93715091128,
+      "name": "ci / API contract",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715091128",
+      "steps": []
+    },
+    {
+      "id": 93715091177,
+      "name": "ci / Contract classification",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715091177",
+      "steps": []
+    },
+    {
+      "id": 93715091196,
+      "name": "ci / ADR and API contract validation",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715091196",
+      "steps": []
+    },
+    {
+      "id": 93715091554,
+      "name": "ci / Canonical build and GitOps pin",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-08-11T08:00:30Z",
+      "completed_at": "2026-08-11T08:00:30Z",
+      "html_url": "https://github.com/InboxxHQ-CoderAxis/inboxxhq-auth-service/actions/runs/31471327806/job/93715091554",
+      "steps": []
+    }
+  ],
+  "annotations": {
+    "93715079634": [
+      {
+        "annotation_level": "failure",
+        "path": ".github",
+        "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+      }
+    ],
+    "93715090553": [
+      {
+        "annotation_level": "failure",
+        "path": ".github",
+        "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+      }
+    ]
+  }
+}
