@@ -144,6 +144,12 @@ static_lint() {
 #        - seed/**               (the platform seeding-standard tree)
 #        - testdata/**           (idiomatic Go test fixtures, e.g. a
 #                                 generated sqlc test snapshot)
+#        - .coderaxis-ci/**      (this repo, checked out into the caller to
+#                                 supply the harness. Those files are ours, not
+#                                 the caller's schema, and we ship .sql of our
+#                                 own — uuid-version-probe.sql — so scanning the
+#                                 checkout failed every core-postgres repo at
+#                                 once for a file none of them owns)
 #      Anything else — e.g. a stray flat schema/001_init.sql or schema/schema.sql
 #      full-dump left over from before a squash, a service-local migrations/
 #      copy, etc. — is a violation: it is either an actively-diverging second
@@ -169,6 +175,7 @@ check_schema_layout() {
     -not -path './testdata/*' \
     -not -path '*/testdata/*' \
     -not -path './.schema-compat-gen/*' \
+    -not -path './.coderaxis-ci/*' \
     -not -path './.git/*' \
     -print0)
 
