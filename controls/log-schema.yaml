@@ -812,9 +812,28 @@ redaction:
 
   mask:
     email: [email, user_email, admin_email, customer_email, recipient]
-    phone: [phone, phone_number, from_phone, to_phone, msisdn]
+    phone: [phone, phone_number, phone_numbers, phonenumber, from_phone, to_phone, msisdn]
     path: [http_target]
     ip: [client_ip]
+
+  # Matched by shape as well as by name, because the list above was being overtaken. A survey of
+  # the keys the fleet actually logs found customer_phone, org_phone, original_phone,
+  # employee_phones, identity_phones and identity_emails all reaching Loki in the clear - none of
+  # them exotic, and none of them ever going to be enumerated in time. An exact-match list is a
+  # list of the leaks somebody already found.
+  #
+  # A suffix rule has to be wrong occasionally, so the two ways it is wrong are recorded here
+  # rather than argued about per incident. A boolean under a matched key passes through unchanged
+  # (has_phone, has_embedded_phone: blanking them deletes an answer to protect a secret that is
+  # not there), a string is masked, and a composite this cannot see into is replaced wholesale.
+  mask_suffix:
+    email: [_email, _emails]
+    phone: [_phone, _phones]
+
+  # Keys that end in a masked suffix but do not hold the value. org_id_from_phone is an org id
+  # looked up BY a number: masking it would cost a join without hiding anything. phone_sid and
+  # phone_number_sid need no entry - they do not end in a masked suffix, so they never match.
+  never_mask_suffix: [org_id_from_phone]
 
   # `name` is deliberately absent. On this platform the overwhelming majority of name-suffixed
   # keys are service_name, event_name, table_name, file_name; masking them would destroy non-PII
