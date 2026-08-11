@@ -84,6 +84,37 @@ jobs:
           fi
           echo "checker fails the dirty fixture as expected (exit $rc)"
 
+  # ── shared HTTP retry helper (ci-app-token, ci-slack-notify) ───────────────────────────────
+  # scripts/lib/http_retry.py is what stands between a single flaky TLS handshake and a whole
+  # job failing - see its module docstring for the 2026-08-11 bump-module-pin incident it fixes:
+  # both credential brokers made a chain of single, unretried urlopen() calls with a flat 30s
+  # timeout, so one timed-out handshake against GitHub's OIDC issuer failed the job exactly as
+  # if the credential had been refused.
+  #
+  # A retry helper is dangerous in both directions at once, which is why this is asserted case
+  # by case rather than as one smoke test: retrying too much (a blanket except-and-retry) would
+  # turn a real 403 into a slow real 403 while burning the attempt budget; retrying too little
+  # leaves the original bug in place. Both were confirmed to actually fail this suite by
+  # mutating the implementation during development - removing the is_retryable guard, letting a
+  # certificate-verification failure retry like an ordinary SSLError, widening the 5xx check to
+  # all 4xx, degrading the exhaustion message, replaying a stale Request across attempts, and
+  # dropping the backoff cap all reddened a specific, named case above, not just "some test".
+  http-retry:
+    name: HTTP retry helper - transient vs deterministic failure self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Retry policy holds in both directions (no sockets, no real sleeping)
+        run: python3 scripts/test_http_retry.py
+
   # ── App-token broker self-check (ADR-0110) ──────────────────────────────────────────────────
   # Called, not inlined, and the reason is the guard's own OIDC identity rather than tidiness.
   #
