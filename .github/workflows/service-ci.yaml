@@ -647,6 +647,20 @@ jobs:
               files="README.md go.mod sqlc.yaml"
               dirs="schema sql internal"
               targets="" ;;
+            shared-library)
+              # A library is consumed as packages, not run: it has no cmd/ to build, no internal/
+              # because hiding its packages would defeat the point, and no Makefile, so it defines
+              # none of the nine targets a core does.
+              #
+              # Deliberately the thinnest set of the four. The other three were measured across 32
+              # cores, 27 deployables and every schema module, so their intersections describe a
+              # real convention. The Go shared-library population is one repo, and an intersection
+              # over one member is not a standard - it is that repo's accidents written down and
+              # then enforced on the next library to arrive. So this requires only what makes it a
+              # documented Go module, and should be tightened once there is a fleet to measure.
+              files="README.md go.mod"
+              dirs="docs"
+              targets="" ;;
             *)
               echo "::error::repo_kind=${REPO_KIND} is not a shape this gate knows how to check"
               exit 1 ;;
@@ -825,6 +839,10 @@ jobs:
           case "${REPO_KIND}" in
             core)       required="${required} ${wf}/release.yaml" ;;
             schema)     required="${required} ${wf}/release.yaml" ;;
+            # Same reason as core and schema: it publishes a version its consumers pin, so it owns
+            # a release lane. Its artifact node sets cascade, which makes that lane the thing the
+            # fan-out triggers from.
+            shared-library) required="${required} ${wf}/release.yaml" ;;
             deployable) ;;
             *) echo "::error::repo_kind=${REPO_KIND} has no defined lane set"; exit 1 ;;
           esac
@@ -2159,8 +2177,13 @@ jobs:
         run: |
           set -euo pipefail
           python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          # The kind is passed rather than inferred. check_service_docs.py otherwise reads it off
+          # a `*-core` name suffix, which silently graded edge-gateway-foundation - a shared
+          # library - against the 119-item deployable tree, demanding runbooks, SLOs and on-call
+          # procedures for a package with no runtime.
           python3 core-docs/scripts/check_service_docs.py \
-            --service-dir "${{ github.event.repository.name || 'service' }}"
+            --service-dir "${{ github.event.repository.name || 'service' }}" \
+            --repo-kind "${{ needs.resolve.outputs.repo_kind }}"
 
   dependency-review:
     name: Dependency review
