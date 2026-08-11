@@ -726,11 +726,11 @@ records:
 adoption:
   # Every remaining entry is blocked on the same thing, and it is worth naming because it is an
   # ordering constraint rather than a backlog. These kinds are emitted by code in OTHER repositories
-  # - the CDC relay in event-gateway-core, ten worker loops in the *-core modules, a dozen bespoke
-  # Kafka consumers - and every one of those repositories reaches logging.Emit through a pinned
-  # module version. The symbol does not exist in v1.31.2. So the emitters cannot be written until
-  # platform-shared-go is released and each consumer is bumped, and this list is what holds that
-  # window open honestly instead of letting a half-adopted vocabulary look finished.
+  # - ten worker loops in the *-core modules, a dozen bespoke schedulers - and every one of those
+  # repositories reaches logging.Emit through a pinned module version. The symbol does not exist in
+  # v1.31.2. So the emitters cannot be written until platform-shared-go is released and each
+  # consumer is bumped, and this list is what holds that window open honestly instead of letting a
+  # half-adopted vocabulary look finished.
   #
   # service_started and service_stopped came off the list by being wired into foundation.New and
   # foundation.Close, which every service already calls - one emitter for the whole fleet.
@@ -741,8 +741,15 @@ adoption:
   # the work it triggers logged through an interface with nowhere to put it. Collapsing that
   # interface onto logging.Logger made both kinds emittable from the shared consumer, which is one
   # emitter for every service that consumes from Kafka through it.
+  #
+  # event_published came off by being emitted everywhere an event actually reaches a broker: the CDC
+  # relay in event-gateway-core, which every outbox-backed domain event flows through, and the four
+  # producers that write to Kafka directly and so never meet the relay - notification realtime, chat
+  # realtime, presence, and the realtime gateway's internal broadcast. Every one emits after the
+  # broker acks, which is what makes partition and offset knowable and is why they are pointers. A
+  # dead-letter write is deliberately not among them: the consumer already emits event_dropped for
+  # that same message, and one message under two kinds double-counts it.
   pending:
-    - event_published
     - job_started
     - job_completed
 
