@@ -1,0 +1,105 @@
+# Workflow-run triage control catalogue (declarative policy-as-code).
+#
+# This catalogue names the ways GitHub can fail a job WITHOUT ever running it, so that such a
+# failure can be told apart from a gate that ran and returned a verdict. As in
+# controls/ci-identity.yaml, it defines POLICY ONLY: each control's `detector` key binds it to an
+# implementation in scripts/classify-run-failure.py, which may evolve WITHOUT any change here.
+#
+# WHY THIS CATALOG EXISTS. On 2026-08-11 the organisation's Actions budget
+# (`prevent_further_usage: true`) was reached. For the 28 minutes from 07:33:15Z to 08:01:11Z
+# GitHub refused to dispatch 121 jobs across 24 repositories. A refused job is reported exactly
+# like a failed one - red X, `conclusion: failure` - but it has an empty `steps` array, no log
+# blob at all, and a single check-run annotation attached to `.github` rather than to any source
+# file. Because service-ci.yaml conditions everything on `resolve`, the only job a freshly
+# triggered run even attempts to start is `Resolve service identity`; every other job is then
+# marked `skipped` because its dependency "failed". So eight consecutive pull requests each
+# reported `Resolve service identity` as the failing step, eight times in a row, and each passed
+# on rerun once the budget was raised.
+#
+# That reproducibility is what made it convincing and wrong. Nothing in the resolver, the catalog
+# checkout or the OIDC token mint was involved: run 31469306219 in
+# inboxxhq-voice-ai-agent-service resolved identity successfully (4 steps, 07:33:04Z) and then
+# had `Build and test (go)` and `Integration tests` refused eleven seconds later. The refused job
+# is simply whichever job tried to start inside the window.
+#
+# WHAT THIS CANNOT DO, and why there is no retry here. A refusal happens before a runner ever
+# claims the job, so no `continue-on-error`, no step-level retry and no in-workflow loop can
+# observe it - there is no step in which to run. Nothing added to service-ci.yaml can prevent
+# this class of failure, and `Notify on failure` is refused by the same budget, so the Slack
+# alert does not fire either. The only remediation is the budget itself. These controls therefore
+# make the failure LEGIBLE; they never excuse a job that actually ran. A job with a non-empty
+# `steps` array is a gate verdict and is reported as such no matter what its annotation says.
+#
+# Control IDs (RT-NNNN) are STABLE and permanent, per the ID/lifecycle discipline documented in
+# controls/delivery-model.yaml.
+#
+# Policy SSOT:
+#   ADR-0051 - Artifact promotion; owns the CI signal these controls interpret.
+
+version: 1
+domain: run-triage
+policy_ssot: [ADR-0051]
+
+controls:
+  - id: RT-0001
+    title: A job refused for account billing or spending limit is not a gate failure
+    owner: platform-architecture
+    scope: workflow-run
+    status: active
+    severity: critical
+    policy: >-
+      A failed job that ran no steps and carries GitHub's account-payment or spending-limit
+      annotation was never dispatched. It is an infrastructure refusal and carries no information
+      about the commit under test, so it must not be reported as, or acted on as, the verdict of
+      the gate whose name it happens to bear.
+    rationale: >-
+      This is the signature that cost eight pull requests a misdiagnosis each. The refusal is
+      indistinguishable from a resolver bug in the GitHub UI, and it is perfectly reproducible for
+      as long as the budget stays exhausted, so "it failed 8/8 times, it cannot be flaky" argues
+      for a code defect when it is in fact evidence of a hard stop. Naming the signature is what
+      converts a red X with no logs from a mystery into a billing action.
+    remediation: >-
+      Raise or remove the Actions budget for the organisation, or reduce spend, then rerun the
+      affected runs. Do not change the workflow: the job never started, so there is nothing in it
+      to fix and nothing in it that could have retried.
+    detector: refused_for_billing
+
+  - id: RT-0002
+    title: A job refused because no runner could be obtained is not a gate failure
+    owner: platform-architecture
+    scope: workflow-run
+    status: active
+    severity: major
+    policy: >-
+      A failed job that ran no steps and whose annotation reports that a runner could not be
+      acquired - no matching runner, the label is unavailable, or concurrency for the account is
+      exhausted - was never dispatched, and is reported as an infrastructure refusal.
+    rationale: >-
+      Included because it is the same defect class with a different message, and separating them
+      only after the second incident is how the CID family came to exist. Detecting only the
+      billing wording would leave the next refusal to be misread exactly as this one was.
+    remediation: >-
+      Check runner availability and account concurrency limits for the affected labels, then
+      rerun. As with RT-0001 the workflow is not implicated.
+    detector: refused_for_runner
+
+  - id: RT-0003
+    title: A job that ran steps is a gate verdict, whatever its annotation says
+    owner: platform-architecture
+    scope: workflow-run
+    status: active
+    severity: critical
+    policy: >-
+      A failed job with a non-empty `steps` array is classified as a genuine gate failure. No
+      annotation text may reclassify it, and the refusal detectors must not fire on it.
+    rationale: >-
+      This is the control that keeps the other two from becoming a way to launder failures. A
+      triage tool that can be talked into excusing a job by the wording of its annotation is worse
+      than no triage tool, because it turns a real violation into a billing note. The step array
+      is the discriminator precisely because it is written by the runner and so cannot exist
+      unless the runner ran. It is asserted against a fixture whose failing job carries both an
+      `exit code 1` annotation and a deprecation warning, so the negative case is a real red run
+      rather than a synthetic one.
+    remediation: >-
+      Read the job's logs and fix the violation it reports. Nothing here is transient.
+    detector: genuine_gate_failure
