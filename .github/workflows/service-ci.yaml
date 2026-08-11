@@ -694,7 +694,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          unformatted="$(gofmt -l . | grep -v '^vendor/' || true)"
+          # gofmt -l walks directories, unlike the ./... package patterns every other Go step here
+          # uses, so it is the one Go step that can see a tool checkout: this job places
+          # inboxxhq-architecture-check at .archcheck/ and service-ci puts ci-workflows at
+          # .central/, .uuid-tools/ and .gateway-tools/ in its other jobs. Today only the step
+          # ORDER keeps this green — the checkouts happen below. Filtering dot-directories makes
+          # that independent of ordering, and costs no coverage: the Go toolchain ignores them, so
+          # nothing under one is part of the module this repo builds.
+          unformatted="$(gofmt -l . | grep -v -e '^vendor/' -e '^\.' || true)"
           if [[ -n "${unformatted}" ]]; then
             echo "::error::gofmt would rewrite these files; run 'make fmt'"
             echo "${unformatted}"

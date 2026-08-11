@@ -59,6 +59,16 @@ FAILED=0
 # Go source, excluding vendor, .git, generated dirs, and tests (tests may
 # legitimately construct a fake/mock producer that isn't a real runtime
 # concern).
+#
+# .coderaxis-ci is excluded for the same reason as .schema-compat-gen beside it:
+# event-handling-compliance.yaml checks THIS repository out into the caller's
+# working tree to supply this script, and grep -r descends into dot-directories.
+# The Go we ship there is not the caller's source — fixtures/ exists to be
+# non-conformant, and its outbox emitters publish through the shared publisher,
+# so the day one of them is written with an Insert*Outbox* call site or a sarama
+# producer, every repo on the platform fails this gate on our fixture rather
+# than on its own code. That is exactly how check_schema_layout broke the whole
+# core-postgres fleet the first time we shipped a .sql.
 grep_go() {
   grep -rn "$@" \
     --include='*.go' \
@@ -66,6 +76,7 @@ grep_go() {
     --exclude-dir='.git' \
     --exclude-dir='vendor' \
     --exclude-dir='.schema-compat-gen' \
+    --exclude-dir='.coderaxis-ci' \
     . 2>/dev/null || true
 }
 

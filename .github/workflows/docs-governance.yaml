@@ -152,8 +152,15 @@ jobs:
         run: |
           set -uo pipefail
           root="${{ inputs.docs_root }}"
+          # .docs-governance-tools is THIS repository, checked out into the caller to supply the
+          # checker. grep -r descends into dot-directories, and this repo's own README.md carries a
+          # mermaid diagram, so without the exclusion every governed docs repo compiles our diagram
+          # and reports the result against a file it does not own. Same reason as .core-docs, which
+          # is excluded three lines up: neither tree is the caller's prose. The Python checker
+          # already skips every dot-prefixed component; these Node/grep sweeps did not.
           mapfile -t files < <(grep -rl --include='*.md' '```mermaid' "$root" \
-            --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.core-docs || true)
+            --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.core-docs \
+            --exclude-dir=.docs-governance-tools || true)
           if [ ${#files[@]} -eq 0 ]; then
             echo "No mermaid diagrams found under '$root' — DOC-0020 not applicable."; exit 0
           fi
@@ -183,7 +190,8 @@ jobs:
           npx -y markdownlint-cli2@0.14 \
             --config .docs-governance-tools/config/docs/.markdownlint.jsonc \
             "${{ inputs.docs_root }}/**/*.md" \
-            "!**/node_modules/**" "!**/.core-docs/**" "!**/generated/**" \
+            "!**/node_modules/**" "!**/.core-docs/**" "!**/.docs-governance-tools/**" \
+            "!**/generated/**" \
             "!**/templates/**" "!**/_*.md" "!**/*[-_]template.md" "!**/*[-_]TEMPLATE.md"
 
       - name: Spellcheck prose (DOC-0022)

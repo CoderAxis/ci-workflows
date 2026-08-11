@@ -94,8 +94,13 @@ def find_seed_data_dir(root: Path) -> Path | None:
         p = Path(dirpath)
         if p.name == "data" and p.parent.name == "seed":
             return p
-        # prune vcs/vendor noise
-        dirnames[:] = [d for d in dirnames if d not in {".git", "vendor", "node_modules"}]
+        # Prune vcs/vendor noise, and every dot-prefixed directory with it: this walk falls back to
+        # the repo root when there is no internal/, and seed-contract-check.yaml checks
+        # ci-workflows out into the caller at .coderaxis-ci/, so the fallback walk would search our
+        # tree for the caller's seed SSOT. Nothing matches today because we ship no seed/data, which
+        # is a fact about our contents rather than a property of the walk.
+        dirnames[:] = [d for d in dirnames
+                       if d not in {"vendor", "node_modules"} and not d.startswith(".")]
     return None
 
 
