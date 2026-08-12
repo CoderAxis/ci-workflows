@@ -1,0 +1,112 @@
+# Org-versus-tenant vocabulary control catalog (declarative policy-as-code).
+#
+# The policy this encodes: "Org" is the canonical scope term (org_id); "tenant" 
+# is a synonym retained only in historical text and is being normalized to "org".
+# This is documented in docs/core-docs/standards/architecture/data-scope-classification-standard.md
+# but nothing enforced it until now - "tenant" kept reappearing in new code and docs.
+#
+# What this catalog is, and is not. It is the single source of WHICH vocabulary
+# deviations are allowed, and WHICH exceptions are sanctioned with documented reasons. 
+# It does not describe detection: each control's `detector` key binds it to an 
+# implementation in scripts/check-org-vocabulary.py and that implementation may 
+# evolve without a change here.
+#
+# Control IDs (ORG-NNNN) are STABLE and permanent. Never rename or recycle an
+# ID: retire a control by setting `status`, change intent by adding a new ID.
+#
+# Schema (validated by the checker):
+#   required per control: id, title, owner, scope, status, severity, stage,
+#                         policy, rationale, remediation, detector, refs
+#   severity: critical | major | minor
+#   stage:    enforce | warn | observe
+#             enforce -> a finding fails CI
+#             warn    -> a finding is a ::warning:: and does not fail CI
+#             observe -> counted in the summary only
+
+version: 1
+domain: org-vocabulary-policy
+policy_ssot:
+  - docs/core-docs/standards/architecture/data-scope-classification-standard.md
+
+# ---------------------------------------------------------------------------
+# Allowed exceptions: the declared deviations with documented reasons
+# ---------------------------------------------------------------------------
+# Every occurrence of "tenant" must be either fixed or explicitly declared here
+# with a stated reason. Default is failure. This follows the same pattern as
+# the UUID version policy gate: canonical choice required everywhere, deviation
+# possible but never silent or accidental.
+
+exceptions:
+  # ADR filenames and titles (immutable published records)
+  - path: "**/ADR-0020-multi-tenant-isolation.md"
+    reason: "ADR filename is an immutable published record"
+    
+  # Legitimate architectural prose about multi-tenancy as a concept
+  - path: "docs/*.md"
+    pattern: "multi-tenant|multi-tenancy"
+    reason: "Architectural documentation discussing multi-tenancy as a concept"
+  - path: "docs/**/*.md"
+    pattern: "multi-tenant|multi-tenancy"
+    reason: "Architectural documentation discussing multi-tenancy as a concept"
+    
+  # Deliberate violation fixtures for other gates  
+  - path: "fixtures/**"
+    reason: "Deliberate violation fixtures for testing other gates"
+  
+  # Our own scripts that test and implement the guard
+  - path: "scripts/check-org-vocabulary.py"
+    reason: "The org vocabulary checker implementation and its documentation"
+  - path: "scripts/test_org_vocabulary.py" 
+    reason: "Test file containing deliberate violations to test the guard"
+  
+  # Dictionary files that may contain legacy terminology
+  - path: "**/dictionaries/**"
+    reason: "Dictionary files may contain legacy terminology for reference"
+    
+  # Generated code from protobuf
+  - path: "**/*.pb.go"
+    reason: "Generated code from protobuf definitions"
+    
+  # Our own control files that legitimately reference "tenant" in policy text
+  - path: "**/api-contract.yaml"
+    reason: "Policy documentation referencing existing tenant usage patterns"
+  - path: "**/log-schema.yaml" 
+    reason: "Policy documentation referencing existing tenant usage patterns"
+  - path: "**/org-vocabulary.yaml"
+    reason: "Policy documentation defining tenant vocabulary standards"
+
+# ---------------------------------------------------------------------------
+# Scan scope
+# ---------------------------------------------------------------------------
+scan:
+  # Skip directories that don't contain user-authored content
+  skip_dirs: [vendor, node_modules, testdata, .git, dist, build, .terraform]
+  # Include test files - vocabulary should be consistent everywhere
+  skip_test_files: false
+
+controls:
+  - id: ORG-0001
+    title: Use "org" instead of "tenant" in all code and documentation
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    stage: enforce
+    policy: >-
+      All occurrences of "tenant" in code, comments, and documentation MUST be
+      replaced with "org" unless explicitly listed in the exceptions section
+      with a documented reason. This enforces the canonical vocabulary defined
+      in the data scope classification standard.
+    rationale: >-
+      The platform has standardized on "org" as the canonical scope term, with
+      "tenant" being a historical synonym that creates confusion and inconsistency.
+      Without enforcement, "tenant" keeps reappearing in new code despite the
+      documented standard, requiring manual correction. Machine enforcement
+      ensures the convention is consistently followed across all repositories.
+    remediation: >-
+      Replace "tenant" with "org" in variable names, function names, comments,
+      and documentation. If there is a legitimate reason to keep "tenant" in
+      a specific location, add it to the exceptions list in this policy file
+      with a clear reason.
+    detector: tenant_usage_check
+    refs: [docs/core-docs/standards/architecture/data-scope-classification-standard.md]

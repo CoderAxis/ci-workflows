@@ -1,0 +1,452 @@
+#!/usr/bin/env python3
+"""Org-versus-tenant vocabulary gate: "org" everywhere, "tenant" only where
+explicitly declared with a documented reason.
+
+The policy is documented in data-scope-classification-standard.md but nothing
+verified it until now. This is the verifier following the same pattern as the
+UUID version policy gate: canonical choice required everywhere, deviation 
+possible but never silent or accidental.
+
+Every occurrence of "tenant" must be either fixed or explicitly declared in
+controls/org-vocabulary.yaml with a stated reason. Default is failure.
+
+Exit codes follow the house convention:
+  0  clean, or no files to scan
+  1  at least one finding from a control at stage `enforce`
+  2  the checker could not do its job (missing catalog, unparseable config, etc.)
+"""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import os
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterator
+
+try:
+    import yaml
+except ModuleNotFoundError as exc:  # pragma: no cover
+    raise SystemExit("PyYAML required: python3 -m pip install PyYAML") from exc
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CONTROL = REPO_ROOT / "controls" / "org-vocabulary.yaml"
+
+REQUIRED_CONTROL_FIELDS = (
+    "id", "title", "owner", "scope", "status", "severity", "stage",
+    "policy", "rationale", "remediation", "detector", "refs",
+)
+VALID_SEVERITY = {"critical", "major", "minor"}
+VALID_STAGE = {"enforce", "warn", "observe"}
+VALID_STATUS = {"active", "deprecated", "superseded"}
+
+# File extensions to scan for text content
+TEXT_EXTENSIONS = {
+    '.py', '.go', '.js', '.ts', '.jsx', '.tsx', '.java', '.scala', '.rb', '.php',
+    '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.cs', '.vb', '.rs', '.kt', 
+    '.swift', '.m', '.mm', '.pl', '.sh', '.bash', '.zsh', '.fish', '.ps1',
+    '.sql', '.yaml', '.yml', '.json', '.xml', '.html', '.htm', '.css', '.scss',
+    '.sass', '.less', '.md', '.rst', '.txt', '.cfg', '.conf', '.ini', '.toml',
+    '.dockerfile', '.tf', '.hcl', '.proto', '.thrift', '.avro', '.jsonnet',
+    '.makefile', '.mk', '.cmake', '.gradle', '.sbt', '.pom'
+}
+
+# Binary/generated file patterns to skip
+SKIP_PATTERNS = [
+    '*.pb.go',      # protobuf generated
+    '*.pb.cc',      # protobuf generated 
+    '*.pb.h',       # protobuf generated
+    '*.generated.*', # general generated marker
+    '*_generated.*', # underscore generated marker
+    '*.min.js',     # minified JavaScript
+    '*.min.css',    # minified CSS
+    '*.bundle.*',   # bundled assets
+    'node_modules/**',
+    'vendor/**',
+    '.git/**',
+    'dist/**',
+    'build/**',
+    '.terraform/**',
+    '__pycache__/**',
+    '*.pyc',
+    '*.pyo',
+    '*.class',
+    '*.jar',
+    '*.war',
+    '*.ear',
+    '*.exe',
+    '*.dll',
+    '*.so',
+    '*.dylib',
+    '*.a',
+    '*.lib',
+    'testdata/**'
+]
+
+
+def cannot_run(message: str) -> "NoReturn":  # type: ignore[name-defined]
+    print(f"::error::{message}")
+    sys.exit(2)
+
+
+@dataclass
+class Finding:
+    control: str
+    severity: str
+    stage: str
+    file: str
+    line: int
+    column: int
+    match: str
+    message: str
+    remediation: str = ""
+    refs: list = field(default_factory=list)
+
+    @property
+    def location(self) -> str:
+        return f"{self.file}:{self.line}:{self.column}" if self.file else "(repository)"
+
+
+@dataclass 
+class Exception:
+    path: str
+    pattern: str | None
+    reason: str
+
+    def matches(self, file_path: str, text: str) -> bool:
+        """Check if this exception covers the given file and text."""
+        # Check path pattern match - use Unix-style path separators
+        normalized_path = file_path.replace('\\', '/')
+        if not fnmatch.fnmatch(normalized_path, self.path):
+            return False
+        
+        # If no specific pattern, the path match is sufficient
+        if self.pattern is None:
+            return True
+            
+        # Check if the pattern matches the text (case-insensitive)
+        try:
+            return bool(re.search(self.pattern, text, re.IGNORECASE))
+        except re.error:
+            return False
+
+
+# ---------------------------------------------------------------------------
+# Catalog
+# ---------------------------------------------------------------------------
+
+def load_catalog(path: Path) -> dict:
+    if not path.exists():
+        cannot_run(f"org-vocabulary control catalog not found: {path}")
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        cannot_run(f"cannot read the org-vocabulary catalog at {path}: {exc}")
+    if not isinstance(doc, dict):
+        cannot_run(f"{path}: expected a mapping at the top level")
+
+    errors: list[str] = []
+    seen: set[str] = set()
+    controls = doc.get("controls")
+    if not isinstance(controls, list) or not controls:
+        cannot_run(f"{path}: invalid catalog (expected a non-empty 'controls:' list)")
+    for i, c in enumerate(controls):
+        cid = (c or {}).get("id", f"#{i}")
+        missing = [f for f in REQUIRED_CONTROL_FIELDS if not c.get(f)]
+        if missing:
+            errors.append(f"{cid}: missing required field(s): {', '.join(missing)}")
+        if c.get("severity") not in VALID_SEVERITY:
+            errors.append(f"{cid}: severity must be one of {sorted(VALID_SEVERITY)}")
+        if c.get("stage") not in VALID_STAGE:
+            errors.append(f"{cid}: stage must be one of {sorted(VALID_STAGE)}")
+        if c.get("status") not in VALID_STATUS:
+            errors.append(f"{cid}: status must be one of {sorted(VALID_STATUS)}")
+        if cid in seen:
+            errors.append(f"{cid}: duplicate control id")
+        seen.add(cid)
+
+    # Validate exceptions structure
+    exceptions = doc.get("exceptions", [])
+    if not isinstance(exceptions, list):
+        errors.append("'exceptions' must be a list")
+    else:
+        for i, exc in enumerate(exceptions):
+            if not isinstance(exc, dict):
+                errors.append(f"exception #{i}: must be a mapping")
+                continue
+            if not exc.get("path"):
+                errors.append(f"exception #{i}: missing required 'path' field")
+            if not exc.get("reason"):
+                errors.append(f"exception #{i}: missing required 'reason' field")
+
+    if errors:
+        for e in errors:
+            print(f"::error::org-vocabulary catalog invalid: {e}")
+        sys.exit(2)
+    return doc
+
+
+def controls_by_id(doc: dict) -> dict:
+    return {c["id"]: c for c in doc["controls"]}
+
+
+# ---------------------------------------------------------------------------
+# Scanner exclusions (prevent reading our own checkout)
+# ---------------------------------------------------------------------------
+
+def _within(path: Path, base: Path) -> bool:
+    """Check if path is within base directory."""
+    return path == base or base in path.parents
+
+
+def excluded_paths(root: Path) -> list[Path]:
+    """Directories under `root` that must not be scanned.
+
+    This repository, when CI has checked it out INSIDE the tree under test. The
+    reusable workflow does exactly that - `actions/checkout` cannot place a
+    repository outside the workspace - so a walk of the caller's whole repository
+    also walks the checker's own tree, including controls files that contain
+    "tenant" in policy documentation.
+
+    A computed path rather than a directory name in the catalog's `skip_dirs`.
+    The name is the workflow's choice and differs per job, so a hardcoded name 
+    is stale the moment a job is renamed. Same instrument as check-ci-identity.py's 
+    excluded_roots, for the same reason.
+
+    Empty when the scanned root is inside this repository: that is how the
+    self-test runs, and there the violations ARE the subject.
+    """
+    if _within(root, REPO_ROOT):
+        return []
+    
+    # Look for any subdirectory that contains our checkout
+    excluded = []
+    for item in root.rglob("*"):
+        if item.is_dir() and (item / "scripts" / "check-org-vocabulary.py").exists():
+            excluded.append(item)
+    
+    return excluded
+
+
+# ---------------------------------------------------------------------------
+# File scanning
+# ---------------------------------------------------------------------------
+
+def should_skip_file(file_path: Path, skip_patterns: list[str]) -> bool:
+    """Check if file should be skipped based on patterns."""
+    path_str = str(file_path)
+    
+    # Check against skip patterns
+    for pattern in skip_patterns:
+        if fnmatch.fnmatch(path_str, pattern) or fnmatch.fnmatch(file_path.name, pattern):
+            return True
+    
+    # Skip if not a text file extension and no extension is explicitly allowed
+    if file_path.suffix and file_path.suffix.lower() not in TEXT_EXTENSIONS:
+        # Special case: files without extensions might be scripts
+        if file_path.suffix == '':
+            # Check if it looks like a text file by reading first few bytes
+            try:
+                with file_path.open('rb') as f:
+                    sample = f.read(512)
+                    # Simple heuristic: if it's mostly printable ASCII, treat as text
+                    text_chars = sum(1 for b in sample if 32 <= b <= 126 or b in (9, 10, 13))
+                    return text_chars < 0.8 * len(sample) if sample else True
+            except (OSError, PermissionError):
+                return True
+        else:
+            return True
+    
+    return False
+
+
+def find_files_to_scan(root: Path, skip_dirs: list[str], excluded: list[Path]) -> Iterator[Path]:
+    """Find all files that should be scanned for tenant usage."""
+    all_skip_patterns = SKIP_PATTERNS + [f"{d}/**" for d in skip_dirs]
+    
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+            
+        # Skip if in excluded directories
+        if any(_within(path, ex) for ex in excluded):
+            continue
+            
+        # Convert to relative path for pattern matching
+        try:
+            rel_path = path.relative_to(root)
+        except ValueError:
+            continue
+            
+        if should_skip_file(rel_path, all_skip_patterns):
+            continue
+            
+        yield path
+
+
+def scan_file_for_tenant(file_path: Path, root: Path, exceptions: list[Exception]) -> list[Finding]:
+    """Scan a single file for 'tenant' usage and return findings."""
+    try:
+        text = file_path.read_text(encoding='utf-8', errors='replace')
+    except (OSError, UnicodeDecodeError):
+        return []
+    
+    findings = []
+    rel_path = str(file_path.relative_to(root))
+    
+    # Check all exceptions first to see if this file/content is allowed
+    for exc in exceptions:
+        if exc.matches(rel_path, text):
+            return []  # File is excepted, no findings
+    
+    # Search for "tenant" case-insensitively
+    lines = text.splitlines()
+    for line_num, line in enumerate(lines, 1):
+        # Find all occurrences of "tenant" in the line (case-insensitive)
+        for match in re.finditer(r'tenant', line, re.IGNORECASE):
+            column = match.start() + 1
+            
+            # Check if this specific match is covered by an exception with a pattern
+            match_text = line[max(0, match.start()-20):match.end()+20]  # Context around match
+            is_excepted = False
+            for exc in exceptions:
+                if exc.pattern and fnmatch.fnmatch(rel_path, exc.path):
+                    if re.search(exc.pattern, match_text, re.IGNORECASE):
+                        is_excepted = True
+                        break
+            
+            if not is_excepted:
+                findings.append(Finding(
+                    control="ORG-0001",
+                    severity="major",
+                    stage="enforce", 
+                    file=rel_path,
+                    line=line_num,
+                    column=column,
+                    match=match.group(),
+                    message=f"Use of '{match.group()}' should be replaced with 'org' according to vocabulary standard"
+                ))
+    
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Main scanning logic
+# ---------------------------------------------------------------------------
+
+def scan_repository(root: Path, doc: dict) -> tuple[list[Finding], dict]:
+    """Scan the repository for tenant usage violations."""
+    scan_config = doc.get("scan", {})
+    skip_dirs = scan_config.get("skip_dirs", [])
+    
+    # Parse exceptions
+    exceptions = []
+    for exc_data in doc.get("exceptions", []):
+        exceptions.append(Exception(
+            path=exc_data["path"],
+            pattern=exc_data.get("pattern"),
+            reason=exc_data["reason"]
+        ))
+    
+    excluded = excluded_paths(root)
+    files_to_scan = list(find_files_to_scan(root, skip_dirs, excluded))
+    
+    all_findings = []
+    files_scanned = 0
+    
+    for file_path in files_to_scan:
+        findings = scan_file_for_tenant(file_path, root, exceptions)
+        all_findings.extend(findings)
+        files_scanned += 1
+    
+    scan_stats = {
+        "files_scanned": files_scanned,
+        "excluded_paths": [str(p) for p in excluded]
+    }
+    
+    return all_findings, scan_stats
+
+
+# ---------------------------------------------------------------------------
+# Rules and evaluation
+# ---------------------------------------------------------------------------
+
+def evaluate(findings: list[Finding], doc: dict) -> list[Finding]:
+    """Apply control rules and return final findings."""
+    controls = controls_by_id(doc)
+    
+    final_findings = []
+    for finding in findings:
+        control = controls.get(finding.control)
+        if not control or control["status"] != "active":
+            continue
+            
+        # Update finding with control details
+        finding.remediation = control["remediation"]
+        finding.refs = control["refs"]
+        final_findings.append(finding)
+    
+    return final_findings
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+def emit_text(findings: list[Finding], scan_stats: dict, excluded: list[Path]) -> int:
+    """Emit findings in text format and return exit code."""
+    enforced = [f for f in findings if f.stage == "enforce"]
+    warned = [f for f in findings if f.stage == "warn"]
+
+    # Show excluded paths
+    for skipped in excluded:
+        print(f"[skip] {skipped.name}/: the checker's own checkout, not the caller's code")
+
+    for f in enforced:
+        print(f"::error file={f.file},line={f.line},col={f.column}::[{f.control}][{f.severity}] "
+              f"{f.location}: {f.message}. Fix: {f.remediation.strip()} "
+              f"({', '.join(f.refs)})")
+    for f in warned:
+        print(f"::warning file={f.file},line={f.line},col={f.column}::[{f.control}][{f.severity}] "
+              f"{f.location}: {f.message}. Fix: {f.remediation.strip()} "
+              f"({', '.join(f.refs)})")
+
+    files_scanned = scan_stats.get("files_scanned", 0)
+    if enforced:
+        print(f"org-vocabulary: FAILED - {len(enforced)} enforced violation(s), "
+              f"{len(warned)} advisory, {files_scanned} file(s) scanned.")
+        return 1
+    print(f"org-vocabulary: OK - no enforced violations, {len(warned)} advisory, "
+          f"{files_scanned} file(s) scanned.")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--repo-root", default=".", help="repository to check")
+    ap.add_argument("--control", default=str(DEFAULT_CONTROL), help="org-vocabulary control catalog")
+    args = ap.parse_args()
+
+    root = Path(args.repo_root).resolve()
+    if not root.is_dir():
+        cannot_run(f"--repo-root {root} is not a directory")
+    
+    doc = load_catalog(Path(args.control).resolve())
+    
+    excluded = excluded_paths(root)
+    findings, scan_stats = scan_repository(root, doc)
+    
+    if scan_stats.get("files_scanned", 0) == 0:
+        print("org-vocabulary: no files to scan in this repository; skipping.")
+        return 0
+    
+    final_findings = evaluate(findings, doc)
+    
+    return emit_text(final_findings, scan_stats, excluded)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
