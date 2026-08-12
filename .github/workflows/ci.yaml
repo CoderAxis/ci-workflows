@@ -144,6 +144,44 @@ jobs:
           fi
           echo "checker fails the dirty fixture as expected (exit $rc)"
 
+  # ── documentation-only fast path ───────────────────────────────────────────────────────────
+  # service-ci.yaml now skips its expensive jobs when a push or pull request changed
+  # documentation and nothing else. That decision is made once, by scripts/docs-only-diff.py, and
+  # a wrong answer in the permissive direction means unreviewed code reaches main having been
+  # examined by nothing - so this suite exists mainly to pin the ways a diff can be SHAPED to look
+  # like documentation while carrying code: a rename out of .go, a markdown file under testdata/,
+  # a markdown file compiled in by //go:embed, a merge that brings code in without listing it, and
+  # a multi-commit push whose head commit alone is innocent.
+  #
+  # It also asserts the WIRING in service-ci.yaml job by job, which is the half a classifier test
+  # would normally leave out and the half this repository keeps getting wrong: the operationId
+  # guard that existed centrally and was connected to nothing, the undeclared lane that sat red
+  # while releases went out past it. A correct classifier attached to the wrong `needs:` list
+  # would skip every gate in the pipeline and then let `artifact` pin a GitOps digest from the
+  # result.
+  docs-only-fast-path:
+    name: Documentation-only fast path - classifier and wiring self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install guard dependencies
+        run: python3 -m pip install --upgrade PyYAML
+
+      # Real git repositories in a temporary directory, not a list of filenames. The part most
+      # likely to break is the range computation - what `before` means on a push, what it means
+      # when there is no `before`, what a pull request's base is once main has moved under it -
+      # and none of that is reachable without commits to diff.
+      - name: Range computation and path classification, against real repositories
+        run: python3 scripts/test_docs_only_diff.py
+
   # ── shared HTTP retry helper (ci-app-token, ci-slack-notify) ───────────────────────────────
   # scripts/lib/http_retry.py is what stands between a single flaky TLS handshake and a whole
   # job failing - see its module docstring for the 2026-08-11 bump-module-pin incident it fixes:

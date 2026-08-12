@@ -133,6 +133,76 @@ jobs:
           catalog-ref: ${{ inputs.catalog_ref }}
           coverage-override: ${{ inputs.coverage_threshold }}
 
+  # ── documentation-only fast path ────────────────────────────────────────────────────────────
+  # 111 of the 120 callers declare no `paths:` filter, so a one-word README fix runs build, vet,
+  # unit and integration tests, CodeQL, gitleaks, dependency review, schema compatibility, the
+  # artifact build and the GitOps pin. The bill got large enough that ~107 repositories were
+  # sitting on documentation commits nobody would push, which is the worst outcome available to a
+  # fleet whose documentation is itself gated.
+  #
+  # WHY NOT `paths-ignore:` AT WORKFLOW LEVEL, which is the obvious fix and is wrong. A workflow
+  # skipped by a path filter reports NO status. A required status check then waits forever for a
+  # check that will never arrive: the pull request is permanently unmergeable and there is nothing
+  # to click. So the workflow always runs, this job decides ONCE whether the diff is documentation,
+  # and each expensive job carries an `if:` on the answer. A job skipped by `if:` reports a real
+  # `skipped` conclusion, which branch protection accepts as satisfied and which the
+  # `!contains(needs.*.result, 'failure')` aggregation in `artifact` does not mistake for a
+  # failure - the same tolerance the conditional `integration` and `e2e` jobs already rely on.
+  #
+  # THIS JOB IS IN `artifact`'s AND `notify`'s NEEDS, and that is not decoration. Every gated job
+  # depends on this one, so if this job fails they are all skipped - and a skip is tolerated by the
+  # deploy aggregation. Without this job named there, a crash here would skip every gate and then
+  # pin a digest from an ungated tree. Named there, its `failure` blocks the deploy and alerts.
+  #
+  # No `needs:`, deliberately: this is pure git and does not depend on catalog identity, so it runs
+  # alongside `resolve` rather than after it and adds nothing to the critical path.
+  docs-only:
+    name: Documentation-only change
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      # Full history. The classifier diffs a RANGE, and the before-SHA of a push is exactly the
+      # object a shallow clone does not have. It deepens as a fallback, but paying for the clone
+      # once here is cheaper than a fetch that may not reach.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out the central classifier
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/ci-workflows
+          ref: v1
+          path: .docs-only-tools
+          sparse-checkout: scripts
+
+      # Degrades to `false`, which is today's behaviour, rather than failing. Every other central
+      # checker fails loudly when it cannot run, and that is right for a gate whose job is to
+      # REFUSE things. This one's job is to SKIP things, so the two directions are not symmetric:
+      # an unreachable classifier that turns the fleet red costs more than one that quietly runs
+      # the full pipeline it was trying to shorten. The annotation is there so it cannot be silent.
+      - name: Classify the diff
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f .docs-only-tools/scripts/docs-only-diff.py ]]; then
+            echo "::warning::the central documentation-only classifier is not present in this"
+            echo "::warning::checkout of ci-workflows; running every gate, as before."
+            echo "docs_only=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          python3 .docs-only-tools/scripts/docs-only-diff.py --repo-root .
+
+      - name: Remove the central checkout
+        if: always()
+        shell: bash
+        run: rm -rf .docs-only-tools
+
   # The language-specific jobs below are necessarily conditional, which means an unrecognised
   # language would skip build, test, coverage and CodeQL and still report the pipeline green.
   # Every repo in the fleet is Go today, so this guard costs nothing now and is the difference
@@ -222,8 +292,11 @@ jobs:
   # ── language pipeline ───────────────────────────────────────────────────────────────────────
   build-test:
     name: Build and test (${{ needs.resolve.outputs.language }})
-    needs: resolve
-    if: needs.resolve.outputs.language == 'go'
+    # `docs-only` joins the needs of every job below that reads source, and the added clause is
+    # always the same: run unless the whole diff was documentation. The reasoning, and why this is
+    # an `if:` rather than a `paths-ignore:`, is on the docs-only job above.
+    needs: [resolve, docs-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go'
     permissions:
       contents: read
       id-token: write
@@ -424,8 +497,8 @@ jobs:
 
   codeql:
     name: CodeQL
-    needs: resolve
-    if: needs.resolve.outputs.language == 'go'
+    needs: [resolve, docs-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -547,7 +620,8 @@ jobs:
   # ever declaring it. A skipped job can never catch that.
   events:
     name: Event handling compliance
-    needs: resolve
+    needs: [resolve, docs-only]
+    if: needs.docs-only.outputs.docs_only != 'true'
     uses: coderaxis/ci-workflows/.github/workflows/event-handling-compliance.yaml@v1
     with:
       role: ${{ needs.resolve.outputs.role }}
@@ -561,12 +635,14 @@ jobs:
 
   seeding:
     name: Seeding contract
-    needs: resolve
+    needs: [resolve, docs-only]
+    if: needs.docs-only.outputs.docs_only != 'true'
     uses: coderaxis/ci-workflows/.github/workflows/seed-contract-check.yaml@v1
 
   schema:
     name: Schema compatibility
-    needs: resolve
+    needs: [resolve, docs-only]
+    if: needs.docs-only.outputs.docs_only != 'true'
     permissions:
       contents: read
       # The called workflow mints a module-read token from its own OIDC identity, and a called
@@ -582,8 +658,8 @@ jobs:
 
   dockerfile:
     name: Dockerfile standard
-    needs: resolve
-    if: needs.resolve.outputs.deployable == 'true'
+    needs: [resolve, docs-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.deployable == 'true'
     uses: coderaxis/ci-workflows/.github/workflows/dockerfile-standard.yaml@v1
     with:
       capabilities: ${{ needs.resolve.outputs.capabilities }}
@@ -593,8 +669,11 @@ jobs:
   # Go service is required to have, so there was never a reason for each repo to carry its own.
   structure:
     name: Repository structure
-    needs: resolve
-    if: needs.resolve.outputs.language == 'go'
+    # Its README.md and docs/ presence checks look like documentation gates, but the `docs` job
+    # below grades the whole required documentation tree against the central standard and still
+    # runs, so a documentation commit that deletes README.md is caught there rather than here.
+    needs: [resolve, docs-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go'
     permissions:
       contents: read
       # The architecture-check step mints a module-read token from this job's OIDC identity to
@@ -950,8 +1029,13 @@ jobs:
   # keep it that way by doing nothing. Severity is a platform decision, not a repo setting.
   vulnerabilities:
     name: Vulnerabilities
-    needs: resolve
-    if: needs.resolve.outputs.language == 'go'
+    # Skipped for a documentation diff even though a CVE can be disclosed without anyone pushing.
+    # This pipeline is not the fleet's vulnerability radar and never was: it scans the dependency
+    # set a commit carries, and a documentation commit carries the same set the previous run
+    # already scanned. Periodic re-scanning is a scheduled fleet job, as the header of this file
+    # says, and shifting that duty onto whoever next edits a README is not a control.
+    needs: [resolve, docs-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go'
     permissions:
       contents: read
       id-token: write
@@ -1049,8 +1133,8 @@ jobs:
   # makes it cheap enough to run on every repository.
   uuid-policy:
     name: UUID version policy
-    needs: resolve
-    if: needs.resolve.outputs.language == 'go'
+    needs: [resolve, docs-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -1146,8 +1230,8 @@ jobs:
   # ── generated-code and query drift ──────────────────────────────────────────────────────────
   sqlc:
     name: SQLC drift and raw-SQL guard
-    needs: resolve
-    if: needs.resolve.outputs.language == 'go'
+    needs: [resolve, docs-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go'
     permissions:
       contents: read
       id-token: write
@@ -1374,8 +1458,11 @@ jobs:
   # rather than a silent skip.
   integration:
     name: Integration tests
-    needs: resolve
-    if: needs.resolve.outputs.repo_kind == 'deployable' && needs.resolve.outputs.language == 'go'
+    needs: [resolve, docs-only]
+    if: >-
+      needs.docs-only.outputs.docs_only != 'true'
+      && needs.resolve.outputs.repo_kind == 'deployable'
+      && needs.resolve.outputs.language == 'go'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -1572,8 +1659,8 @@ jobs:
   # the declared answer, it is reviewable, and CI already resolves identity from it.
   contract-classification:
     name: Contract classification
-    needs: resolve
-    if: needs.resolve.outputs.repo_kind == 'deployable'
+    needs: [resolve, docs-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.repo_kind == 'deployable'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -1632,8 +1719,8 @@ jobs:
   # RFC-0039 (the normative control definitions).
   gateway-baseline:
     name: Gateway security baseline
-    needs: resolve
-    if: needs.resolve.outputs.repo_kind == 'deployable'
+    needs: [resolve, docs-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.repo_kind == 'deployable'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -1687,8 +1774,14 @@ jobs:
 
   contract:
     name: API contract
-    needs: resolve
-    if: needs.resolve.outputs.repo_kind == 'deployable' && needs.resolve.outputs.has_rest == 'true'
+    # Skipping this also skips contract PUBLICATION, and that is correct rather than a side
+    # effect: the spec lives at docs/openapi.json, which this gate's own classifier counts as
+    # code, so a diff that reaches here as documentation-only cannot have changed the contract.
+    needs: [resolve, docs-only]
+    if: >-
+      needs.docs-only.outputs.docs_only != 'true'
+      && needs.resolve.outputs.repo_kind == 'deployable'
+      && needs.resolve.outputs.has_rest == 'true'
     permissions:
       contents: read
       id-token: write
@@ -1739,8 +1832,11 @@ jobs:
   # controls/module-floors.yaml rather than re-decided here.
   openapi-generator:
     name: OpenAPI generator
-    needs: resolve
-    if: needs.resolve.outputs.repo_kind == 'deployable' && needs.resolve.outputs.has_rest == 'true'
+    needs: [resolve, docs-only]
+    if: >-
+      needs.docs-only.outputs.docs_only != 'true'
+      && needs.resolve.outputs.repo_kind == 'deployable'
+      && needs.resolve.outputs.has_rest == 'true'
     permissions:
       contents: read
       id-token: write
@@ -2033,8 +2129,11 @@ jobs:
   # on a workstation because the same code produced the checkout.
   e2e:
     name: End-to-end
-    needs: resolve
-    if: needs.resolve.outputs.repo_kind == 'deployable' && needs.resolve.outputs.language == 'go'
+    needs: [resolve, docs-only]
+    if: >-
+      needs.docs-only.outputs.docs_only != 'true'
+      && needs.resolve.outputs.repo_kind == 'deployable'
+      && needs.resolve.outputs.language == 'go'
     runs-on: ubuntu-latest
     # Image builds dominate: two Go services compiled from source. The auth suite measures ~70s
     # of test execution against roughly four minutes of build, so this ceiling is several times
@@ -2210,13 +2309,18 @@ jobs:
   # job: the standard lives in core-docs, the subject is the repository under test.
   source-invariants:
     name: Source invariants
-    needs: resolve
+    needs: [resolve, docs-only]
     # Go deployables and cores carry the callback/signature checks; schema repos carry the
     # forwarding SQL checks (C6/C7). Other languages have no scanner yet and must not get a
     # green tick for checks nobody ran.
+    #
+    # The documentation clause is parenthesised around the existing `||`, not appended to it.
+    # Appended, `&&` binds tighter and the schema-repo arm would have escaped the fast path
+    # entirely - the kind of precedence slip that reads correct and gates nothing.
     if: >-
-      needs.resolve.outputs.language == 'go'
-      || needs.resolve.outputs.repo_kind == 'schema'
+      needs.docs-only.outputs.docs_only != 'true'
+      && (needs.resolve.outputs.language == 'go'
+          || needs.resolve.outputs.repo_kind == 'schema')
     permissions:
       contents: read
       id-token: write
@@ -2307,8 +2411,12 @@ jobs:
 
   dependency-review:
     name: Dependency review
-    needs: resolve
-    if: github.event_name == 'pull_request'
+    # Provably vacuous on a documentation diff rather than merely expensive: this action reviews
+    # the change to the dependency graph, and that graph is derived from go.mod and go.sum, both
+    # of which the classifier counts as code. A diff that reaches here as documentation-only
+    # cannot have moved a dependency, so the review would compare a set against itself.
+    needs: [resolve, docs-only]
+    if: github.event_name == 'pull_request' && needs.docs-only.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -2400,8 +2508,17 @@ jobs:
     # runs only on `pull_request` while this job runs only on `push`, so on every run where
     # `artifact` executes it is already skipped. Listing it would imply a protection that cannot
     # exist rather than adding one.
-    needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
-            dockerfile, structure, vulnerabilities, sqlc, docs, contracts, contract,
+    #
+    # `docs-only` joins for a reason that is the mirror image of all of the above. Every gated job
+    # depends on it, so a crash there skips all of them at once - and this job tolerates `skipped`,
+    # by design, for the conditional gates. Unnamed here, one broken classifier would therefore
+    # skip every gate in the pipeline and then pin a digest from a tree nothing examined: the
+    # single largest hole this change could have opened. Named here, its `failure` stops the
+    # deploy, and the explicit docs_only clause below stops the deploy on the ordinary path too,
+    # because on a documentation-only push the gates are skipped rather than failed and this job
+    # would otherwise sail through its own aggregation.
+    needs: [resolve, docs-only, supported-language, standards, build-test, codeql, events, seeding,
+            schema, dockerfile, structure, vulnerabilities, sqlc, docs, contracts, contract,
             openapi-generator, lanes, integration, e2e]
     # workflow_dispatch counts alongside push, and deliberately so. A central pipeline change
     # ships by moving @v1, which raises no event in a service repo, and `gh run rerun` replays
@@ -2418,6 +2535,7 @@ jobs:
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && github.ref == 'refs/heads/main'
       && needs.resolve.outputs.deployable == 'true'
+      && needs.docs-only.outputs.docs_only != 'true'
       && !contains(needs.*.result, 'failure')
       && !contains(needs.*.result, 'cancelled')
     # Required, not optional hygiene. deploy-reusable.yaml declares `id-token: write` at workflow
@@ -2462,10 +2580,13 @@ jobs:
     # added, which is the same omission in the same list: each is ungated and so runs on every
     # deployable, and each can fail a run that nobody would be told about. Adding one and leaving
     # the other would have left the newer gate watched and the older one silent.
-    needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
-            dockerfile, structure, lanes, vulnerabilities, sqlc, docs, contracts, dependency-review,
-            integration, e2e, contract-classification, contract, gateway-baseline,
-            openapi-generator, artifact]
+    #
+    # `docs-only` is here so that a classifier that crashes is reported rather than merely
+    # inferred from a pipeline in which nothing ran.
+    needs: [resolve, docs-only, supported-language, standards, build-test, codeql, events, seeding,
+            schema, dockerfile, structure, lanes, vulnerabilities, sqlc, docs, contracts,
+            dependency-review, integration, e2e, contract-classification, contract,
+            gateway-baseline, openapi-generator, artifact]
     # always() rather than failure(): several gates above are conditional, and a plain failure()
     # does not run once any needed job has been skipped - which is the normal shape here, so the
     # alert would have fired only on the subset of runs where every gate happened to be relevant.
