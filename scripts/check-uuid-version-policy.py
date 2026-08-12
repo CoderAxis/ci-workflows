@@ -145,15 +145,54 @@ def controls_by_id(doc: dict) -> dict:
 # Scanner
 # ---------------------------------------------------------------------------
 
-def repo_has_go(root: Path) -> bool:
+def _within(path: Path, base: Path) -> bool:
+    return path == base or base in path.parents
+
+
+def repo_has_go(root: Path, exclude: list[Path] | tuple = ()) -> bool:
+    """Whether there is Go source here for the scanner to find.
+
+    `exclude` must be the same set the scan itself excludes. The two walks
+    disagreeing is its own failure: this one deciding "Go repository" from a file
+    the scanner then refuses to read produces an empty scan, and an empty scan is
+    exit 2 - a checker that cannot run - on a repository that simply has no Go.
+    """
     if (root / "go.mod").exists():
         return True
     for p in root.rglob("*.go"):
         parts = set(p.parts)
         if ".git" in parts or "vendor" in parts:
             continue
+        if any(_within(p, e) for e in exclude):
+            continue
         return True
     return False
+
+
+def excluded_paths(root: Path) -> list[Path]:
+    """Directories under `root` that must not be scanned.
+
+    This repository, when CI has checked it out INSIDE the tree under test. The
+    reusable workflow does exactly that - `actions/checkout` cannot place a
+    repository outside the workspace - so a walk of the caller's whole repository
+    also walks the checker's own tree, including fixtures/uuid-policy-violating,
+    which exists to contain what this gate rejects.
+
+    A computed path rather than a directory name in the catalog's `skip_dirs`.
+    The name is the workflow's choice and differs per job (`.uuid-tools` here,
+    `.central` and `.gateway-tools` in its siblings), so a hardcoded name is
+    stale the moment a job is renamed - and matching a bare name would also skip
+    a same-named directory that genuinely belongs to the repository under test.
+    Nothing fires today only because uuidscan skips every dot-directory itself;
+    that is luck about the workflow's naming, not a decision. Same instrument as
+    check-ci-identity.py's excluded_roots, for the same reason.
+
+    Empty when the scanned root is inside this repository: that is how the
+    fixtures and the self-test run, and there the fixtures ARE the subject.
+    """
+    if _within(root, REPO_ROOT):
+        return []
+    return [REPO_ROOT] if _within(REPO_ROOT, root) else []
 
 
 def run_scanner(root: Path, doc: dict, scanner_dir: Path, scanner_bin: str | None) -> dict:
@@ -165,6 +204,7 @@ def run_scanner(root: Path, doc: dict, scanner_dir: Path, scanner_bin: str | Non
         "marker_pattern": scan.get("marker_pattern", ""),
         "determinism_name_pattern": scan.get("determinism_name_pattern", ""),
         "skip_dirs": scan.get("skip_dirs") or [],
+        "skip_paths": [str(p) for p in excluded_paths(root)],
         "skip_test_files": bool(scan.get("skip_test_files", True)),
     }
     with tempfile.TemporaryDirectory() as tmp:
@@ -216,27 +256,47 @@ def type_matches(lit_type: str, accepted: list) -> bool:
     return any(got == a.split(".")[-1] for a in accepted)
 
 
+def sink_rule_for(sink: dict, by_field: dict) -> dict | None:
+    """The catalog sink a scanner fact answers to.
+
+    `sink_field` and `field` differ when uuidscan identified the sink by the
+    declaring type's accessor rather than by the field's name: a field spelled
+    `ID` on a type whose EventID() method returns it answers to the EventID sink.
+    Falling back to `field` keeps this readable against a report from an older
+    scanner, which emits no sink_field at all.
+    """
+    return by_field.get(sink.get("sink_field") or sink["field"])
+
+
 def rule_sink_contract(report: dict, doc: dict, ctl: dict) -> list[Finding]:
     by_field = {s["field"]: s for s in doc["sinks"]}
     out: list[Finding] = []
     for sink in report.get("sinks") or []:
-        rule = by_field.get(sink["field"])
+        rule = sink_rule_for(sink, by_field)
         if rule is None:
             continue
         kind = sink.get("value_kind") or ""
         if kind not in set(rule.get("rejects") or []):
             continue
-        if sink["site"] == "composite-literal" and not type_matches(sink.get("lit_type", ""), rule.get("types") or []):
+        inferred = sink.get("inferred_from") or ""
+        # The spelled-type constraint is what keeps a NAME match from firing on
+        # an unrelated struct that happens to have an EventID field. An inferred
+        # sink does not need it and must not be subjected to it: the evidence is
+        # that this very type declares the accessor returning this very field,
+        # which is stronger than the literal being spelled `outbox.Event`.
+        if not inferred and sink["site"] == "composite-literal" and not type_matches(
+                sink.get("lit_type", ""), rule.get("types") or []):
             continue
         c = ctl[rule["control"]]
         if c["status"] != "active":
             continue
         via = f" through {sink['via']}()" if sink.get("via") else ""
+        role = f", the event id of this type by {inferred}" if inferred else ""
         out.append(Finding(
             control=c["id"], severity=c["severity"], stage=c["stage"],
             file=sink["file"], line=sink["line"],
             message=(
-                f"{sink['field']} (outbox column {rule['column']}) is assigned "
+                f"{sink['field']} (outbox column {rule['column']}{role}) is assigned "
                 f"`{sink['value_expr']}`, a {KIND_VERSION[kind]} value{via}, but "
                 f"{rule['authority']} requires {KIND_VERSION[rule['requires']]}"
             ),
@@ -310,7 +370,7 @@ def deterministic_sink_functions(report: dict, doc: dict) -> set:
     names: set = set()
     lines: set = set()
     for sink in report.get("sinks") or []:
-        if sink["field"] not in wanted:
+        if (sink.get("sink_field") or sink["field"]) not in wanted:
             continue
         if sink.get("via"):
             names.add(sink["via"])
@@ -478,9 +538,14 @@ def main() -> int:
         cannot_run(f"--repo-root {root} is not a directory")
     doc = load_catalog(Path(args.control).resolve())
 
-    if not repo_has_go(root):
+    excluded = excluded_paths(root)
+    if not repo_has_go(root, excluded):
         print("uuid-version-policy: no Go source in this repository; skipping.")
         return 0
+
+    if args.format == "text":
+        for skipped in excluded:
+            print(f"[skip] {skipped.name}/: the checker's own checkout, not the caller's code")
 
     report = run_scanner(root, doc, Path(args.scanner).resolve(), args.scanner_bin)
     if report.get("files_scanned", 0) == 0:

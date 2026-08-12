@@ -5,16 +5,20 @@ Two things are pinned here, and the second matters more than the first.
 
 RECALL: every shape that actually shipped is asserted by control id AND line, so
 a refactor that keeps the checker exiting non-zero for the wrong reason still
-fails. The shapes are the two real regressions -- a UUIDv5 supplied as an outbox
-event_id (voice-gateway, fixed in 92a7df2) and the mustUUIDv7 stub that ignored
-its arguments (eleven repositories) -- plus the inverse direction and the ways a
+fails. The shapes are the three real regressions -- a UUIDv5 supplied as an
+outbox event_id (voice-gateway, fixed in 92a7df2), the mustUUIDv7 stub that
+ignored its arguments (eleven repositories), and a v4 supplied as an event id
+spelled `ID` and identifiable only by its type's EventID() accessor
+(identity-core, fixed in 315de91) -- plus the inverse direction and the ways a
 declaration can itself be wrong.
 
 PRECISION: the conformant fixture must produce ZERO findings. It is a catalogue
 of the places a non-v7 UUID is legitimately fine: the ADR-0035 Idempotency-Key
 header, request/correlation ids the standard declines to version, external vendor
 ids, well-known seeded constants, a deriver that falls back to a fresh id on
-empty input, a declared exception, and a test file. Any finding there is a false
+empty input, a declared exception, a test file, and -- the one that keeps the
+accessor inference from becoming the 613-finding version of this gate -- domain
+entities whose plain `ID` field is minted with a v4. Any finding there is a false
 positive, and a gate with false positives gets switched off, which is worse than
 no gate.
 """
@@ -117,6 +121,62 @@ def test_violating_fixture_fails() -> None:
            "UUID-0005 must flag the undeclared derivation at internal/undeclared/undeclared.go:15")
 
 
+def test_event_id_is_identified_by_its_accessor_not_its_name() -> None:
+    """The gap that let the live defect through. identity-core spells the outbox
+    event id `ID`, so a scan matching field NAMES alone produced no sink fact for
+    the entire repository and reported OK. A field is the event id when its
+    declaring type has an EventID() method returning it -- including when the
+    literal is built one package away from the type, which is where the real
+    handler built it."""
+    _, payload, _ = run(VIOLATING)
+    got = sites(payload)
+    for f, line, why in (
+        ("internal/creation/handler.go", 22, "the literal is built in another package of the module"),
+        ("internal/identity/events.go", 39, "the value arrives through a local variable"),
+    ):
+        expect(("UUID-0001", f, line) in got,
+               f"UUID-0001 must flag {f}:{line} - a v4 into a field the type's EventID() "
+               f"accessor returns ({why})")
+    messages = [f["message"] for f in payload.get("findings", [])
+                if f["file"] == "internal/creation/handler.go"]
+    expect(any("EventID()" in m for m in messages),
+           "the finding must name the accessor that identified the field, or a reviewer "
+           f"cannot tell why `ID` was judged an event id: {messages}")
+
+
+def test_a_plain_entity_id_is_not_an_event_id() -> None:
+    """The negative half, and the one that decides whether this gate survives.
+    Configuring `ID` as a sink field name was measured at 613 findings across the
+    fleet, almost all of them entity ids on domain structs where a v4 violates
+    nothing. The catalog says that volume is what gets a gate switched off, so a
+    struct with an ID field and no EventID() accessor must be invisible."""
+    catalog = CONFORMANT / "internal/catalog/product.go"
+    expect(catalog.exists(),
+           "the conformant fixture must keep domain entities minting a v4 `ID`, or this "
+           "test stops testing anything")
+    expect("uuid.New()" in catalog.read_text(encoding="utf-8"),
+           "the entity fixture must keep minting its ID with a v4")
+    _, payload, _ = run(CONFORMANT)
+    flagged = [f"{f['control']} {f['file']}:{f['line']}" for f in payload.get("findings", [])]
+    expect(not flagged,
+           "an ID field on a type with no EventID() accessor is entity identity and no "
+           f"document versions it; flagged: {flagged}")
+
+
+def test_a_conformant_accessor_sink_is_recognised_and_silent() -> None:
+    """A rule that only ever fires proves nothing about why it fires. The
+    conformant fixture carries the same accessor shape as the violating one with a
+    v7 in the field, so the inference has to reach it and then find it clean."""
+    fixture = CONFORMANT / "internal/identity/events.go"
+    text = fixture.read_text(encoding="utf-8")
+    expect("func (e IdentityCreatedEvent) EventID() uuid.UUID" in text,
+           "the conformant fixture must keep an event id identified only by its accessor")
+    _, payload, _ = run(CONFORMANT)
+    expect(not any(f["file"] == "internal/identity/events.go"
+                   for f in payload.get("findings", [])),
+           "a v7 in an accessor-identified event id is exactly what ADR-0071 asks for")
+
+
 def test_declaration_mechanism_polices_itself() -> None:
     _, payload, _ = run(VIOLATING)
     got = sites(payload)
@@ -217,6 +277,24 @@ def test_catalog_is_valid_and_self_consistent() -> None:
     for sink in doc["sinks"]:
         for k in [sink["requires"], *sink["rejects"]]:
             expect(k in kinds, f"sink {sink['field']} references unknown kind {k!r}")
+    # The detector fires on `rejects`, so a kind missing from it is passed over in
+    # silence however plainly `requires` contradicts it. That asymmetry is the
+    # whole of how a v4 event_id went unnoticed: EventID required fresh-v7 and
+    # rejected only the two deterministic kinds, while IdempotencyKey directly
+    # below it already rejected random-v4. A sink requiring a fresh v7 admits
+    # nothing else -- resolveEventID hard errors on every other version -- so
+    # every other kind has to be listed.
+    for sink in doc["sinks"]:
+        if sink["requires"] != "fresh-v7":
+            # idempotency_key deliberately does not reject deterministic-v3: a v3
+            # is still derived from its inputs, which is the property ADR-0071
+            # decision 2 is after, so it is a documentation question and not a
+            # silently broken dedup key.
+            continue
+        for k in sorted(kinds - {"fresh-v7"}):
+            expect(k in sink["rejects"],
+                   f"sink {sink['field']} requires fresh-v7 but does not reject {k!r}, so a "
+                   f"{k} value there is passed over in silence")
     for r in doc["reasons"]:
         for key in ("token", "adr", "description"):
             expect(bool(r.get(key)), f"reason {r.get('token')!r} is missing {key}")
@@ -231,7 +309,7 @@ def main() -> int:
         for f in FAILURES:
             print(f"::error::{f}")
         return 1
-    print(f"uuid-version-policy self-test: OK ({len(tests)} test(s)) - recall pinned on both "
+    print(f"uuid-version-policy self-test: OK ({len(tests)} test(s)) - recall pinned on all three "
           f"shipped regressions, precision pinned at zero findings on the conformant fixture.")
     return 0
 
