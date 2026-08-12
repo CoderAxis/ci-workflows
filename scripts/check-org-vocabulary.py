@@ -282,6 +282,175 @@ def find_files_to_scan(root: Path, skip_dirs: list[str], excluded: list[Path]) -
         yield path
 
 
+# ---------------------------------------------------------------------------
+# ORG-0002: identifiers only
+# ---------------------------------------------------------------------------
+# ORG-0001 above matches the word anywhere, prose included, which is why it is
+# at `warn` and cannot be promoted: the standard that declares "tenant" legacy
+# has to say the word to say what it is deprecating. ORG-0002 is the narrow
+# control that CAN reach enforce, and it earns that by answering a different
+# question - is there an IDENTIFIER named after the legacy term - rather than by
+# exempting the documentation that ORG-0001 trips over.
+
+# Only code. No .md, .rst or .txt: prose is ORG-0001's subject, and re-reading it
+# here under a stricter stage is how a narrow control becomes a broad one.
+IDENTIFIER_EXTENSIONS = {
+    '.go', '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.scala', '.rb', '.php',
+    '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.cs', '.rs', '.kt', '.swift',
+    '.sh', '.bash', '.zsh', '.sql', '.yaml', '.yml', '.json', '.tf', '.hcl',
+    '.proto', '.tmpl',
+}
+
+# Four case shapes, each anchored on a NON-WORD character before "tenant".
+#
+# The anchor is the whole design. `Tenant[A-Z]` without it matches
+# TestSharedSpecIsTenantNeutral and TestCrossTenantIsolation - Go test names
+# that use the word as prose in a sentence, which is precisely what this control
+# must not re-flag. With the anchor, "Tenant" has to START the identifier, so
+# `TenantID` matches and `IsTenantNeutral` does not. The same anchor is what
+# separates `tenant_id` from `resolve_tenant_id_from_header`... which is a
+# deliberate omission: an identifier whose LEADING word is the legacy term is a
+# declaration of a tenant-shaped thing, while one that merely contains it is a
+# description, and only the first is a structural fact about the data model.
+IDENTIFIER_PATTERNS = (
+    ("snake_case", re.compile(r'(?<![A-Za-z0-9_])tenant_[a-z0-9]+(?:_[a-z0-9]+)*')),
+    ("lowerCamelCase", re.compile(r'(?<![A-Za-z0-9_])tenant[A-Z][A-Za-z0-9]*')),
+    ("UpperCamelCase", re.compile(r'(?<![A-Za-z0-9_])Tenant[A-Z][A-Za-z0-9]*')),
+    ("SCREAMING_SNAKE_CASE", re.compile(r'(?<![A-Za-z0-9_])TENANT_[A-Z0-9]+(?:_[A-Z0-9]+)*')),
+)
+
+LINE_COMMENT_TOKENS = {
+    '.go': ("//",), '.js': ("//",), '.ts': ("//",), '.jsx': ("//",), '.tsx': ("//",),
+    '.java': ("//",), '.scala': ("//",), '.c': ("//",), '.cpp': ("//",), '.cc': ("//",),
+    '.cxx': ("//",), '.h': ("//",), '.hpp': ("//",), '.cs': ("//",), '.rs': ("//",),
+    '.kt': ("//",), '.swift': ("//",), '.php': ("//", "#"), '.proto': ("//",),
+    '.py': ("#",), '.rb': ("#",), '.sh': ("#",), '.bash': ("#",), '.zsh': ("#",),
+    '.yaml': ("#",), '.yml': ("#",), '.tf': ("#", "//"), '.hcl': ("#", "//"),
+    '.tmpl': ("//",), '.sql': ("--",), '.json': (),
+}
+
+
+def mask_non_code(text: str, suffix: str) -> str:
+    """Blank out comments and string literals, preserving line and column layout.
+
+    Without this the control would report a documentation FILENAME as an
+    identifier. Measured 2026-08-12: 92 of the 116 fleet-wide matches for these
+    patterns are the literal 'docs/workflows/TENANT_ONBOARDING_FLOW.md' inside
+    the legacy per-repo scripts/validate_docs.py - a string naming a markdown
+    file, in 92 copies of a script central CI already absorbed. A further three
+    are the words `tenant_role_bindings` written in a comment explaining a seed
+    step. None of the 95 declares anything, and a control that reported them
+    would be ORG-0001 with extra steps.
+
+    Deliberately a lexer-shaped approximation rather than a parser. It has to
+    serve seven language families at once, and the failure direction is safe:
+    mis-masking hides a finding from an advisory control, it cannot invent one.
+    """
+    line_tokens = LINE_COMMENT_TOKENS.get(suffix, ("#", "//"))
+    out: list[str] = []
+    i, n = 0, len(text)
+    quote: str | None = None       # the delimiter we are inside, if any
+    in_block = False               # inside /* ... */
+    while i < n:
+        ch = text[i]
+        if ch == "\n":
+            out.append("\n")
+            i += 1
+            continue
+        if in_block:
+            if text.startswith("*/", i):
+                in_block = False
+                out.append("  ")
+                i += 2
+                continue
+            out.append(" ")
+            i += 1
+            continue
+        if quote is not None:
+            if ch == "\\" and i + 1 < n and text[i + 1] != "\n":
+                out.append("  ")
+                i += 2
+                continue
+            if text.startswith(quote, i):
+                out.append(" " * len(quote))
+                i += len(quote)
+                quote = None
+                continue
+            out.append(" ")
+            i += 1
+            continue
+        # Not in a string or block comment.
+        if suffix != ".json" and text.startswith("/*", i):
+            in_block = True
+            out.append("  ")
+            i += 2
+            continue
+        started = False
+        for tok in line_tokens:
+            if text.startswith(tok, i):
+                end = text.find("\n", i)
+                end = n if end == -1 else end
+                out.append(" " * (end - i))
+                i = end
+                started = True
+                break
+        if started:
+            continue
+        for delim in ('"""', "'''", '"', "'", "`"):
+            # Triple quotes are Python's docstrings, which is where a self-test
+            # describing `tenantID` lives; backticks are Go raw strings and JS
+            # templates. All three span lines, so they are handled by the same
+            # state as ordinary quotes rather than line by line.
+            if delim in ('"""', "'''") and suffix != ".py":
+                continue
+            if text.startswith(delim, i):
+                quote = delim
+                out.append(" " * len(delim))
+                i += len(delim)
+                started = True
+                break
+        if started:
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def scan_file_for_identifiers(file_path: Path, root: Path,
+                              exceptions: list[Exception]) -> list[Finding]:
+    """ORG-0002: identifiers named after the legacy term, in code only."""
+    if file_path.suffix.lower() not in IDENTIFIER_EXTENSIONS:
+        return []
+    try:
+        text = file_path.read_text(encoding='utf-8', errors='replace')
+    except (OSError, UnicodeDecodeError):
+        return []
+    if "tenant" not in text.lower():
+        return []
+
+    rel_path = str(file_path.relative_to(root))
+    for exc in exceptions:
+        if exc.matches(rel_path, text):
+            return []
+
+    findings: list[Finding] = []
+    for line_num, line in enumerate(mask_non_code(text, file_path.suffix.lower()).splitlines(), 1):
+        for shape, rx in IDENTIFIER_PATTERNS:
+            for match in rx.finditer(line):
+                findings.append(Finding(
+                    control="ORG-0002",
+                    severity="major",
+                    stage="enforce",
+                    file=rel_path,
+                    line=line_num,
+                    column=match.start() + 1,
+                    match=match.group(),
+                    message=(f"{shape} identifier '{match.group()}' is named after the "
+                             f"legacy scope term; the canonical term is 'org'"),
+                ))
+    return findings
+
+
 def scan_file_for_tenant(file_path: Path, root: Path, exceptions: list[Exception]) -> list[Finding]:
     """Scan a single file for 'tenant' usage and return findings."""
     try:
@@ -353,8 +522,13 @@ def scan_repository(root: Path, doc: dict) -> tuple[list[Finding], dict]:
     files_scanned = 0
     
     for file_path in files_to_scan:
-        findings = scan_file_for_tenant(file_path, root, exceptions)
-        all_findings.extend(findings)
+        # Two independent passes over the same file, one per control. ORG-0002
+        # is ADDITIVE: it does not narrow, filter or suppress anything ORG-0001
+        # reports, because ORG-0001 is at the strictest setting the fleet chose
+        # and quietly making it narrower under the cover of adding a second
+        # control would be a policy change wearing a refactor's clothes.
+        all_findings.extend(scan_file_for_tenant(file_path, root, exceptions))
+        all_findings.extend(scan_file_for_identifiers(file_path, root, exceptions))
         files_scanned += 1
     
     scan_stats = {

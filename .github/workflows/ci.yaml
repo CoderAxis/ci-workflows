@@ -182,6 +182,76 @@ jobs:
       - name: Range computation and path classification, against real repositories
         run: python3 scripts/test_docs_only_diff.py
 
+  # ── org vocabulary (ORG-0001 broad, ORG-0002 identifiers) ──────────────────────────────────
+  # Arrived without a job here, which is the omission this file's own header warns about: "new
+  # central checkers should arrive with a self-test here". Added now, alongside ORG-0002.
+  #
+  # Both directions matter and they are not the same direction. ORG-0001 is broad and advisory, so
+  # its risk is that a stage bug makes it block (it shipped once exiting non-zero at stage: warn).
+  # ORG-0002 is narrow and meant to reach `enforce`, so its risk is the opposite: a pattern that
+  # re-flags prose would put an error on 92 repositories for the name of a markdown file.
+  org-vocabulary:
+    name: Org vocabulary - stage behaviour, exception precision, identifier scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install guard dependencies
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Stages, exceptions, harness exclusion and ORG-0002's identifier scope
+        run: python3 scripts/test_org_vocabulary.py
+
+      # A checker that stops matching must not read as a pass. This repository's own fixture tree
+      # carries a tenant-named identifier on purpose, so ORG-0002 must still find it when the
+      # exception that hides it from the fleet scan is not in the way.
+      - name: Mutation test - ORG-0002 still detects a declaration
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "${work}"' EXIT
+          printf 'package p\n\ntype TenantService struct {\n\tTenantID string\n}\n' \
+            > "${work}/handler.go"
+          python3 - "${work}/control.yaml" <<'PY'
+          import sys, yaml
+          yaml.safe_dump({
+              "version": 1,
+              "domain": "org-vocabulary-policy",
+              "policy_ssot": ["docs/standard.md"],
+              "exceptions": [],
+              "scan": {"skip_dirs": [], "skip_test_files": False},
+              "controls": [{
+                  "id": "ORG-0002", "title": "Identifier scope",
+                  "owner": "platform-architecture", "scope": "identifiers",
+                  "status": "active", "severity": "major", "stage": "enforce",
+                  "policy": "No identifier may take the legacy term as its leading word.",
+                  "rationale": "Identifiers are structural commitments.",
+                  "remediation": "Rename the identifier so its leading word is org.",
+                  "detector": "tenant_identifier_check",
+                  "refs": ["docs/standard.md"],
+              }],
+          }, open(sys.argv[1], "w"))
+          PY
+          set +e
+          out="$(python3 scripts/check-org-vocabulary.py \
+                   --repo-root "${work}" --control "${work}/control.yaml" 2>&1)"
+          rc=$?
+          set -e
+          printf '%s\n' "${out}"
+          if [ "${rc}" -eq 0 ]; then
+            echo "::error::ORG-0002 passed a file declaring TenantService and TenantID"
+            exit 1
+          fi
+          grep -q 'ORG-0002' <<<"${out}" || {
+            echo "::error::the failure was not attributed to ORG-0002"; exit 1; }
+
   # ── shared HTTP retry helper (ci-app-token, ci-slack-notify) ───────────────────────────────
   # scripts/lib/http_retry.py is what stands between a single flaky TLS handshake and a whole
   # job failing - see its module docstring for the 2026-08-11 bump-module-pin incident it fixes:
