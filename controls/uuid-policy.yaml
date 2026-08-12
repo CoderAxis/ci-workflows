@@ -98,11 +98,34 @@ unwrappers:
 # be the noise that gets a gate switched off. `id` is not listed because the
 # shared INSERT omits the column, so DEFAULT uuidv7() always fires and
 # outboxverify already covers it.
+#
+# A sink is matched on the field NAME above, and ALSO on the declaring type's
+# accessor: a field is the event id when its type has an EventID() method that
+# returns it, whatever the field is spelled. Both defects this gate missed spell
+# it `ID` - on IdentityCreatedEvent and on domain.OrderCreated - so a name-only
+# match emitted no sink fact at all for identity-core, and reported OK on the
+# live identity-creation path. (order-core-postgres's site is in a _test.go, so
+# scan.skip_test_files keeps it out either way; the accessor reaches the same
+# field where order-core itself declares and builds it.) Listing `ID` as a sink
+# NAME instead was measured at 613 fleet-wide findings, nearly all entity ids on
+# Product, Plan, Subscription and User where no document states a version; the
+# accessor is what separates the event id from those.
+#
+# `rejects` is the key the detector fires on, not `requires`. A kind absent from
+# `rejects` is passed over in silence however plainly `requires` contradicts it,
+# so the two lists have to be kept consistent by hand - which is how a v4
+# event_id went unnoticed while `requires: fresh-v7` sat right above it.
 sinks:
   - field: EventID
     types: [outbox.Event, Event]
     requires: fresh-v7
-    rejects: [deterministic-v5, deterministic-v3]
+    # random-v4 is here because ADR-0071 decision 1 asks for a FRESH V7, and a
+    # v4 is fresh but not time-sortable, so it satisfies neither the ordering the
+    # column exists to give nor platform-shared-go's resolveEventID, which hard
+    # errors on any non-v7 supplied event_id. It was measured at zero findings
+    # across all 103 Go modules when added, so it costs nothing today and stands
+    # as a ratchet against the direct `EventID: uuid.New()` form.
+    rejects: [deterministic-v5, deterministic-v3, random-v4]
     control: UUID-0001
     authority: ADR-0071 decision 1
     column: event_id
@@ -165,7 +188,12 @@ reasons:
 # Scan scope
 # ---------------------------------------------------------------------------
 scan:
-  skip_dirs: [vendor, node_modules, testdata, .git, .central, dist, build]
+  # No entry here for this repository's own checkout inside the tree under test.
+  # `.central` used to be listed and was already wrong - the job that runs this
+  # scan checks out at `.uuid-tools` - and any name is the workflow's choice, so
+  # the checker computes that path instead (check-uuid-version-policy.py
+  # excluded_paths, the same instrument check-ci-identity.py uses).
+  skip_dirs: [vendor, node_modules, testdata, .git, dist, build]
   # Test files mint arbitrary UUIDs to build fixtures. Including them would
   # produce exactly the noisy suppressions that get a gate disabled.
   skip_test_files: true
@@ -174,7 +202,7 @@ scan:
 
 controls:
   - id: UUID-0001
-    title: A deterministic UUID never becomes an outbox event_id
+    title: A non-v7 UUID never becomes an outbox event_id
     owner: platform-eventing
     scope: source
     status: active
@@ -182,20 +210,29 @@ controls:
     stage: enforce
     waivable: false
     policy: >-
-      An outbox row's event_id is a fresh per-occurrence UUIDv7. A value produced
-      by a name-based deterministic constructor (uuid.NewSHA1 / uuid.NewMD5),
-      directly or through a helper, MUST NOT be supplied as Event.EventID.
+      An outbox row's event_id is a fresh per-occurrence UUIDv7. Neither a
+      deterministic value (uuid.NewSHA1 / uuid.NewMD5) nor a random v4
+      (uuid.New / uuid.NewRandom / uuid.NewString), directly or through a
+      helper, MAY be supplied as the event id - which is Event.EventID, and is
+      equally any field a type's own EventID() method returns.
     rationale: >-
-      ADR-0071 decision 1 makes event_id occurrence identity and says explicitly
-      it is not deterministic; the deterministic identity is idempotency_key.
-      Nothing enforced this. The DDL cannot: DEFAULT uuidv7() never fires because
-      the shared INSERT names the column. outboxverify cannot: it introspects the
-      catalog and never reads a value. outboxwritepath samples rows but checks no
-      version. So a caller supplying a v5 event_id passed every existing gate,
-      which is what the voice-gateway emitter and teardown handler did.
+      ADR-0071 decision 1 makes event_id occurrence identity, says explicitly it
+      is not deterministic, and requires v7 so the column is time-sortable; the
+      deterministic identity is idempotency_key. Nothing enforced this. The DDL
+      cannot: DEFAULT uuidv7() never fires because the shared INSERT names the
+      column. outboxverify cannot: it introspects the catalog and never reads a
+      value. outboxwritepath samples rows but checks no version. So a caller
+      supplying a v5 event_id passed every existing gate, which is what the
+      voice-gateway emitter and teardown handler did. The v4 half was written
+      narrowly at first, because the control was built to catch that v5
+      conflation; it says v7 now because that is what the ADR and this sink's
+      own `requires: fresh-v7` say, and because platform-shared-go v1.36.0's
+      resolveEventID hard errors on any supplied event_id that is not a v7 -
+      which is how identity-core's live identity-creation path failed on a v4.
     remediation: >-
-      Leave Event.EventID zero and let outbox.resolveEventID mint the v7; put the
-      derived value on Event.IdempotencyKey, which is the field ADR-0071 gives it.
+      Leave the event id zero and let outbox.resolveEventID mint the v7, or mint
+      it with uuid.NewV7 / ids.MustUUIDv7; put a derived value on
+      Event.IdempotencyKey, which is the field ADR-0071 gives it.
     detector: sink_version_contract
     refs: [ADR-0071, RFC-0032]
 

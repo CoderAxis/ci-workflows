@@ -71,14 +71,23 @@ jobs:
       - name: Install guard dependencies
         run: python3 -m pip install --upgrade PyYAML
 
-      # Recall is pinned by control id AND line on both defects that actually shipped: the UUIDv5
-      # supplied as an outbox event_id, and the mustUUIDv7 stub that ignored its arguments. Precision
-      # is pinned harder: the conformant fixture must produce ZERO findings, because it is a
-      # catalogue of the places a non-v7 UUID is legitimately fine (the ADR-0035 Idempotency-Key
+      # Recall is pinned by control id AND line on the three defects that actually shipped: the
+      # UUIDv5 supplied as an outbox event_id, the mustUUIDv7 stub that ignored its arguments, and
+      # the v4 on an event id spelled `ID` that only its type's EventID() accessor identifies.
+      # Precision is pinned harder: the conformant fixture must produce ZERO findings, because it is
+      # a catalogue of the places a non-v7 UUID is legitimately fine (the ADR-0035 Idempotency-Key
       # header, ids the standard declines to version, vendor ids, seeded constants, a deriver with a
-      # fresh fallback, a declared exception, a test file). A gate that cries wolf gets switched off.
+      # fresh fallback, a declared exception, a test file, and domain entity ids). A gate that cries
+      # wolf gets switched off.
       - name: Fixtures pin both detection and the false-positive rate
         run: python3 scripts/test_uuid_version_policy.py
+
+      # The analyser's own unit tests, and the negative case is the point of them: a plain `ID` field
+      # on a domain struct must produce no sink fact at all. Adding `ID` as a sink field NAME instead
+      # of inferring it from the type's EventID() accessor was measured at 613 findings across the
+      # fleet, nearly all of them entity ids that no document versions.
+      - name: The analyser's sink inference has unit tests
+        run: GOWORK=off GOFLAGS=-mod=mod GOPROXY=off go test -C tools/uuidscan ./...
 
       # A checker that stops matching must not read as a pass. The violating fixture is known dirty,
       # so a zero exit here means the detector broke, and the specific control ids prove it is still

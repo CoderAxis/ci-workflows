@@ -314,7 +314,7 @@ introspects `pg_catalog` and never reads a value. `outboxwritepath` samples rows
 but checks no version. So a caller supplying a v5 `event_id` passed all three, and
 one did.
 
-Three design choices are worth knowing before changing it:
+Four design choices are worth knowing before changing it:
 
 - **It parses, it does not grep.** The fixed form of the real regression quotes
   both `uuid.NewSHA1` and `uuid.Must(uuid.NewV7())` in a doc comment explaining
@@ -334,6 +334,16 @@ Three design choices are worth knowing before changing it:
   "Unspecified — no doc states a version" and says the standard MUST NOT invent
   one; a gate that flagged them would be inventing policy, and that is the noise
   that gets a gate switched off.
+- **A sink is identified by its type's accessor, not only by its field name.** A
+  field is the event id when its declaring type has an `EventID()` method that
+  returns it, however the field is spelled. Field names alone missed a live defect:
+  `identity-core` and `order-core` both spell it `ID`, so a name-only scan emitted
+  no sink fact at all for those repositories and reported `OK`. Adding `ID` as a
+  sink *name* instead was measured at 613 findings across the fleet — the id of
+  every `Product`, `Plan`, `Subscription` and `User`, none of them a violation of
+  anything — so the accessor is what separates an event id from entity identity.
+  The inference is package-level, because the method, the struct and the composite
+  literal are routinely three different files.
 
 [`scripts/uuid-version-probe.sql`](scripts/uuid-version-probe.sql) is the runtime
 companion for the half no static pass can decide: a UUID carried in from another

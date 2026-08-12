@@ -19,8 +19,20 @@
 // a gate that runs fleet-wide today from the CI repo and one that needs a Go
 // module bump plus credentials in every repo. The cost is real and stated in the
 // residue: without types, a sink is matched on field NAME (constrained by the
-// composite literal's spelled type) and taint is followed through calls the
-// parser can see, never through an interface or a func value.
+// composite literal's spelled type, or by the accessor below) and taint is
+// followed through calls the parser can see, never through an interface or a
+// func value.
+//
+// A sink field is therefore identified two ways. The configured name is one
+// (`EventID`). The other is syntactic inference: a field IS the event id when
+// its declaring type has an EventID() method that returns it, whatever the field
+// is spelled. That is decidable from source, and it is the step that a
+// name-only match got wrong — the two defects this gate missed both spell the
+// field `ID`, on IdentityCreatedEvent and on domain.OrderCreated, so a
+// name-only scan emitted no sink fact at all for identity-core and reported the
+// live path clean. Adding `ID` as a sink name instead was measured at 613
+// fleet-wide findings, nearly all entity ids on domain structs where v4 is
+// nobody's violation; the accessor is what separates the two.
 package main
 
 import (
@@ -61,7 +73,13 @@ type config struct {
 	MarkerPattern   string     `json:"marker_pattern"`
 	DeterminismName string     `json:"determinism_name_pattern"`
 	SkipDirs        []string   `json:"skip_dirs"`
-	SkipTestFiles   bool       `json:"skip_test_files"`
+	// SkipPaths are absolute directory paths to leave unwalked, used for the
+	// checker's own checkout when CI has placed it inside the tree under test.
+	// A path rather than a directory NAME because the name is the workflow's
+	// choice and differs per job, while matching a bare name would also skip a
+	// same-named directory that really belongs to the repository being scanned.
+	SkipPaths     []string `json:"skip_paths"`
+	SkipTestFiles bool     `json:"skip_test_files"`
 }
 
 // ---------------------------------------------------------------------------
@@ -86,13 +104,23 @@ type constructorFact struct {
 // sinkFact is one assignment into a field the policy cares about.
 type sinkFact struct {
 	position
-	Field     string `json:"field"`
-	LitType   string `json:"lit_type"`
-	ValueKind string `json:"value_kind"`
-	ValueExpr string `json:"value_expr"`
-	Via       string `json:"via"`  // same-repo function the value came through
-	Site      string `json:"site"` // composite-literal | field-assign
-	InFunc    string `json:"in_func"`
+	Field string `json:"field"`
+	// SinkField is the configured sink this fact answers to. It equals Field
+	// when the field was matched by name, and names the sink the accessor
+	// established when it was not: `ID` on a type with an EventID() method that
+	// returns it answers to the EventID sink.
+	SinkField string `json:"sink_field"`
+	// InferredFrom names the accessor that established the sink, e.g.
+	// "IdentityCreatedEvent.EventID()". Empty when the field name was configured,
+	// so the policy layer can tell evidence-by-inference from evidence-by-name
+	// and apply the spelled-type constraint only to the latter.
+	InferredFrom string `json:"inferred_from"`
+	LitType      string `json:"lit_type"`
+	ValueKind    string `json:"value_kind"`
+	ValueExpr    string `json:"value_expr"`
+	Via          string `json:"via"`  // same-repo function the value came through
+	Site         string `json:"site"` // composite-literal | field-assign
+	InFunc       string `json:"in_func"`
 }
 
 // funcFact is a function whose returned UUID kind, or whose honesty about
@@ -170,6 +198,12 @@ type scanner struct {
 	unwrap map[string]bool
 	// sinks maps field name -> acceptable spelled literal types (nil = any).
 	sinks map[string][]string
+	// accessors maps "dir\x00TypeName" -> field name -> the sink field whose
+	// accessor method returns that field. It is what lets a field spelled `ID`
+	// be recognised as the event id, and it is keyed by DIRECTORY rather than by
+	// file because the method and the struct routinely sit in different files of
+	// the same package (and the composite literal in a third package entirely).
+	accessors map[string]map[string]string
 
 	// funcKinds maps "dir\x00FuncName" -> resolved kind, filled to a fixpoint.
 	funcKinds map[string]string
@@ -271,6 +305,7 @@ func newScanner(cfg config, root string) (*scanner, error) {
 		ctors:         map[string]string{},
 		unwrap:        map[string]bool{},
 		sinks:         map[string][]string{},
+		accessors:     map[string]map[string]string{},
 		funcKinds:     map[string]string{},
 		importDir:     map[string]string{},
 	}
@@ -316,6 +351,21 @@ func (s *scanner) skipDir(name string) bool {
 	return strings.HasPrefix(name, ".") && name != "." && name != ".."
 }
 
+// skipPath reports whether a directory is one the policy layer named outright,
+// which today means the checker's own checkout inside the tree under test.
+func (s *scanner) skipPath(path string) bool {
+	clean := filepath.Clean(path)
+	for _, p := range s.cfg.SkipPaths {
+		if p == "" {
+			continue
+		}
+		if clean == filepath.Clean(p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *scanner) run() error {
 	files, err := s.parseAll()
 	if err != nil {
@@ -344,6 +394,11 @@ func (s *scanner) run() error {
 		}
 		s.importDir[ip] = dir
 	}
+
+	// The accessor index has to exist before any sink is recorded, and it is
+	// built from every file at once: the EventID() method and the struct it
+	// belongs to are commonly in different files of one package.
+	s.indexAccessors(files)
 
 	// Resolving a function's kind can depend on another function's kind, so
 	// iterate to a fixpoint. The bound is small because these chains are short
@@ -388,7 +443,7 @@ func (s *scanner) parseAll() ([]*pkgFile, error) {
 			return nil // an unreadable subtree must not silence the whole scan
 		}
 		if d.IsDir() {
-			if path != s.root && s.skipDir(d.Name()) {
+			if path != s.root && (s.skipDir(d.Name()) || s.skipPath(path)) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -625,6 +680,173 @@ func (s *scanner) fileLevelKinds(f *pkgFile) map[string]string {
 }
 
 // ---------------------------------------------------------------------------
+// Sink identity by accessor
+// ---------------------------------------------------------------------------
+
+// indexAccessors records, for every configured sink field F, each type that
+// declares a method named F returning one of its own fields. That field then IS
+// the sink, whatever it is spelled.
+//
+// The inference is the whole of what the field-NAME match was missing, and it is
+// deliberately narrow. It fires only on a method that takes no argument, returns
+// exactly one value, and returns a direct `recv.Field` selector — the shape of
+// the Event interface's accessor (EventID() uuid.UUID) and of nothing else. A
+// type that merely has an `ID` field is not touched, which is the difference
+// between this and configuring `ID` as a sink name: the latter was measured at
+// 613 fleet-wide findings on Product, Plan, Subscription and User ids that no
+// document versions, and that volume is what gets a gate switched off.
+func (s *scanner) indexAccessors(files []*pkgFile) {
+	for _, f := range files {
+		for _, d := range f.file.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil || fd.Recv == nil || len(fd.Recv.List) == 0 {
+				continue
+			}
+			if _, watched := s.sinks[fd.Name.Name]; !watched {
+				continue
+			}
+			if fd.Type.Params != nil && len(fd.Type.Params.List) > 0 {
+				continue // takes an argument, so it is not a plain accessor
+			}
+			if fd.Type.Results == nil || len(fd.Type.Results.List) != 1 {
+				continue // returns nothing, or more than the id
+			}
+			recvName, typeName := receiverParts(fd.Recv.List[0])
+			if recvName == "" || typeName == "" {
+				continue
+			}
+			key := f.dir + "\x00" + typeName
+			for _, field := range returnedFields(fd, recvName) {
+				if field == fd.Name.Name {
+					continue // already matched by name; nothing to infer
+				}
+				if s.accessors[key] == nil {
+					s.accessors[key] = map[string]string{}
+				}
+				s.accessors[key][field] = fd.Name.Name
+			}
+		}
+	}
+}
+
+// receiverParts returns the receiver's variable name and the base name of its
+// type, unwrapping a pointer receiver and type parameters. An unnamed receiver
+// yields "", because a method that cannot name itself cannot return one of its
+// own fields.
+func receiverParts(recv *ast.Field) (name string, typeName string) {
+	if len(recv.Names) > 0 && recv.Names[0].Name != "_" {
+		name = recv.Names[0].Name
+	}
+	typeName = baseTypeName(recv.Type)
+	return name, typeName
+}
+
+// baseTypeName reduces *Foo, Foo[T] and *Foo[T] to Foo, and yields "" for
+// anything else.
+func baseTypeName(e ast.Expr) string {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name
+	case *ast.StarExpr:
+		return baseTypeName(x.X)
+	case *ast.IndexExpr:
+		return baseTypeName(x.X)
+	case *ast.IndexListExpr:
+		return baseTypeName(x.X)
+	}
+	return ""
+}
+
+// returnedFields lists the receiver's own fields the accessor can return. All of
+// them, not one: a method with a branch returning either field means both fields
+// can be the id, and dropping the ambiguous case would lose exactly the recall
+// this inference exists for.
+func returnedFields(fd *ast.FuncDecl, recvName string) []string {
+	seen := map[string]bool{}
+	var out []string
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false // a nested literal's returns are its own
+		}
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		for _, r := range ret.Results {
+			sel, ok := r.(*ast.SelectorExpr)
+			if !ok {
+				continue
+			}
+			id, ok := sel.X.(*ast.Ident)
+			if !ok || id.Name != recvName {
+				continue // e.g. e.wrapped.ID: not a field of this type
+			}
+			if !seen[sel.Sel.Name] {
+				seen[sel.Sel.Name] = true
+				out = append(out, sel.Sel.Name)
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// sinkRole reports which configured sink a composite-literal field answers to.
+// A configured field name answers to itself; any other field answers to the sink
+// its declaring type's accessor establishes.
+func (s *scanner) sinkRole(f *pkgFile, litType ast.Expr, field string) (sinkField string, inferredFrom string, ok bool) {
+	if _, watched := s.sinks[field]; watched {
+		return field, "", true
+	}
+	dir, typeName, resolved := s.resolveLitType(f, litType)
+	if !resolved {
+		return "", "", false
+	}
+	if sink, found := s.accessors[dir+"\x00"+typeName][field]; found {
+		return sink, typeName + "." + sink + "()", true
+	}
+	return "", "", false
+}
+
+// resolveLitType maps a composite literal's spelled type to the package
+// directory that declares it. A bare name is this package; a qualified name is
+// resolved through the file's import aliases and the intra-module import map, so
+// identitycore.IdentityCreatedEvent written in package `creation` finds the
+// accessor declared over in identity.go. A type from another MODULE resolves to
+// nothing, which is a stated limit: order-core-postgres spells
+// domain.OrderCreated but the type lives in the order-core repository, so the
+// inference only fires when order-core itself is scanned.
+func (s *scanner) resolveLitType(f *pkgFile, t ast.Expr) (dir string, typeName string, ok bool) {
+	switch x := t.(type) {
+	case nil:
+		return "", "", false
+	case *ast.Ident:
+		return f.dir, x.Name, true
+	case *ast.StarExpr:
+		return s.resolveLitType(f, x.X)
+	case *ast.IndexExpr:
+		return s.resolveLitType(f, x.X)
+	case *ast.IndexListExpr:
+		return s.resolveLitType(f, x.X)
+	case *ast.SelectorExpr:
+		pkg, ok := x.X.(*ast.Ident)
+		if !ok {
+			return "", "", false
+		}
+		ip, ok := f.aliases[pkg.Name]
+		if !ok {
+			return "", "", false
+		}
+		d, ok := s.importDir[ip]
+		if !ok {
+			return "", "", false
+		}
+		return d, x.Sel.Name, true
+	}
+	return "", "", false
+}
+
+// ---------------------------------------------------------------------------
 // Fact collection
 // ---------------------------------------------------------------------------
 
@@ -662,7 +884,11 @@ func (s *scanner) collectFacts(f *pkgFile) {
 			case *ast.CompositeLit:
 				s.recordCompositeSinks(f, node, locals, fname)
 			case *ast.AssignStmt:
-				// x.EventID = <expr>
+				// x.EventID = <expr>. Matched by configured name only: the
+				// accessor inference needs the assignee's type, and `x` is a
+				// variable whose type only a type checker knows. The composite
+				// literal — which is the form both missed defects took — spells
+				// its type, so that is where the inference can reach.
 				for i, lhs := range node.Lhs {
 					sel, ok := lhs.(*ast.SelectorExpr)
 					if !ok || i >= len(node.Rhs) {
@@ -674,7 +900,7 @@ func (s *scanner) collectFacts(f *pkgFile) {
 					kind, via := s.classify(f, node.Rhs[i], locals, 0)
 					s.rep.Sinks = append(s.rep.Sinks, sinkFact{
 						position: s.at(f, sel.Sel.Pos()), Field: sel.Sel.Name,
-						LitType: "", ValueKind: kind, Via: via,
+						SinkField: sel.Sel.Name, LitType: "", ValueKind: kind, Via: via,
 						ValueExpr: exprString(node.Rhs[i]), Site: "field-assign", InFunc: fname,
 					})
 				}
@@ -725,12 +951,14 @@ func (s *scanner) recordCompositeSinks(f *pkgFile, cl *ast.CompositeLit, locals 
 		if !ok {
 			continue
 		}
-		if _, watched := s.sinks[key.Name]; !watched {
+		sinkField, inferredFrom, watched := s.sinkRole(f, cl.Type, key.Name)
+		if !watched {
 			continue
 		}
 		kind, via := s.classify(f, kv.Value, locals, 0)
 		s.rep.Sinks = append(s.rep.Sinks, sinkFact{
-			position: s.at(f, kv.Pos()), Field: key.Name, LitType: litType,
+			position: s.at(f, kv.Pos()), Field: key.Name, SinkField: sinkField,
+			InferredFrom: inferredFrom, LitType: litType,
 			ValueKind: kind, ValueExpr: exprString(kv.Value), Via: via,
 			Site: "composite-literal", InFunc: inFunc,
 		})
