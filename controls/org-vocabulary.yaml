@@ -77,6 +77,11 @@ exceptions:
     reason: "The org vocabulary checker implementation and its documentation"
   - path: "scripts/test_org_vocabulary.py"
     reason: "Test file containing deliberate violations to test the guard"
+  # A named fixture path rather than "fixtures/**". The broad glob would punch a
+  # hole in the guard for any of the 121 callers that happens to have a
+  # fixtures/ directory of its own; this one exists nowhere but here.
+  - path: "fixtures/uuid-policy-violating/**"
+    reason: "Deliberately-violating fixture for the UUID policy gate; its TenantSlugID is the subject of that test, not fleet code"
 
 # ---------------------------------------------------------------------------
 # Scan scope
@@ -126,4 +131,77 @@ controls:
       a specific location, add it to the exceptions list in this policy file
       with a clear reason.
     detector: tenant_usage_check
+    refs: [docs/core-docs/standards/architecture/data-scope-classification-standard.md]
+
+  - id: ORG-0002
+    title: No identifier may be named after the legacy scope term
+    owner: platform-architecture
+    scope: identifiers
+    status: active
+    severity: major
+    # warn, and the note above ORG-0001 explains why a second control exists at
+    # all: ORG-0001 reads prose, so the standard that DEFINES "tenant" as legacy
+    # violates it by describing what it deprecates, and no amount of exception
+    # writing fixes that. This one reads declarations, so it has a reachable
+    # zero - and the fleet is nearly at it.
+    #
+    # MEASURED 2026-08-12 by running this detector over all 120 repositories
+    # that have an origin/main, against origin/main rather than the working
+    # tree - because enforcement judges what was pushed, and a workstation
+    # measurement flatters itself with local fixes nobody else can see.
+    #
+    #   12 findings, in 3 repositories:
+    #     frontend-core           4  tenantBrandName   (TypeScript field)
+    #     inboxxhq-web-workspace  4  tenantBrandName   (TypeScript field)
+    #     core-docs               4  TENANT_OWNED, tenant_owned()  (Python)
+    #   117 repositories: zero.
+    #
+    # Hand-written Go is at zero, remote included. `resolveTenant` became
+    # `resolveOrg` in platform-bff and the authz seed step `tenant_role_bindings`
+    # became `org_role_bindings`.
+    #
+    # ON THE UNPUSHED COMMITS, because the answer is not the expected one. The
+    # identifier renames sitting unpushed in platform-bff, inboxxhq-authz-service
+    # and authz-core-postgres do NOT block this control: all three already report
+    # zero against origin/main. What remained on their remotes was
+    # `"tenant_role_bindings"` as a STRING literal and as a comment, and this
+    # control reads neither. They still matter to ORG-0001, which reads both.
+    #
+    # SO THE OBSTACLE IS NOT DELIVERY, IT IS THREE UNFIXED DECLARATIONS. To
+    # promote: rename tenantBrandName -> orgBrandName in frontend-core and
+    # inboxxhq-web-workspace, and TENANT_OWNED / tenant_owned() -> ORG_OWNED /
+    # org_owned() in core-docs, then re-run the measurement above against
+    # origin/main. Twelve call sites in three repositories; small enough that
+    # `warn` here is a scheduling decision rather than an admission.
+    #
+    # DELIBERATE SCOPE LIMIT, recorded so its absence is not read as an
+    # oversight: only the LEADING word is matched, so `resolveTenant` and
+    # `crossTenant` do not fire. Widening to a trailing word was measured too -
+    # it adds exactly one site fleet-wide, `crossTenant` in a billing test - and
+    # it is the shape most likely to catch `isMultiTenant`, which names the
+    # architectural pattern this catalog's exceptions already protect in prose.
+    # Not worth widening an enforceable control to reach one local variable.
+    stage: warn
+    policy: >-
+      No identifier - field, type, function, constant, variable, column, or
+      configuration key - may take the legacy scope term as its leading word,
+      in any of snake_case, lowerCamelCase, UpperCamelCase or
+      SCREAMING_SNAKE_CASE. Prose, comments and string literals are out of
+      scope here; ORG-0001 covers those.
+    rationale: >-
+      An identifier is a structural commitment in a way that a sentence is not.
+      A field called TenantID appears in the wire contract, the database column,
+      the log record and the client SDK, and every consumer of those inherits
+      the vocabulary; a paragraph that mentions the word costs a reader one
+      moment of ambiguity. Separating the two is what makes an enforceable rule
+      possible: the identifier count has a reachable zero, and the prose count
+      does not, because the standard defining the term as legacy must use it.
+    remediation: >-
+      Rename the identifier so its leading word is 'org' - tenant_id becomes
+      org_id, TenantID becomes OrgID, tenantBrandName becomes orgBrandName. For
+      a database column or a published contract field, rename behind a
+      migration and a contract version rather than in place. Generated code is
+      exempt where the generator's input is a protocol contract; fix the
+      contract, not the output.
+    detector: tenant_identifier_check
     refs: [docs/core-docs/standards/architecture/data-scope-classification-standard.md]

@@ -53,12 +53,19 @@ def run_checker(root: Path, control: Path | None = None) -> tuple[int, str]:
     return proc.returncode, proc.stdout + proc.stderr
 
 
-def _write_control(dest: Path, stage: str, exceptions: list | None = None) -> Path:
+def _write_control(dest: Path, stage: str, exceptions: list | None = None,
+                   control_id: str = "ORG-0001") -> Path:
     """Write a minimal, self-consistent control YAML to dest (a file path).
 
     dest must be OUTSIDE the scan root, otherwise the control file itself
     (which contains "tenant" in its policy/remediation text) would be scanned
     and produce spurious findings.
+
+    `control_id` selects which control the catalog declares. evaluate() drops a
+    finding whose control the catalog does not carry, so a catalog naming only
+    ORG-0001 is also the mechanism by which the ORG-0001 tests stay blind to
+    ORG-0002 - which is what makes them a regression check on the promise that
+    the new control changed nothing about the old one.
     """
     doc = {
         "version": 1,
@@ -67,10 +74,10 @@ def _write_control(dest: Path, stage: str, exceptions: list | None = None) -> Pa
         "exceptions": exceptions or [],
         "scan": {"skip_dirs": [], "skip_test_files": False},
         "controls": [{
-            "id": "ORG-0001",
+            "id": control_id,
             "title": "Canonical vocabulary check",
             "owner": "platform-architecture",
-            "scope": "source",
+            "scope": "source" if control_id == "ORG-0001" else "identifiers",
             "status": "active",
             "severity": "major",
             "stage": stage,
@@ -111,8 +118,10 @@ class _Scratch:
         self.ctl_dir = base / "ctl"
         self.ctl_dir.mkdir()
 
-    def control(self, stage: str, exceptions: list | None = None) -> Path:
-        return _write_control(self.ctl_dir / f"{stage}.yaml", stage, exceptions)
+    def control(self, stage: str, exceptions: list | None = None,
+                control_id: str = "ORG-0001") -> Path:
+        return _write_control(self.ctl_dir / f"{control_id}-{stage}.yaml",
+                              stage, exceptions, control_id)
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +393,194 @@ def test_case_insensitive_detection() -> None:
 
 
 # ---------------------------------------------------------------------------
+# ORG-0002: identifiers, and only identifiers
+# ---------------------------------------------------------------------------
+# The whole value of this control is precision. A broad control already exists;
+# a second broad one wearing a narrower title would be worse than nothing,
+# because its stage would eventually be raised on the strength of the title.
+
+def test_org0002_flags_every_case_shape() -> None:
+    """All four shapes are declarations and all four must be caught."""
+    shapes = {
+        "columns.sql": "ALTER TABLE t ADD COLUMN tenant_id uuid;\n",
+        "handler.go": "type TenantService struct {\n\tTenantID string\n}\n",
+        "client.ts": "interface Ctx {\n  tenantBrandName?: string;\n}\n",
+        "config.py": "TENANT_ID = 'x'\n",
+    }
+    for name, body in shapes.items():
+        with tempfile.TemporaryDirectory() as tmp:
+            s = _Scratch(Path(tmp))
+            (s.repo / name).write_text(body, encoding="utf-8")
+            ctl = s.control("enforce", control_id="ORG-0002")
+            code, out = run_checker(s.repo, ctl)
+            expect(code == 1, f"{name}: ORG-0002 must fail at enforce, got {code};\n{out}")
+            expect("ORG-0002" in out, f"{name}: the finding must cite ORG-0002;\n{out}")
+
+
+def test_org0002_does_not_flag_test_name_prose() -> None:
+    """The false positive this control was specifically warned about.
+
+    `TestSharedSpecIsTenantNeutral` contains "Tenant" followed by a capital. A
+    naive Tenant[A-Z] pattern reports it, and would have reported the ~28
+    occurrences an earlier measurement mistook for identifiers - Go test names
+    using the word as prose in a sentence, not fields or types.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _Scratch(Path(tmp))
+        (s.repo / "spec_test.go").write_text(
+            "package spec\n\n"
+            "func TestSharedSpecIsTenantNeutral(t *testing.T) {}\n"
+            "func TestCrossTenantIsolation(t *testing.T) {}\n"
+            "func TestOrgScopedQueryIsTenantFree(t *testing.T) {}\n",
+            encoding="utf-8",
+        )
+        ctl = s.control("enforce", control_id="ORG-0002")
+        code, out = run_checker(s.repo, ctl)
+        expect(code == 0,
+               f"a descriptive test name is prose, not an identifier declaration;\n{out}")
+
+
+def test_org0002_does_not_flag_a_filename_in_a_string() -> None:
+    """92 of the fleet's 116 raw matches are this exact line, in 92 repos.
+
+    scripts/validate_docs.py lists the documentation files it expects, one of
+    which is TENANT_ONBOARDING_FLOW.md. That is a markdown filename inside a
+    string literal. Reporting it would put an advisory finding in 92
+    repositories for a document's name.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _Scratch(Path(tmp))
+        (s.repo / "validate_docs.py").write_text(
+            "REQUIRED = [\n"
+            "    'docs/workflows/TENANT_ONBOARDING_FLOW.md',\n"
+            "    'docs/workflows/ORG_ONBOARDING.md',\n"
+            "]\n",
+            encoding="utf-8",
+        )
+        ctl = s.control("enforce", control_id="ORG-0002")
+        code, out = run_checker(s.repo, ctl)
+        expect(code == 0,
+               f"a documentation filename in a string is not an identifier;\n{out}")
+
+
+def test_org0002_does_not_flag_comments() -> None:
+    """Including the comment that survives a rename, which is the live case.
+
+    authz's seed step is now org_role_bindings; a test comment still quotes the
+    old failure message verbatim. Flagging that would demand editing the record
+    of what once went wrong.
+    """
+    bodies = {
+        "runner_test.go": "package seed\n\n// seed step \"tenant_role_bindings\" failed\nvar x = 1\n",
+        "seed-job.yaml": "spec:\n  # Optional: the tenant_role_bindings step binds the admin\n  name: seed\n",
+        "schema.sql": "-- tenant_id was renamed to org_id in 0007\nSELECT 1;\n",
+        "block.go": "package p\n\n/*\n TenantID used to live here.\n*/\nvar y = 2\n",
+    }
+    for name, body in bodies.items():
+        with tempfile.TemporaryDirectory() as tmp:
+            s = _Scratch(Path(tmp))
+            (s.repo / name).write_text(body, encoding="utf-8")
+            ctl = s.control("enforce", control_id="ORG-0002")
+            code, out = run_checker(s.repo, ctl)
+            expect(code == 0, f"{name}: a comment is not a declaration;\n{out}")
+
+
+def test_org0002_does_not_read_prose_files() -> None:
+    """Markdown is ORG-0001's subject. If ORG-0002 read it too, it would be
+    ORG-0001 with a stricter stage, and unreachable for the same reason."""
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _Scratch(Path(tmp))
+        (s.repo / "docs").mkdir()
+        (s.repo / "docs" / "standard.md").write_text(
+            "The legacy column `tenant_id` is renamed to `org_id`; a `TenantID`\n"
+            "field in an old contract maps onto OrgID.\n",
+            encoding="utf-8",
+        )
+        ctl = s.control("enforce", control_id="ORG-0002")
+        code, out = run_checker(s.repo, ctl)
+        expect(code == 0,
+               f"ORG-0002 must not scan markdown - that is what makes it "
+               f"promotable where ORG-0001 is not;\n{out}")
+
+
+def test_org0002_does_not_flag_a_python_docstring() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _Scratch(Path(tmp))
+        (s.repo / "mod.py").write_text(
+            'def f():\n'
+            '    """Handles tenant_id and tenantID for legacy callers."""\n'
+            '    return 1\n',
+            encoding="utf-8",
+        )
+        ctl = s.control("enforce", control_id="ORG-0002")
+        code, out = run_checker(s.repo, ctl)
+        expect(code == 0, f"a docstring is prose;\n{out}")
+
+
+def test_org0002_is_additive_and_leaves_org0001_alone() -> None:
+    """ORG-0001 must report exactly what it reported before ORG-0002 existed.
+
+    The user chose the broad control at its strictest setting. Narrowing it
+    while adding a narrow one beside it would be a policy change disguised as a
+    refactor, and it would be invisible: the summary line would still say the
+    same thing.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _Scratch(Path(tmp))
+        # Prose only. ORG-0002 must find nothing here; ORG-0001 must find it all.
+        (s.repo / "notes.md").write_text(
+            "Tenant isolation and the tenant lifecycle are described below.\n",
+            encoding="utf-8",
+        )
+        one = s.control("enforce", control_id="ORG-0001")
+        code_one, out_one = run_checker(s.repo, one)
+        expect(code_one == 1,
+               f"ORG-0001 must still flag prose in markdown;\n{out_one}")
+        expect(out_one.count("::error") == 2,
+               f"ORG-0001 must still report every occurrence "
+               f"(2 expected, got {out_one.count('::error')});\n{out_one}")
+
+        two = s.control("enforce", control_id="ORG-0002")
+        code_two, out_two = run_checker(s.repo, two)
+        expect(code_two == 0,
+               f"ORG-0002 must find nothing in prose;\n{out_two}")
+
+
+def test_org0002_is_declared_in_the_production_catalog() -> None:
+    doc = yaml.safe_load((REPO / "controls" / "org-vocabulary.yaml").read_text(encoding="utf-8"))
+    by_id = {c["id"]: c for c in doc["controls"]}
+
+    expect("ORG-0001" in by_id, "ORG-0001 must still exist")
+    expect(by_id.get("ORG-0001", {}).get("stage") == "warn",
+           "ORG-0001 must be left exactly as it was, at stage: warn")
+    expect(by_id.get("ORG-0001", {}).get("scope") == "source",
+           "ORG-0001's scope must not be narrowed by the arrival of ORG-0002")
+
+    expect("ORG-0002" in by_id, "ORG-0002 must be declared")
+    org2 = by_id.get("ORG-0002", {})
+    expect(org2.get("scope") == "identifiers",
+           f"ORG-0002 is the identifier-scoped control; scope is {org2.get('scope')!r}")
+    expect(org2.get("stage") == "warn",
+           f"ORG-0002 must stay at warn until the three repositories named in "
+           f"its promotion note have pushed; stage is {org2.get('stage')!r}")
+    expect(org2.get("detector") == "tenant_identifier_check",
+           "ORG-0002 must bind to its own detector, not ORG-0001's")
+
+
+def test_production_catalog_is_quiet_on_a_clean_repo() -> None:
+    """Both controls, production catalog, a repo that says nothing wrong."""
+    with tempfile.TemporaryDirectory() as tmp:
+        s = _Scratch(Path(tmp))
+        (s.repo / "handler.go").write_text(
+            "package p\n\ntype OrgService struct {\n\tOrgID string\n}\n", encoding="utf-8")
+        (s.repo / "README.md").write_text("# service\n\nOrg-scoped.\n", encoding="utf-8")
+        code, out = run_checker(s.repo)
+        expect(code == 0, f"a clean repo must pass the production catalog;\n{out}")
+        expect("::error" not in out and "::warning" not in out,
+               f"a clean repo must produce no annotations;\n{out}")
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -406,7 +603,10 @@ def main() -> int:
         f"org-vocabulary self-test: OK ({len(tests)} test(s)) - "
         f"all three stage behaviours verified (enforce/warn/observe), "
         f"exception precision verified at enforce stage, "
-        f"harness exclusion verified against a real ci-workflows copy."
+        f"harness exclusion verified against a real ci-workflows copy, "
+        f"and ORG-0002 pinned as identifier-only: every case shape caught, "
+        f"test-name prose, string literals, comments, docstrings and markdown "
+        f"all left to ORG-0001, which is unchanged."
     )
     return 0
 
