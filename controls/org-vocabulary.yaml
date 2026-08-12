@@ -22,6 +22,11 @@
 #             enforce -> a finding fails CI
 #             warn    -> a finding is a ::warning:: and does not fail CI
 #             observe -> counted in the summary only
+#
+# Harness exclusion note: the checker excludes its own checkout dynamically
+# via REPO_ROOT (wherever scripts/check-org-vocabulary.py lives). That
+# computed path is not listed in `scan.skip_dirs` here because a hardcoded
+# name rots the moment the job is renamed. See excluded_paths() in the script.
 
 version: 1
 domain: org-vocabulary-policy
@@ -35,51 +40,50 @@ policy_ssot:
 # with a stated reason. Default is failure. This follows the same pattern as
 # the UUID version policy gate: canonical choice required everywhere, deviation
 # possible but never silent or accidental.
+#
+# Scope note: paths are matched against files relative to the CALLER's repo
+# root, not this checkout. Exceptions that were meant to cover only this repo's
+# own files (fixtures/, controls/, scripts/) are excluded here because the
+# harness checkout is excluded by code (see above), and broad globs like
+# "fixtures/**" or "**/log-schema.yaml" would instead punch holes in the guard
+# for all 121 caller repositories.
 
 exceptions:
-  # ADR filenames and titles (immutable published records)
+  # ADR filenames and titles (immutable published records - applies to callers too)
   - path: "**/ADR-0020-multi-tenant-isolation.md"
-    reason: "ADR filename is an immutable published record"
-    
-  # Legitimate architectural prose about multi-tenancy as a concept
-  - path: "docs/*.md"
-    pattern: "multi-tenant|multi-tenancy"
-    reason: "Architectural documentation discussing multi-tenancy as a concept"
+    reason: "ADR filename is an immutable published record; the word 'tenant' is baked into the slug"
+
+  # Architectural prose where "multi-tenancy" is the concept name, not the entity synonym.
+  # "Multi-tenancy" (the SaaS isolation pattern) is distinct from "tenant" as a synonym
+  # for "org". Callers legitimately document the former. Applies to both caller and our docs.
   - path: "docs/**/*.md"
     pattern: "multi-tenant|multi-tenancy"
-    reason: "Architectural documentation discussing multi-tenancy as a concept"
-    
-  # Deliberate violation fixtures for other gates  
-  - path: "fixtures/**"
-    reason: "Deliberate violation fixtures for testing other gates"
-  
-  # Our own scripts that test and implement the guard
+    reason: >-
+      Architectural documentation discussing multi-tenancy as a design pattern.
+      The word combination 'multi-tenant/multi-tenancy' names a concept, not
+      the org-scoped entity; no substitution exists.
+
+  # Generated protobuf code (applies to callers): imported contracts may contain
+  # legacy field names that cannot be changed unilaterally.
+  - path: "**/*.pb.go"
+    reason: "Generated code from protobuf definitions; field names are protocol contracts"
+
+  # This repo's own policy file and test script. Only matched when scanning
+  # ci-workflows itself (self-test / developer run); the harness exclusion
+  # prevents these from being scanned when checking a caller's repo.
+  - path: "**/org-vocabulary.yaml"
+    reason: "Policy file that documents the 'tenant' vocabulary standard by name"
   - path: "scripts/check-org-vocabulary.py"
     reason: "The org vocabulary checker implementation and its documentation"
-  - path: "scripts/test_org_vocabulary.py" 
+  - path: "scripts/test_org_vocabulary.py"
     reason: "Test file containing deliberate violations to test the guard"
-  
-  # Dictionary files that may contain legacy terminology
-  - path: "**/dictionaries/**"
-    reason: "Dictionary files may contain legacy terminology for reference"
-    
-  # Generated code from protobuf
-  - path: "**/*.pb.go"
-    reason: "Generated code from protobuf definitions"
-    
-  # Our own control files that legitimately reference "tenant" in policy text
-  - path: "**/api-contract.yaml"
-    reason: "Policy documentation referencing existing tenant usage patterns"
-  - path: "**/log-schema.yaml" 
-    reason: "Policy documentation referencing existing tenant usage patterns"
-  - path: "**/org-vocabulary.yaml"
-    reason: "Policy documentation defining tenant vocabulary standards"
 
 # ---------------------------------------------------------------------------
 # Scan scope
 # ---------------------------------------------------------------------------
 scan:
-  # Skip directories that don't contain user-authored content
+  # Standard build-output and vendored directories; the harness checkout itself
+  # is excluded dynamically in code (not by a name here - see note above).
   skip_dirs: [vendor, node_modules, testdata, .git, dist, build, .terraform]
   # Include test files - vocabulary should be consistent everywhere
   skip_test_files: false
