@@ -91,7 +91,20 @@ controls:
     scope: source
     status: active
     severity: major
-    stage: enforce
+    # warn, not enforce, and not yet promotable. Measured 2026-08-12: 10 of 10
+    # sampled repositories fail, core-docs alone citing ~578 lines - the true
+    # count is the whole fleet, not the 15-25 repos first estimated. Enforcing a
+    # gate every repository fails is how the stray-.sql outage happened; this one
+    # would have been worse, because it was also wired into `artifact`'s needs and
+    # so would have blocked deploys rather than only reporting.
+    #
+    # Promote to enforce only once a measured run reports zero findings fleet-wide.
+    # Note that may never be reachable for `scope: source` as written: this control
+    # flags prose as well as identifiers, and core-docs legitimately documents
+    # "tenant" as the legacy synonym it is normalizing away - so the standard that
+    # defines the rule is itself unfixable under it. Narrowing scope to identifiers
+    # is the likelier route to enforcement than exempting hundreds of lines.
+    stage: warn
     policy: >-
       All occurrences of "tenant" in code, comments, and documentation MUST be
       replaced with "org" unless explicitly listed in the exceptions section
