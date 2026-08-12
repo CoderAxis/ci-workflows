@@ -212,23 +212,18 @@ def excluded_paths(root: Path) -> list[Path]:
     "tenant" in policy documentation.
 
     A computed path rather than a directory name in the catalog's `skip_dirs`.
-    The name is the workflow's choice and differs per job, so a hardcoded name 
-    is stale the moment a job is renamed. Same instrument as check-ci-identity.py's 
-    excluded_roots, for the same reason.
+    The name is the workflow's choice and differs per job (`.org-tools` today,
+    but jobs rename), so a hardcoded name is stale the moment a job is renamed.
+    `REPO_ROOT` is always this very checkout wherever it lives, so it excludes
+    exactly the right directory without knowing its name. Same instrument as
+    check-uuid-version-policy.py and check-ci-identity.py; same reason.
 
     Empty when the scanned root is inside this repository: that is how the
     self-test runs, and there the violations ARE the subject.
     """
     if _within(root, REPO_ROOT):
         return []
-    
-    # Look for any subdirectory that contains our checkout
-    excluded = []
-    for item in root.rglob("*"):
-        if item.is_dir() and (item / "scripts" / "check-org-vocabulary.py").exists():
-            excluded.append(item)
-    
-    return excluded
+    return [REPO_ROOT] if _within(REPO_ROOT, root) else []
 
 
 # ---------------------------------------------------------------------------
@@ -377,18 +372,21 @@ def scan_repository(root: Path, doc: dict) -> tuple[list[Finding], dict]:
 def evaluate(findings: list[Finding], doc: dict) -> list[Finding]:
     """Apply control rules and return final findings."""
     controls = controls_by_id(doc)
-    
+
     final_findings = []
     for finding in findings:
         control = controls.get(finding.control)
         if not control or control["status"] != "active":
             continue
-            
-        # Update finding with control details
+
+        # Stage, remediation, and refs come from the catalog, not the scanner.
+        # The scanner hardcodes "enforce" as a default; the catalog overrides it.
+        # This is the fix for the bug where stage: warn still exited non-zero.
+        finding.stage = control["stage"]
         finding.remediation = control["remediation"]
         finding.refs = control["refs"]
         final_findings.append(finding)
-    
+
     return final_findings
 
 
@@ -397,11 +395,16 @@ def evaluate(findings: list[Finding], doc: dict) -> list[Finding]:
 # ---------------------------------------------------------------------------
 
 def emit_text(findings: list[Finding], scan_stats: dict, excluded: list[Path]) -> int:
-    """Emit findings in text format and return exit code."""
-    enforced = [f for f in findings if f.stage == "enforce"]
-    warned = [f for f in findings if f.stage == "warn"]
+    """Emit findings in text format and return exit code.
 
-    # Show excluded paths
+    enforce -> ::error::  annotation, exit 1
+    warn    -> ::warning:: annotation, exit 0
+    observe -> no annotation, counted in summary only, exit 0
+    """
+    enforced = [f for f in findings if f.stage == "enforce"]
+    warned   = [f for f in findings if f.stage == "warn"]
+    observed = [f for f in findings if f.stage == "observe"]
+
     for skipped in excluded:
         print(f"[skip] {skipped.name}/: the checker's own checkout, not the caller's code")
 
@@ -413,14 +416,16 @@ def emit_text(findings: list[Finding], scan_stats: dict, excluded: list[Path]) -
         print(f"::warning file={f.file},line={f.line},col={f.column}::[{f.control}][{f.severity}] "
               f"{f.location}: {f.message}. Fix: {f.remediation.strip()} "
               f"({', '.join(f.refs)})")
+    # observe: no annotation emitted; count appears in summary
 
     files_scanned = scan_stats.get("files_scanned", 0)
     if enforced:
         print(f"org-vocabulary: FAILED - {len(enforced)} enforced violation(s), "
-              f"{len(warned)} advisory, {files_scanned} file(s) scanned.")
+              f"{len(warned)} advisory, {len(observed)} observed, "
+              f"{files_scanned} file(s) scanned.")
         return 1
     print(f"org-vocabulary: OK - no enforced violations, {len(warned)} advisory, "
-          f"{files_scanned} file(s) scanned.")
+          f"{len(observed)} observed, {files_scanned} file(s) scanned.")
     return 0
 
 
