@@ -1105,6 +1105,44 @@ jobs:
         shell: bash
         run: rm -rf .uuid-tools
 
+  # ── org vocabulary enforcement ──────────────────────────────────────────────────────────────
+  org-vocabulary:
+    name: Org vocabulary policy
+    needs: resolve
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the central checker and control catalog
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/ci-workflows
+          ref: v1
+          path: .org-tools
+          sparse-checkout: |
+            scripts
+            controls
+
+      - name: Install guard dependencies
+        shell: bash
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Org vocabulary policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .org-tools/scripts/check-org-vocabulary.py \
+            --repo-root . \
+            --control .org-tools/controls/org-vocabulary.yaml
+
+      - name: Remove the central checkout
+        if: always()
+        shell: bash
+        run: rm -rf .org-tools
+
   # ── generated-code and query drift ──────────────────────────────────────────────────────────
   sqlc:
     name: SQLC drift and raw-SQL guard
@@ -2364,7 +2402,7 @@ jobs:
     # exist rather than adding one.
     needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
             dockerfile, structure, vulnerabilities, sqlc, docs, contracts, contract,
-            openapi-generator, lanes, integration, e2e]
+            openapi-generator, lanes, integration, e2e, uuid-policy, org-vocabulary]
     # workflow_dispatch counts alongside push, and deliberately so. A central pipeline change
     # ships by moving @v1, which raises no event in a service repo, and `gh run rerun` replays
     # the workflow definition the original run resolved rather than the current one. Without
@@ -2427,7 +2465,7 @@ jobs:
     needs: [resolve, supported-language, standards, build-test, codeql, events, seeding, schema,
             dockerfile, structure, lanes, vulnerabilities, sqlc, docs, contracts, dependency-review,
             integration, e2e, contract-classification, contract, gateway-baseline,
-            openapi-generator, artifact]
+            openapi-generator, artifact, uuid-policy, org-vocabulary]
     # always() rather than failure(): several gates above are conditional, and a plain failure()
     # does not run once any needed job has been skipped - which is the normal shape here, so the
     # alert would have fired only on the subset of runs where every gate happened to be relevant.
