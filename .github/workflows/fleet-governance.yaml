@@ -1,0 +1,655 @@
+name: Fleet Governance (assembled fleet)
+
+# Reusable workflow for the governance gates that read the FLEET - the service and gateway
+# repositories together, or the frontends together - rather than one repository at a time.
+#
+# WHAT IT CLOSES. Four checkers lived in core-docs and no workflow file called any of them, so
+# every defect each was written to refuse could land unopposed while CI stayed green:
+#
+#   check_event_subscribers.py   an event published with no service declaring it consumes it (G-75)
+#   check_grpc_grants.py         a cross-service RPC the callee's grant map refuses (G-80)
+#   check_openapi_governance.py  a published contract documenting fewer operations than the
+#                                service serves, which also blinds oasdiff to breaking changes
+#   check_journey_stages.py      a journey stage naming a route or API call the frontend does not have
+#
+# and check_journey_entrypoints.py joins them here on the day it lands, rather than waiting for
+# somebody to notice it was never called - which is how the other four got into this state.
+#
+# The manifest already said so, of the first two, in its own words: "the check needs services/
+# and gateways/ checked out and no CI job assembles that workspace today, so it runs on demand
+# rather than on every change" (catalog/platform-claims.yaml, shortfall of
+# published-events-have-a-subscriber and grpc-calls-are-authorized-by-their-callee). This is the
+# job that was missing. check_journey_stages.py was in the same position with the frontends:
+# only its fixture suite ran in CI, so the control was exercised against synthetic routes and
+# never against the apps it exists to hold.
+#
+# WHY SEPARATE FROM platform-governance.yaml. That workflow assembles four repositories and is
+# over in a couple of minutes. These gates need about a hundred. Cloning the fleet in front of
+# the claims manifest and the topology check would make both wait for it, and an assembly
+# failure would then be reported as a failure of gates that never ran.
+#
+# WHY CENTRAL RATHER THAN IN THE CALLER. The same reason platform-governance.yaml is central:
+# most of the fleet is private, so assembling it needs an App token, and ci-app-token can only
+# be reached by a job DEFINED in a central workflow at the released tag - the trust policy
+# conditions on job_workflow_ref precisely so a repository cannot mint by editing its own
+# workflow (ADR-0110). A job in core-docs' own ci.yaml is denied by design.
+#
+# WHERE THE FLEET COMES FROM. From the caller's own service catalog, read at run time - never
+# from a repository list written here. A list in this file would be a second copy of the
+# catalog, and the fleet has already shown what happens to lists that must be kept in step: the
+# copy stops matching, the gate scans less than it claims to, and scanning less looks exactly
+# like finding nothing. Every assembly step below therefore ends by asserting that what it
+# fetched is what the catalog named, because a checker run over half a fleet reports about the
+# half it was given and still exits 0.
+
+on:
+  workflow_call:
+    inputs:
+      docs_path:
+        description: >-
+          Where to place the calling docs repo inside the assembled workspace. This is the layout
+          contract, not a preference: the checkers resolve baselines and catalogs relative to the
+          workspace root, so core-docs must land at docs/core-docs.
+        required: false
+        type: string
+        default: docs/core-docs
+      fleet_owner:
+        description: >-
+          The account holding the brand-neutral half of the fleet (the *-core and *-core-postgres
+          modules). A GitHub App is installed per account, so the accounts are named here to be
+          minted for, while WHICH repositories are fetched stays a property of the catalog.
+        required: false
+        type: string
+        default: coderaxis
+      brand_owner:
+        description: "The account holding the deployables, the frontends and the API contract registry."
+        required: false
+        type: string
+        default: InboxxHQ-CoderAxis
+      edge_gateway_path:
+        description: >-
+          Where the edge gateway must land. Every other repository is placed by rule, but this
+          one is pinned because a checker pins it: check_journey_entrypoints.py reads the
+          published route surfaces from gateways/inboxxhq-edge-gateway/config/surfaces and
+          nowhere else. Put it anywhere else and Edge.load() finds no surfaces, so every declared
+          entry point is reported as reaching no edge - measured, that turns 14 real findings
+          into 31, and the 17 extra ones are about the checkout rather than about the platform.
+          The input exists so that if the constant in the script moves, this is the one place
+          that has to follow it.
+        required: false
+        type: string
+        default: gateways/inboxxhq-edge-gateway
+      api_contracts_repo:
+        description: >-
+          Per-service published contract registry. C3.5 compares it against the authored spec, so
+          without it every publication-fidelity finding disappears and the gate reports clean.
+        required: false
+        type: string
+        default: InboxxHQ-CoderAxis/inboxxhq-api-contracts
+      platform_contracts_repo:
+        description: "The bundled contract tree, compared by C3.5 on the same basis."
+        required: false
+        type: string
+        default: coderaxis/platform-contracts
+      frontend_repos:
+        description: >-
+          Newline-separated `<org>/<repo>` frontends to place under frontend/. These are the apps
+          check_journey_stages.py maps its declared surfaces onto (SURFACE_APPS: www, app,
+          console); a surface whose app is absent is reported and not verified, so the set here
+          is what decides how much of the journey catalog is actually held.
+        required: false
+        type: string
+        default: |
+          InboxxHQ-CoderAxis/inboxxhq-web-www
+          InboxxHQ-CoderAxis/inboxxhq-web-app
+          InboxxHQ-CoderAxis/inboxxhq-web-console
+      go_version:
+        description: >-
+          Toolchain used to populate the module cache. A fixed pin rather than go-version-file,
+          because this job has no single go.mod - it has ninety-seven of them. Keep it at or
+          above the highest `go` directive in the fleet or the toolchain is downloaded per repo.
+        required: false
+        type: string
+        default: "1.26"
+
+permissions:
+  contents: read
+
+jobs:
+  # ── fleet source ──────────────────────────────────────────────────────────────────────────
+  # Three gates on one assembly, all closing silent failures of the same shape: a defect that
+  # exists only BETWEEN repositories, where each repository is internally consistent and its own
+  # CI is green. G-75 (org-service published user.invite.requested.v1, nothing consumed it, so
+  # member invitation was broken for months). G-80 (communication-service called two org.v1
+  # methods its callee's grant map refused, so a released phone number kept its row and its
+  # inbound route). And a declared journey entry point that no service implements - one of them
+  # is allowlisted as public in two surface files and given its own rate-limit bucket, which is
+  # the platform configured in detail to rate-limit a 404.
+  #
+  # One job rather than three, because the expensive part is the assembly and all three read the
+  # same trees. They are separate STEPS, so the log names which gate failed.
+  fleet-source-gates:
+    name: Fleet source (events, gRPC grants, journey entry points)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # Required by ci-app-token: the OIDC token IS the proof of identity.
+      id-token: write
+    env:
+      # Each gate resolves its baseline as <root>/docs/core-docs/governance/..., so the root
+      # they are given and the path the caller is checked out at are one decision, not two.
+      DOCS_PATH: ${{ inputs.docs_path }}
+      # Matches service-ci.yaml: the contracts module is private, so without this `go mod
+      # download` goes to the public proxy and the checksum database and fails on both.
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+
+    steps:
+      - name: Check out the calling docs repository
+        uses: actions/checkout@v4
+        with:
+          path: ${{ inputs.docs_path }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+          # Nothing here is built; caching a dependency graph nobody compiles costs more than it
+          # saves, and the one module this job does need is fetched explicitly below.
+          cache: false
+
+      - name: Install dependencies
+        run: python3 -m pip install --upgrade pip PyYAML
+
+      # configure-git rather than a token in the clone URL: the rewrite covers both accounts and
+      # both spellings of each, and it is also what lets `go mod download` reach a private module
+      # further down. A token interpolated into a git command line would additionally have to be
+      # kept out of `set -x` output and out of any error git prints back.
+      - name: Mint a read token for the fleet
+        id: token
+        uses: coderaxis/ci-workflows/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ inputs.fleet_owner }}
+          extra-owners: ${{ inputs.brand_owner }}
+          configure-git: "true"
+
+      - name: Plan the fleet from the service catalog
+        id: plan
+        shell: bash
+        env:
+          FLEET_OWNER: ${{ inputs.fleet_owner }}
+          BRAND_OWNER: ${{ inputs.brand_owner }}
+          EDGE_GATEWAY_PATH: ${{ inputs.edge_gateway_path }}
+        run: |
+          set -euo pipefail
+
+          # Grouped by SERVICE name, not by domain. Two reasons, both mechanical. The checkers
+          # glob services/*/* , so the middle segment is never read; and check_grpc_grants.py
+          # resolves a library module's identity by looking for its deployable SIBLING - org-core
+          # runs as org-service because inboxxhq-org-service sits beside it - so the three
+          # repositories of one service have to land in one directory or every library's call
+          # sites are attributed to a caller that appears in no grant map.
+          python3 - "${DOCS_PATH}" <<'PY' > "${RUNNER_TEMP}/fleet-plan.tsv"
+          import os
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          catalog = Path(sys.argv[1]) / "catalog" / "services"
+          edge_path = os.environ["EDGE_GATEWAY_PATH"].strip("/")
+          edge_repo = edge_path.rsplit("/", 1)[-1]
+
+          rows = set()
+          for entry in sorted(catalog.glob("*.yaml")):
+              svc = yaml.safe_load(entry.read_text(encoding="utf-8")) or {}
+              # Every gate in this job reads Go source or Go-service contracts. The frontends are
+              # a different job's subject and are checked out there.
+              if (svc.get("runtime") or {}).get("language") != "go":
+                  continue
+              name = svc.get("name")
+              for role in ("repository", "schema_repository", "deployable_repository"):
+                  repo = svc.get(role) or {}
+                  # `resolution` marks a catalog entry whose repository is planned rather than
+                  # real; cloning one 404s, which would read as an outage rather than as the
+                  # catalog saying "not built yet".
+                  if repo.get("resolution", "resolved") != "resolved":
+                      continue
+                  if not (repo.get("organization") and repo.get("name")):
+                      continue
+                  dest = edge_path if repo["name"] == edge_repo else f"services/{name}/{repo['name']}"
+                  rows.add(f"{repo['organization']}/{repo['name']}\t{dest}")
+
+          if not rows:
+              raise SystemExit(
+                  "::error::the catalog named no Go service repositories, so the fleet plan is "
+                  "empty and every gate below would verify nothing"
+              )
+          if not any(row.endswith(f"\t{edge_path}") for row in rows):
+              raise SystemExit(
+                  f"::error::the catalog names no repository called {edge_repo}, so nothing "
+                  f"would land at {edge_path} and every declared entry point would be reported "
+                  "as reaching no edge surface"
+              )
+          print("\n".join(sorted(rows)))
+          PY
+
+          planned="$(wc -l < "${RUNNER_TEMP}/fleet-plan.tsv")"
+          echo "planned=${planned}" >> "${GITHUB_OUTPUT}"
+          echo "catalog named ${planned} repositories"
+
+          # A token is minted per account. An account the catalog names and the mint did not
+          # cover fails every clone from it, and a hundred authentication errors do not say
+          # which of them is the cause.
+          unknown="$(cut -f1 "${RUNNER_TEMP}/fleet-plan.tsv" | cut -d/ -f1 | sort -fu \
+                     | grep -vixF -e "${FLEET_OWNER}" -e "${BRAND_OWNER}" || true)"
+          if [ -n "${unknown}" ]; then
+            echo "::error::the catalog names repositories under account(s) this job holds no" \
+                 "token for: ${unknown//$'\n'/, }. Add them to brand_owner/fleet_owner."
+            exit 1
+          fi
+
+      - name: Assemble the fleet
+        shell: bash
+        env:
+          PLANNED: ${{ steps.plan.outputs.planned }}
+        run: |
+          set -euo pipefail
+
+          # Shallow and tagless: the checkers read the working tree, never the history.
+          cat > "${RUNNER_TEMP}/clone-repo" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          git clone --quiet --depth 1 --no-tags "https://github.com/${1}.git" "${2}"
+          SH
+          chmod +x "${RUNNER_TEMP}/clone-repo"
+
+          # xargs returns 123 if any invocation failed, and `set -e` turns that into a failed
+          # job - a partially assembled fleet must not reach a gate, because a gate reports on
+          # what it was given and cannot tell a repository that is clean from one that is absent.
+          xargs -a "${RUNNER_TEMP}/fleet-plan.tsv" -P 8 -L 1 "${RUNNER_TEMP}/clone-repo"
+
+          # Checked per planned destination rather than by counting: a count that happens to
+          # match says nothing about WHICH repository is missing, and the placement is itself
+          # part of the contract - a repository cloned to the wrong path is invisible to the
+          # globs and reads exactly like a repository with nothing to report.
+          missing=0
+          while IFS=$'\t' read -r slug dest; do
+            [ -d "${dest}/.git" ] || { echo "  MISSING  ${dest}  (${slug})"; missing=$((missing + 1)); }
+          done < "${RUNNER_TEMP}/fleet-plan.tsv"
+          [ "${missing}" -eq 0 ] || {
+            echo "::error::${missing} of ${PLANNED} planned repositories are absent; gates not run"
+            exit 1
+          }
+          echo "assembled ${PLANNED} repositories"
+
+      # check_grpc_grants.py reads the generated *_grpc.pb.go of the contracts module out of the
+      # Go module cache, at the version each repository pins, and that is how it knows which
+      # method names belong to which interface. On a fresh runner the cache is empty, and an
+      # empty cache does not look like an error to it: the method index comes back empty, every
+      # call site becomes unreadable, and the gate reports that it verified nothing.
+      # --require-fleet turns the total case into a failure; this step plus the assertion after
+      # it is what covers the partial case, where some pinned versions resolve and others do not
+      # and the check silently narrows.
+      - name: Populate the contracts module cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          module=github.com/coderaxis/platform-contracts-go
+
+          mapfile -t gomods < <(find services gateways -maxdepth 3 -name go.mod -type f)
+          mapfile -t versions < <(
+            grep -hoE "${module} v[^ ]+" "${gomods[@]}" | awk '{print $2}' | sort -u
+          )
+          if [ "${#versions[@]}" -eq 0 ]; then
+            echo "::error::no repository in the assembled fleet pins ${module}, so there is no" \
+                 "method index to build and every gRPC call site would be unreadable"
+            exit 1
+          fi
+          echo "fleet pins ${#versions[@]} version(s): ${versions[*]}"
+
+          # Downloaded from inside a repository that pins the version, so the version comes from
+          # the fleet's own go.mod rather than from anything written here.
+          for version in "${versions[@]}"; do
+            repo="$(grep -lE "${module} ${version}\$|${module} ${version} " "${gomods[@]}" | head -1)"
+            ( cd "$(dirname "${repo}")" && GOWORK=off go mod download "${module}" )
+          done
+
+          cache="$(go env GOMODCACHE)"
+          for version in "${versions[@]}"; do
+            [ -d "${cache}/${module}@${version}" ] || {
+              echo "::error::${module}@${version} is not in the module cache, so the call sites" \
+                   "of every repository pinning it would be skipped and the gate would report a" \
+                   "narrower fleet as a clean one"
+              exit 1
+            }
+          done
+
+      # --require-fleet is the whole point of running it here: without it the checker prints
+      # SKIPPED and exits 0 when it finds no contracts, which is indistinguishable in a build log
+      # from a fleet with no orphans. The baseline holds the 111 orphans that already exist, so
+      # this fails on a NEW one and on a baseline entry that has quietly stopped being an orphan.
+      - name: Every published event type has a declared consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${DOCS_PATH}/scripts/check_event_subscribers.py" \
+            --root "${GITHUB_WORKSPACE}" \
+            --require-fleet
+
+      # --fail-on-unlisted is deliberately NOT passed. An unlisted edge reaches a method no rule
+      # names and is served today only because the authorizer defaults to log-only, so it is an
+      # outage with a deploy date rather than a live defect; the 65 of them are baselined so the
+      # flip to Enforce can be taken one callee at a time. A REFUSED edge is live breakage and
+      # fails here with no flag needed.
+      - name: Every cross-service gRPC call is permitted by its callee
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${DOCS_PATH}/scripts/check_grpc_grants.py" \
+            --root "${GITHUB_WORKSPACE}" \
+            --require-fleet
+
+      # Runs here rather than beside check_journey_stages.py, because despite the shared subject
+      # the two read different trees: stages are a claim about the frontend, entry points are a
+      # claim about the edge gateway's route surfaces and the services' registered handlers, and
+      # this is the job that has them. Wired plainly rather than behind a test for the file: a
+      # step that skips when its checker is missing reports success for a check nobody ran, which
+      # is the failure this whole workflow exists to remove. The guard fails, it does not skip.
+      - name: Every declared journey entry point is routed and implemented
+        shell: bash
+        run: |
+          set -euo pipefail
+          checker="${DOCS_PATH}/scripts/check_journey_entrypoints.py"
+          [ -f "${checker}" ] || {
+            echo "::error::${checker} is not in this checkout. It is a required gate, so its" \
+                 "absence fails here rather than passing quietly."
+            exit 1
+          }
+          python3 "${checker}" \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --require-services
+
+  # ── API contracts ─────────────────────────────────────────────────────────────────────────
+  # Closes the hole G3 left: it globbed contracts/ for a *.json and passed if one existed, so a
+  # 56-byte stub with "paths": {} counted as a published contract and six live services were in
+  # exactly that state. check_openapi_governance.py opens the spec instead - but it needs both
+  # the authored specs (in each deployable) and the published trees (in the two contract
+  # registries), and no job had either. Its own failure mode makes that worse than a missing
+  # gate: given a workspace with no specs it finds nothing, prunes nothing, and exits 0. Wired
+  # over an empty checkout it would have been a permanently green gate over an unread fleet,
+  # which is why this job asserts what it found before it judges it.
+  api-contracts:
+    name: API contracts (OpenAPI quality + publication fidelity)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DOCS_PATH: ${{ inputs.docs_path }}
+
+    steps:
+      - name: Check out the calling docs repository
+        uses: actions/checkout@v4
+        with:
+          path: ${{ inputs.docs_path }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python3 -m pip install --upgrade pip PyYAML
+
+      - name: Mint a read token for the deployables and the contract registries
+        id: token
+        uses: coderaxis/ci-workflows/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ inputs.fleet_owner }}
+          extra-owners: ${{ inputs.brand_owner }}
+          configure-git: "true"
+
+      # Only the deployables, and only their docs/ tree: the authored spec is
+      # <deployable>/docs/openapi.json and nothing else in these repositories is read. Blobless
+      # and sparse, so this is a metadata fetch and a handful of files per repository rather
+      # than forty working trees.
+      - name: Assemble the authored specs
+        id: specs
+        shell: bash
+        env:
+          EDGE_GATEWAY_PATH: ${{ inputs.edge_gateway_path }}
+        run: |
+          set -euo pipefail
+
+          # Same placement rule as the fleet job, including the pinned edge-gateway path. The
+          # openapi globs would accept either location, but two jobs that lay the same
+          # repository down in two places is a difference a reader has to hold in their head
+          # for no gain.
+          python3 - "${DOCS_PATH}" <<'PY' > "${RUNNER_TEMP}/deployables.tsv"
+          import os
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          catalog = Path(sys.argv[1]) / "catalog" / "services"
+          edge_path = os.environ["EDGE_GATEWAY_PATH"].strip("/")
+          edge_repo = edge_path.rsplit("/", 1)[-1]
+
+          rows = set()
+          for entry in sorted(catalog.glob("*.yaml")):
+              svc = yaml.safe_load(entry.read_text(encoding="utf-8")) or {}
+              if (svc.get("runtime") or {}).get("language") != "go":
+                  continue
+              repo = svc.get("deployable_repository") or {}
+              if not (repo.get("organization") and repo.get("name")):
+                  continue
+              dest = (edge_path if repo["name"] == edge_repo
+                      else f"services/{svc.get('name')}/{repo['name']}")
+              rows.add(f"{repo['organization']}/{repo['name']}\t{dest}")
+          if not rows:
+              raise SystemExit("::error::the catalog named no deployables to read specs from")
+          if not any(row.endswith(f"\t{edge_path}") for row in rows):
+              raise SystemExit(
+                  f"::error::the catalog names no repository called {edge_repo}, so {edge_path} "
+                  "would not exist and the spec count below would be taken over one root"
+              )
+          print("\n".join(sorted(rows)))
+          PY
+
+          planned="$(wc -l < "${RUNNER_TEMP}/deployables.tsv")"
+
+          cat > "${RUNNER_TEMP}/clone-spec" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          git clone --quiet --depth 1 --no-tags --filter=blob:none --sparse \
+            "https://github.com/${1}.git" "${2}"
+          git -C "${2}" sparse-checkout set docs
+          SH
+          chmod +x "${RUNNER_TEMP}/clone-spec"
+
+          xargs -a "${RUNNER_TEMP}/deployables.tsv" -P 8 -L 1 "${RUNNER_TEMP}/clone-spec"
+
+          missing=0
+          while IFS=$'\t' read -r slug dest; do
+            [ -d "${dest}/.git" ] || { echo "  MISSING  ${dest}  (${slug})"; missing=$((missing + 1)); }
+          done < "${RUNNER_TEMP}/deployables.tsv"
+          [ "${missing}" -eq 0 ] || {
+            echo "::error::${missing} of ${planned} deployables are absent; a spec that was never" \
+                 "fetched is indistinguishable here from a spec with no violations"
+            exit 1
+          }
+          echo "assembled ${planned} deployables"
+
+      # Both trees, both paths exact: published_specs() looks for
+      # contracts/inboxxhq-api-contracts/<stem>/latest.json and
+      # contracts/platform-contracts/openapi/services/*/inboxxhq-<stem>/openapi.json. A tree
+      # checked out anywhere else is a tree the C3.5 comparison silently skips, and skipping it
+      # removes exactly the findings this control exists for.
+      - name: Check out the published contract registry
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.api_contracts_repo }}
+          token: ${{ steps.token.outputs.token }}
+          path: contracts/inboxxhq-api-contracts
+
+      - name: Check out the bundled contract tree
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.platform_contracts_repo }}
+          token: ${{ steps.token.outputs.token }}
+          path: contracts/platform-contracts
+
+      # The checker cannot make this assertion itself - it has no --require-fleet - and without
+      # it every failure mode of the assembly above reads as a pass.
+      - name: Confirm there is something to judge
+        shell: bash
+        run: |
+          set -euo pipefail
+          specs="$(find services gateways -maxdepth 4 -path '*/docs/openapi.json' | wc -l)"
+          echo "found ${specs} authored spec(s)"
+          [ "${specs}" -gt 0 ] || {
+            echo "::error::no authored openapi.json was found. check_openapi_governance.py exits" \
+                 "0 over an empty workspace, so this would be a green gate over an unread fleet."
+            exit 1
+          }
+          for tree in contracts/inboxxhq-api-contracts contracts/platform-contracts; do
+            [ -d "${tree}" ] || { echo "::error::${tree} missing; C3.5 would find nothing"; exit 1; }
+          done
+
+      # The ratchet lives in catalog/openapi-baseline.json: a violation already recorded there is
+      # accepted, a new one fails. C3.5 and C3.1-dup are excluded from it by the checker itself -
+      # a published contract that documents less than the service serves is not debt to be paid
+      # down but a statement to consumers that is false today - so those cannot be baselined and
+      # have to be fixed at the source.
+      #
+      # This gate is RED on the day it is wired, and deliberately so: measured on the assembled
+      # workspace it reports 96 violations the baseline does not cover, of which 18 are C3.5
+      # across ten services - edge-gateway, payment-service, realtime-gateway and
+      # voice-ai-agent-service publish contracts documenting NONE of the 9, 6, 2 and 23
+      # operations they serve. The other 78 are documentation debt that the baseline can absorb
+      # in a reviewable diff; the 18 cannot be absorbed by anything and are the reason this was
+      # worth wiring. Turning the step off to get a green tick would restore precisely the state
+      # G3 was in.
+      - name: OpenAPI quality and publication fidelity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${DOCS_PATH}/scripts/check_openapi_governance.py" \
+            --workspace "${GITHUB_WORKSPACE}"
+
+  # ── journey surfaces ──────────────────────────────────────────────────────────────────────
+  # A journey's `stages:` restate what the frontend already declares - routes as files in an
+  # app-router tree, calls as paths in the app's API layer - so an unchecked stage list is a
+  # second copy that drifts the first time a route is renamed, while `ihq cuj show` keeps
+  # printing the old address with full confidence. check_journey_stages.py holds that join, and
+  # CI ran only its fixture suite: the control was exercised against synthetic routes and never
+  # once against the apps, which is the same "tested but not wired" shape as a gate behind an
+  # `if [ -d ... ]` that is never true.
+  journey-surfaces:
+    name: Journey surfaces exist in the frontends
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DOCS_PATH: ${{ inputs.docs_path }}
+
+    steps:
+      - name: Check out the calling docs repository
+        uses: actions/checkout@v4
+        with:
+          path: ${{ inputs.docs_path }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python3 -m pip install --upgrade pip PyYAML
+
+      - name: Mint a read token for the frontends
+        id: token
+        uses: coderaxis/ci-workflows/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ inputs.brand_owner }}
+          configure-git: "true"
+
+      # frontend/<repo> exactly, because SURFACE_APPS maps a declared surface onto that path.
+      # An app checked out elsewhere is not reported as an error: the stages naming it are
+      # skipped with a NOTE and the run still passes, so the assertion below is what stops a
+      # relocated or renamed app from quietly emptying the check.
+      - name: Assemble the frontends
+        shell: bash
+        env:
+          FRONTEND_REPOS: ${{ inputs.frontend_repos }}
+        run: |
+          set -euo pipefail
+          expected=0
+          while read -r slug; do
+            [ -n "${slug}" ] || continue
+            git clone --quiet --depth 1 --no-tags \
+              "https://github.com/${slug}.git" "frontend/${slug##*/}"
+            expected=$((expected + 1))
+          done <<< "${FRONTEND_REPOS}"
+
+          assembled="$(find frontend -mindepth 2 -maxdepth 2 -name .git | wc -l)"
+          [ "${assembled}" -eq "${expected}" ] || {
+            echo "::error::${assembled} of ${expected} frontends assembled"
+            exit 1
+          }
+          echo "assembled ${assembled} frontend(s)"
+
+      # --require-frontends fails only when EVERY frontend is missing. One missing app is a NOTE
+      # and a pass, so the input list above silently deciding how much gets verified is the real
+      # exposure - add a fourth surface to the checker, forget this workflow, and the journeys
+      # naming it stop being held with nothing to see. SURFACE_APPS is therefore read out of the
+      # checker rather than restated here, because a restatement is the thing that drifts.
+      - name: Confirm every surface the checker maps is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "${DOCS_PATH}/scripts/check_journey_stages.py" <<'PY'
+          import importlib.util
+          import sys
+          from pathlib import Path
+
+          spec = importlib.util.spec_from_file_location("journey_stages", sys.argv[1])
+          checker = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(checker)
+
+          missing = []
+          for rel in sorted(set(checker.SURFACE_APPS.values())):
+              present = Path(rel).is_dir()
+              print(f"  {'present' if present else 'MISSING'}  {rel}")
+              if not present:
+                  missing.append(rel)
+          if missing:
+              raise SystemExit(
+                  "::error::the checker maps declared surfaces onto " + ", ".join(missing)
+                  + ", which this job did not check out. Stages naming them are skipped with a "
+                  "note and the run still passes, so this fails instead."
+              )
+          PY
+
+      # --require-frontends for the same reason --require-fleet is passed to the fleet gates:
+      # without it an absent frontend prints SKIPPED and exits 0.
+      - name: Journey stages resolve to real routes and real calls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${DOCS_PATH}/scripts/check_journey_stages.py" \
+            --root "${GITHUB_WORKSPACE}" \
+            --require-frontends
