@@ -436,6 +436,36 @@ jobs:
           }
           python3 "${checker}"
 
+      # The step the four above walk up to and stop at. They establish that the frontend makes the
+      # call, that the operationId is published, that something in the fleet serves the path and
+      # that a declared gRPC method exists - and then the journey's actual claim, "this operation
+      # calls THAT method", was read by nothing, so a refactor could make it false with every gate
+      # green. This derives the pairing instead: operationId -> the serving BFF's openapi.json ->
+      # the Go route table -> the handler the router was given -> its call graph -> the
+      # package.Service/Method the generated contracts name. There is no map to maintain; the two
+      # journeys whose declarations were already wrong (login had lost identity-service entirely
+      # and credited org-service with memberships authz-service serves) are the reason a derived
+      # answer is worth more than a declared one.
+      #
+      # It reads the contracts at the version each go.mod pins, out of the cache the step above
+      # populates - never a checkout - so this runner and a laptop resolve the same call sites.
+      # A pinned version the cache lacks is fatal rather than skipped: narrowing the contracts
+      # narrows every answer, which is the shape of a gate that passes while verifying less.
+      #
+      # --root is passed for the same reason its siblings take it: the checker defaults to the
+      # root it sits in, which is correct only while docs_path is the default.
+      - name: Every gRPC call a journey declares is made by the handler it names
+        shell: bash
+        run: |
+          set -euo pipefail
+          checker="${DOCS_PATH}/scripts/check_journey_grpc_invocations.py"
+          [ -f "${checker}" ] || {
+            echo "::error::${checker} is not in this checkout. It is a required gate, so its" \
+                 "absence fails here rather than passing quietly."
+            exit 1
+          }
+          python3 "${checker}" --root "${GITHUB_WORKSPACE}"
+
       # Journey runner mechanism honesty: a runner Step can only bind an invariant whose declared
       # mechanisms require evidence the runner can observe. Runners probe over HTTP and read mail
       # sinks; they cannot inspect databases, read traces, query logs, or perform static analysis.
