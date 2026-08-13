@@ -611,6 +611,73 @@ jobs:
           }
           echo "assembled ${planned} deployables"
 
+      # A GitHub App is installed per account, so `token` above is the installation token for
+      # `owner` and for nobody else - the action's own outputs block says so, and names
+      # `tokens-file` as the way to look up any minted owner uniformly. The steps that clone the
+      # deployables do not need that lookup because they go through the configure-git rewrite,
+      # which covers both accounts; the two checkouts below do, because actions/checkout with an
+      # explicit `token:` bypasses the rewrite entirely and calls the REST API with the token it
+      # was handed.
+      #
+      # Handed the wrong one, the failure is not an authorization error. GitHub answers 404 for a
+      # repository a token cannot see, so `Not Found - .../repos#get-a-repository` is what a
+      # brand-owned registry returned to a fleet-owner token for every run of this job since it
+      # was written - and because a failed checkout skips the rest of the job, the two gates below
+      # had never once executed.
+      #
+      # The owner is split off the repository input rather than taken from brand_owner, because
+      # these are inputs: a caller may point either tree at a fork under the other account, and a
+      # hardcoded owner is then the same defect facing the other way.
+      - name: Select each contract tree's owner token
+        id: contract_tokens
+        shell: bash
+        env:
+          API_CONTRACTS_REPO: ${{ inputs.api_contracts_repo }}
+          PLATFORM_CONTRACTS_REPO: ${{ inputs.platform_contracts_repo }}
+          PRIMARY_OWNER: ${{ inputs.fleet_owner }}
+          PRIMARY_TOKEN: ${{ steps.token.outputs.token }}
+          TOKENS_FILE: ${{ steps.token.outputs.tokens-file }}
+        run: |
+          set -euo pipefail
+
+          # Case-insensitively, because the two spellings genuinely arrive from different places:
+          # GitHub routes an owner case-insensitively, so `InboxxHQ-CoderAxis` in one input and
+          # `inboxxhq-coderaxis` in another name one account, while a JSON key lookup would call
+          # them two.
+          token_for() {
+            local owner="${1}"
+            if [ "${owner,,}" = "${PRIMARY_OWNER,,}" ]; then
+              printf '%s' "${PRIMARY_TOKEN}"
+              return 0
+            fi
+            if [ -z "${TOKENS_FILE}" ] || [ ! -f "${TOKENS_FILE}" ]; then
+              return 1
+            fi
+            jq -re --arg o "${owner}" \
+              'to_entries[] | select((.key | ascii_downcase) == ($o | ascii_downcase)) | .value' \
+              "${TOKENS_FILE}"
+          }
+
+          select_token() {
+            local name="${1}" repo="${2}" owner token
+            owner="${repo%%/*}"
+            token="$(token_for "${owner}")" || {
+              echo "::error::no App installation token was minted for '${owner}', which owns" \
+                   "${repo}. A token for another account cannot see it and GitHub answers 404" \
+                   "rather than 403, so the checkout would report a repository that exists as" \
+                   "missing. Name ${owner} in fleet_owner or brand_owner."
+              exit 1
+            }
+            # Already masked when it was minted; masked again here so that stays true of this
+            # step no matter how the token reached it.
+            echo "::add-mask::${token}"
+            printf '%s=%s\n' "${name}" "${token}" >> "${GITHUB_OUTPUT}"
+            echo "  ${repo} -> ${owner}'s installation token"
+          }
+
+          select_token registry_token "${API_CONTRACTS_REPO}"
+          select_token bundle_token "${PLATFORM_CONTRACTS_REPO}"
+
       # Both trees, both paths exact: published_specs() looks for
       # contracts/inboxxhq-api-contracts/<stem>/latest.json and
       # contracts/platform-contracts/openapi/services/*/inboxxhq-<stem>/openapi.json. A tree
@@ -620,14 +687,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.api_contracts_repo }}
-          token: ${{ steps.token.outputs.token }}
+          token: ${{ steps.contract_tokens.outputs.registry_token }}
           path: contracts/inboxxhq-api-contracts
 
       - name: Check out the bundled contract tree
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.platform_contracts_repo }}
-          token: ${{ steps.token.outputs.token }}
+          token: ${{ steps.contract_tokens.outputs.bundle_token }}
           path: contracts/platform-contracts
 
       # The checker cannot make this assertion itself - it has no --require-fleet - and without
