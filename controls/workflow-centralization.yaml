@@ -222,13 +222,22 @@ controls:
     # attached to a reason, and a repository cannot grant itself an entry.
     repository_lanes:
       inboxxhq-infra:
-        lanes: [terraform-apply.yaml, promote-to-prod.yaml]
+        lanes: [terraform-apply.yaml, promote-to-prod.yaml, deploy-lag-detector.yaml]
         reason: >-
           Terraform apply and production promotion are gated, manually-dispatched actions with
           approval environments attached to the workflow itself. Folding them into ci.yaml as jobs
           would put a `terraform apply` behind the same trigger as a lint, and GitHub attaches a
           deployment environment - and therefore its required reviewers - per job, not per branch,
           so the approval gate is a property of keeping them separate.
+
+          deploy-lag-detector.yaml (G-136) is a `schedule`-triggered gate, not a lifecycle
+          action, but the same "not a service pipeline" reasoning applies: it has no filename a
+          published reusable workflow could shadow, calls no central workflow as a job, and folding
+          it into ci.yaml would put a fleet-wide, multi-repository clone behind the same trigger
+          (`pull_request`) as this repository's own thirty-second workflow lint. It reads
+          inboxxhq-infra's own dev GitOps pins and release provenance, which is why it lives here
+          rather than in core-docs or in a central `@v1` workflow every other repository also
+          calls.
     policy: >-
       A repository's `.github/workflows` directory MUST contain only `ci.yaml`, `release.yaml`,
       workflows that the repository itself PUBLISHES as reusable (`on.workflow_call`), and thin
