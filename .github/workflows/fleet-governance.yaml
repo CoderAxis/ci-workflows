@@ -12,8 +12,9 @@ name: Fleet Governance (assembled fleet)
 #                                service serves, which also blinds oasdiff to breaking changes
 #   check_journey_stages.py      a journey stage naming a route or API call the frontend does not have
 #
-# and check_journey_entrypoints.py joins them here on the day it lands, rather than waiting for
-# somebody to notice it was never called - which is how the other four got into this state.
+# and check_journey_entrypoints.py and check_journey_contracts.py join them here on the day each
+# lands, rather than waiting for somebody to notice it was never called - which is how the other
+# four got into this state.
 #
 # The manifest already said so, of the first two, in its own words: "the check needs services/
 # and gateways/ checked out and no CI job assembles that workspace today, so it runs on demand
@@ -117,19 +118,21 @@ permissions:
 
 jobs:
   # ── fleet source ──────────────────────────────────────────────────────────────────────────
-  # Three gates on one assembly, all closing silent failures of the same shape: a defect that
+  # Four gates on one assembly, all closing silent failures of the same shape: a defect that
   # exists only BETWEEN repositories, where each repository is internally consistent and its own
   # CI is green. G-75 (org-service published user.invite.requested.v1, nothing consumed it, so
   # member invitation was broken for months). G-80 (communication-service called two org.v1
   # methods its callee's grant map refused, so a released phone number kept its row and its
-  # inbound route). And a declared journey entry point that no service implements - one of them
-  # is allowlisted as public in two surface files and given its own rate-limit bucket, which is
-  # the platform configured in detail to rate-limit a 404.
+  # inbound route). A declared journey entry point that no service implements - one of them is
+  # allowlisted as public in two surface files and given its own rate-limit bucket, which is the
+  # platform configured in detail to rate-limit a 404. And a journey stage naming an endpoint no
+  # contract publishes: org-bff registers four /org/products/menu-assets routes, the app posts to
+  # one of them, WF-PRODUCT-CREATION declares it, and org-bff's docs/openapi.json describes none.
   #
-  # One job rather than three, because the expensive part is the assembly and all three read the
+  # One job rather than four, because the expensive part is the assembly and all four read the
   # same trees. They are separate STEPS, so the log names which gate failed.
   fleet-source-gates:
-    name: Fleet source (events, gRPC grants, journey entry points)
+    name: Fleet source (events, gRPC grants, journey entry points, journey contracts)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -375,6 +378,105 @@ jobs:
           python3 "${checker}" \
             --workspace "${GITHUB_WORKSPACE}" \
             --require-services
+
+      # The assembly above already asserts that every planned repository was cloned, so this is not
+      # a second completeness check. It asserts the JOIN: check_journey_contracts.py resolves an
+      # operation ref through the service catalog and then looks for the repository under
+      # services/<any>/<repo> or gateways/<any>/<repo>, and nothing anywhere makes the placement
+      # this job chose agree with the placement that resolver expects. Move a repository one level
+      # and every service becomes NO_CONTRACT - a verdict that reads as "the platform documents
+      # none of this" and is fatal, so the gate would fail loudly while naming the wrong defect.
+      #
+      # Resolved by calling the checker's own loader rather than by restating its layout here,
+      # for the reason the frontend surface check gives: a restatement is the thing that drifts.
+      # Only the services a journey actually names are required to resolve, because those are the
+      # only ones the gate reads; and a service whose repositories ARE here and publish no document
+      # is left alone, because that is a real NO_CONTRACT finding for the gate to report rather
+      # than an assembly failure for this step to pre-empt.
+      - name: Confirm the contracts the journeys name were assembled here
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "${DOCS_PATH}/scripts/check_journey_contracts.py" "${GITHUB_WORKSPACE}" <<'PY'
+          import importlib.util
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          spec = importlib.util.spec_from_file_location("journey_contracts", sys.argv[1])
+          checker = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(checker)
+          root = Path(sys.argv[2])
+
+          named = set()
+          for _, workflow in checker.load_workflows(root):
+              for stage in workflow.get("stages") or []:
+                  for entry in stage.get("api") or []:
+                      if isinstance(entry, dict) and entry.get("operation"):
+                          named.add(str(entry["operation"]).partition(":")[0])
+          if not named:
+              raise SystemExit(
+                  "::error::no journey stage names an operation, so the gate below would check "
+                  "nothing and report that everything resolves"
+              )
+
+          specs = checker.load_service_specs(root)
+          catalog = root / checker.SERVICE_CATALOG_DIR
+          unplaced = []
+          for service in sorted(named):
+              if specs.get(service):
+                  print(f"  {len(specs[service])} document(s)  {service}")
+                  continue
+              # Which of the two it is decides who fixes it, so they are separated here. A
+              # repository the catalog names and this workspace does not hold is this job's defect.
+              # One that is held and publishes nothing is the platform's, and belongs to the gate,
+              # so it is printed and not raised on.
+              document = yaml.safe_load((catalog / f"{service}.yaml").read_text(encoding="utf-8")) or {}
+              absent = []
+              for role in ("repository", "deployable_repository"):
+                  repo = (document.get(role) or {}).get("name")
+                  if not repo:
+                      continue
+                  here = [root / code_root / repo for code_root in checker.CODE_ROOTS]
+                  for code_root in checker.CODE_ROOTS:
+                      here.extend((root / code_root).glob(f"*/{repo}"))
+                  if not any(path.is_dir() for path in here):
+                      absent.append(f"{role}={repo}")
+              if absent:
+                  print(f"  UNPLACED    {service}  ({', '.join(absent)})")
+                  unplaced.append(f"{service} ({', '.join(absent)})")
+              else:
+                  print(f"  0 documents {service}  (repositories are here; the gate reports this)")
+
+          if unplaced:
+              raise SystemExit(
+                  "::error::the gate below resolves contracts through "
+                  + " or ".join(f"{code_root}/<any>/<repo>" for code_root in checker.CODE_ROOTS)
+                  + ", and these repositories are not there, so every call naming them would be "
+                  "reported as a contract the platform does not publish: " + "; ".join(unplaced)
+              )
+          PY
+
+      # --require-fleet for the same reason the gates above are given it, and the reason is worth
+      # stating exactly because it was previously recorded as "skips loudly rather than passing":
+      # without the flag an absent fleet prints one SKIPPED line and RETURNS 0. Loud in the log and
+      # green in the checks tab, which is the state a gate must never be in - so the flag is what
+      # makes this a check rather than a report. It covers the total case only, by testing for a
+      # services/ or gateways/ DIRECTORY; the step above is what covers the partial one.
+      #
+      # Every verdict is fatal unless journey-contract-baseline.json holds it, and the baseline
+      # holds exactly one entry. NO_OPERATION and MISMATCH are the two worth naming: the first is a
+      # journey pointing at an operationId no contract defines, the second a `call` string that no
+      # longer matches the method and full path its operation is published under, which is what
+      # makes that string a checksum instead of a second place to be wrong.
+      - name: Every journey call resolves to an operation the platform publishes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${DOCS_PATH}/scripts/check_journey_contracts.py" \
+            --root "${GITHUB_WORKSPACE}" \
+            --require-fleet
 
   # ── API contracts ─────────────────────────────────────────────────────────────────────────
   # Closes the hole G3 left: it globbed contracts/ for a *.json and passed if one existed, so a
