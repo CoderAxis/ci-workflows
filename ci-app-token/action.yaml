@@ -323,8 +323,11 @@ runs:
         out_lines = [f"token={primary['token']}"]
 
         scope_note = f"{len(repos)} repo(s)" if repos else "installation-wide"
+        perms = ', '.join(f"{k}:{v}" for k, v in sorted(primary.get('permissions', {}).items()))
+        repo_selection = primary.get('repository_selection', 'unknown')
         print(f"Minted a {os.environ['SCOPE']} token for {owner} ({scope_note}), "
               f"expires {primary.get('expires_at')}")
+        print(f"  permissions: {perms if perms else 'none'}, repository_selection: {repo_selection}")
 
         if extra:
             tokens = {owner: primary["token"]}

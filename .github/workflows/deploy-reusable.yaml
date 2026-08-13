@@ -275,8 +275,13 @@ jobs:
           set -euo pipefail
           # Sparse and blobless: the catalogue is a few hundred small files in a repository that
           # also carries every environment's Terraform, and this job needs one directory of it.
-          git clone --quiet --depth 1 --filter=blob:none --sparse \
-            "https://x-access-token:${INFRA_TOKEN}@github.com/InboxxHQ-CoderAxis/inboxxhq-infra.git" /tmp/infra
+          if ! git clone --quiet --depth 1 --filter=blob:none --sparse \
+            "https://x-access-token:${INFRA_TOKEN}@github.com/InboxxHQ-CoderAxis/inboxxhq-infra.git" /tmp/infra 2>/tmp/clone-error.txt; then
+            echo "::error::Failed to clone InboxxHQ-CoderAxis/inboxxhq-infra: $(cat /tmp/clone-error.txt)"
+            echo "::error::A 404/not-found from an authenticated App token usually means the installation lacks Contents:Read, not that the repo is missing."
+            echo "::error::Check the ci-app-token step above for 'permissions:' — if it shows only 'metadata:read', the App installation needs to accept updated permissions."
+            exit 1
+          fi
           git -C /tmp/infra sparse-checkout set releases >/dev/null
 
           # Most recently promoted release of this service that dev actually has. `last_promoted_at`
