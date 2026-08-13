@@ -2353,6 +2353,15 @@ jobs:
           set -euo pipefail
           python3 core-docs/scripts/check_source_invariants.py \
             --service-root "${{ github.event.repository.name || 'service' }}"
+          # RFC-0001's response envelope has one implementation
+          # (shared/platform-shared-go/httpresponse); this is what stops a handler from
+          # answering outside it. Same checkout, same --service-root shape as the call
+          # above - no second job needed for one more static-analysis pass over source
+          # already on disk. Baseline lives in core-docs, not this repository, for the
+          # same reason check_source_invariants.py's does: a debt list a service could
+          # edit itself would not be a gate.
+          python3 core-docs/scripts/check_response_envelope_conformance.py \
+            --service-root "${{ github.event.repository.name || 'service' }}"
 
   # ── documentation ───────────────────────────────────────────────────────────────────────────
   # Replaces the per-repo docs-lint.yml and stale-docs-check.yml, which both ran
