@@ -234,6 +234,16 @@ fields:
     pii: none
     loki: body
     owner: application
+    notes: >-
+      Not the identity that authenticated this request - that is actor_id (with
+      actor_type "user"), which is stamped automatically by the shared middleware on
+      every context-carrying call. user_id is for a user a log record refers to
+      without that user being the acting identity (a background job's target user, an
+      admin action's subject, a user_id column looked up by business logic). No call
+      site in the fleet emits it as of 2026-08; it exists for that distinct case, not
+      as an alternate spelling of "who made this request". A call site that logs
+      user_id to mean "the authenticated actor" produces a field that will not join
+      with the actor_id another log line for the same identity already carries.
 
   # --- error -----------------------------------------------------------------------------
   - name: error
