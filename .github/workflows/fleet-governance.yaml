@@ -319,9 +319,20 @@ jobs:
 
           # Downloaded from inside a repository that pins the version, so the version comes from
           # the fleet's own go.mod rather than from anything written here.
+          #
+          # The first match is taken by parameter expansion rather than by piping into `head -1`.
+          # Not a preference: `head` closes the pipe as soon as it has its line, grep's next write
+          # gets EPIPE, and `pipefail` makes that the status of the whole substitution - so the
+          # step died on exit 2 with nothing but "grep: write error: Broken pipe" to say why, and
+          # every gate below it was skipped. That is what it did on both of the first two real runs
+          # of this job, which is to say this step has never once let a gate execute in CI.
           for version in "${versions[@]}"; do
-            repo="$(grep -lE "${module} ${version}\$|${module} ${version} " "${gomods[@]}" | head -1)"
-            ( cd "$(dirname "${repo}")" && GOWORK=off go mod download "${module}" )
+            matched="$(grep -lE "${module} ${version}\$|${module} ${version} " "${gomods[@]}")" || {
+              echo "::error::no go.mod pins ${module} ${version}, but the version was read from" \
+                   "these same files, so the fleet changed underneath this step"
+              exit 1
+            }
+            ( cd "$(dirname "${matched%%$'\n'*}")" && GOWORK=off go mod download "${module}" )
           done
 
           cache="$(go env GOMODCACHE)"
