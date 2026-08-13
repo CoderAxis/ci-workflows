@@ -328,6 +328,7 @@ runs:
         print(f"Minted a {os.environ['SCOPE']} token for {owner} ({scope_note}), "
               f"expires {primary.get('expires_at')}")
         print(f"  permissions: {perms if perms else 'none'}, repository_selection: {repo_selection}")
+        print(f"  (Freshly minted tokens can 404 on git operations for a few seconds during propagation)")
 
         if extra:
             tokens = {owner: primary["token"]}
