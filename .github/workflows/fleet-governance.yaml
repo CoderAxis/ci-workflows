@@ -418,6 +418,26 @@ jobs:
             --root "${GITHUB_WORKSPACE}" \
             --require-fleet
 
+      # Journey runner mechanism honesty: a runner Step can only bind an invariant whose declared
+      # mechanisms require evidence the runner can observe. Runners probe over HTTP and read mail
+      # sinks; they cannot inspect databases, read traces, query logs, or perform static analysis.
+      # A binding claiming an invariant that needs db-state is the same overclaim G-118 and G-121
+      # were (a suite claiming a mechanism it did not perform), and this check refuses it the same
+      # way the suite guards do: at the catalog level, where it cannot be forgotten. Wired plainly
+      # rather than behind an existence check, for the same reason every gate in this job is: a
+      # step that skips when the checker is missing passes for a check nobody ran.
+      - name: Journey runners only bind invariants they can actually prove
+        shell: bash
+        run: |
+          set -euo pipefail
+          checker="${DOCS_PATH}/scripts/check_journey_runner_mechanisms.py"
+          [ -f "${checker}" ] || {
+            echo "::error::${checker} is not in this checkout. It is a required gate, so its" \
+                 "absence fails here rather than passing quietly."
+            exit 1
+          }
+          python3 "${checker}"
+
   # ── API contracts ─────────────────────────────────────────────────────────────────────────
   # Closes the hole G3 left: it globbed contracts/ for a *.json and passed if one existed, so a
   # 56-byte stub with "paths": {} counted as a published contract and six live services were in
