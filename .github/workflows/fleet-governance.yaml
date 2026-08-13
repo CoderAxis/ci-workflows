@@ -418,6 +418,24 @@ jobs:
             --root "${GITHUB_WORKSPACE}" \
             --require-fleet
 
+      # The same binding for the other protocol. check_journey_contracts.py covers a stage's HTTP
+      # call; a `type: grpc` reference was read by nothing, and two of the catalog's four did not
+      # resolve - one had lost its proto package, one was prose. It resolves against the
+      # fully qualified method protoc emits, harvested from the generated *_grpc.pb.go in the
+      # module cache the step above populates, so gRPC keeps the one identifier it already has
+      # rather than gaining an operationId to drift against.
+      - name: Every gRPC method a journey names exists in the contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          checker="${DOCS_PATH}/scripts/check_journey_grpc_refs.py"
+          [ -f "${checker}" ] || {
+            echo "::error::${checker} is not in this checkout. It is a required gate, so its" \
+                 "absence fails here rather than passing quietly."
+            exit 1
+          }
+          python3 "${checker}"
+
       # Journey runner mechanism honesty: a runner Step can only bind an invariant whose declared
       # mechanisms require evidence the runner can observe. Runners probe over HTTP and read mail
       # sinks; they cannot inspect databases, read traces, query logs, or perform static analysis.
