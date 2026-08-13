@@ -82,13 +82,17 @@ on:
         default: gateways/inboxxhq-edge-gateway
       api_contracts_repo:
         description: >-
-          Per-service published contract registry. C3.5 compares it against the authored spec, so
-          without it every publication-fidelity finding disappears and the gate reports clean.
+          Per-service published contract registry. check_openapi_publication.py compares every
+          document in it against the spec its service authored, and C3.5 additionally counts
+          operations; without it both are unread, so an absent tree is refused rather than
+          reported clean.
         required: false
         type: string
         default: InboxxHQ-CoderAxis/inboxxhq-api-contracts
       platform_contracts_repo:
-        description: "The bundled contract tree, compared by C3.5 on the same basis."
+        description: >-
+          The bundled contract tree, compared on the same basis and separately, because a
+          registry refreshed while the bundle went stale is two findings rather than none.
         required: false
         type: string
         default: coderaxis/platform-contracts
@@ -495,6 +499,13 @@ jobs:
   # gate: given a workspace with no specs it finds nothing, prunes nothing, and exits 0. Wired
   # over an empty checkout it would have been a permanently green gate over an unread fleet,
   # which is why this job asserts what it found before it judges it.
+  #
+  # AND WHAT IT LEFT OPEN UNTIL 2026-08-13. Closing "the published contract is not empty" is not
+  # closing "the published contract is the service's contract", and for a year the second was
+  # nobody's: C3.5 compared operation COUNTS, so a contract could be published with the right
+  # number of the wrong operations, or with every schema, every response and the version label
+  # rewritten, and this job passed it. check_openapi_publication.py compares the documents, and
+  # is the step that makes the "publication fidelity" in this job's name true of the job.
   api-contracts:
     name: API contracts (OpenAPI quality + publication fidelity)
     runs-on: ubuntu-latest
@@ -635,6 +646,39 @@ jobs:
           for tree in contracts/inboxxhq-api-contracts contracts/platform-contracts; do
             [ -d "${tree}" ] || { echo "::error::${tree} missing; C3.5 would find nothing"; exit 1; }
           done
+
+      # PUBLICATION FIDELITY, WHICH THE STEP BELOW DOES NOT DO. C3.5 is named "Publication
+      # fidelity" and is, in full, `if len(operations(published)) < len(operations(authored))`.
+      # An inequality between two integers is not a comparison of two documents, and its own
+      # docstring says so ("Deliberately a count comparison rather than a diff") - but this job's
+      # name, the api_contracts_repo input description above and the control's own name all
+      # promise fidelity, so the promise was in the title and not in the job. Measured on
+      # 2026-08-13, 29 of 31 (authored, published) pairs differ and C3.5 cannot see 9 of them:
+      # platform-bff publishes 171 operations against 171 authored, of which 9 are absent from
+      # the published contract and 9 exist only in it, and the counts tie so nothing is reported.
+      # org-bff is worse for being caught: C3.5 says "missing 1 operation" where the documents
+      # differ by 2,568 lines, and it only speaks at all because 9 removals happened to outnumber
+      # 8 additions.
+      #
+      # This step compares the documents. It runs BEFORE the quality step deliberately: that step
+      # is red today by design (96 violations), and a step placed after a failing one never
+      # executes, which is how a gate ends up in the state this whole workflow exists to fix.
+      #
+      # The two are kept because they are not the same rule. C3.5 refuses "fewer operations than
+      # the service serves" absolutely, with no baseline available for it. This step accepts a
+      # recorded set of known-stale divergences and fails on anything new, because 1,646 of them
+      # exist and a fatal check would have blocked every pipeline in the fleet on day one.
+      - name: Published contracts are the documents their services authored
+        shell: bash
+        run: |
+          set -euo pipefail
+          checker="${DOCS_PATH}/scripts/check_openapi_publication.py"
+          [ -f "${checker}" ] || {
+            echo "::error::${checker} is not in this checkout. It is a required gate, so its" \
+                 "absence fails here rather than passing quietly."
+            exit 1
+          }
+          python3 "${checker}" --workspace "${GITHUB_WORKSPACE}" --summary
 
       # The ratchet lives in catalog/openapi-baseline.json: a violation already recorded there is
       # accepted, a new one fails. C3.5 and C3.1-dup are excluded from it by the checker itself -
