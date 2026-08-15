@@ -429,16 +429,72 @@ jobs:
           go install github.com/oasdiff/oasdiff@v1.11.7
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
+      # What contract this deploy carries, so the step below can tell a break that was
+      # declared from one that was not. api_contract_version is set only when THIS run
+      # published, and a run publishes only when the spec changed; when it did not, the
+      # version on file in the registry is still the one being deployed.
+      - name: Resolve the contract version being deployed
+        id: deploying
+        if: steps.baseline.outputs.compare == 'true'
+        shell: bash
+        env:
+          REGISTRY_TOKEN: ${{ steps.registry_token.outputs.token }}
+          PUBLISHED_THIS_RUN: ${{ inputs.api_contract_version }}
+          SERVICE: ${{ needs.resolve.outputs.service }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PUBLISHED_THIS_RUN}" ]; then
+            echo "version=${PUBLISHED_THIS_RUN}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          version="$(curl -sSL \
+                       -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
+                       -H "Accept: application/vnd.github.raw" \
+                       "https://api.github.com/repos/${{ inputs.contract_repo }}/contents/${SERVICE}/VERSION" \
+                     | tr -d '[:space:]')" || version=""
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
       - name: Detect breaking changes
         if: steps.baseline.outputs.compare == 'true'
         shell: bash
+        env:
+          BASELINE_VERSION: ${{ steps.released.outputs.version }}
+          DEPLOYING_VERSION: ${{ steps.deploying.outputs.version }}
+          SERVICE: ${{ needs.resolve.outputs.service }}
         run: |
           set -euo pipefail
-          oasdiff breaking \
-            /tmp/published-contract.json \
-            docs/openapi.json \
-            --fail-on ERR
-          echo "No breaking changes detected — safe to deploy"
+          if oasdiff breaking \
+               /tmp/published-contract.json \
+               docs/openapi.json \
+               --fail-on ERR; then
+            echo "No breaking changes detected — safe to deploy"
+            exit 0
+          fi
+
+          # A break under the same major is what this gate is for: nothing declared it, so
+          # it reaches dev's consumers unannounced. A break across a major boundary is the
+          # opposite case. The publish gate refuses a breaking spec outright and names its
+          # one remedy - a major bump of the registry VERSION - so a contract that arrives
+          # here with a higher major has already been through that refusal and been
+          # deliberately released as a break. Failing it again does not add a review; it
+          # makes the remedy the other gate demands impossible to complete, because the
+          # environment can never take the version that carries it.
+          #
+          # So the findings are still printed, and still on the record. What changes is
+          # only whether an already-declared break may reach the environment it was
+          # declared for.
+          major() { printf '%s' "${1#v}" | cut -d. -f1; }
+          base_major="$(major "${BASELINE_VERSION}")"
+          new_major="$(major "${DEPLOYING_VERSION}")"
+
+          if [ -n "${base_major}" ] && [ -n "${new_major}" ] \
+             && [ "${new_major}" -gt "${base_major}" ] 2>/dev/null; then
+            echo "::warning::${SERVICE} ${DEPLOYING_VERSION} breaks ${BASELINE_VERSION}, which dev is serving. The major bump declares it, so the deploy proceeds — consumers of ${BASELINE_VERSION} must be migrated."
+            exit 0
+          fi
+
+          echo "::error::${SERVICE} ${DEPLOYING_VERSION:-(unknown)} breaks ${BASELINE_VERSION:-(unknown)}, which dev is serving, without a major bump to declare it. An intentional break needs a major bump of ${SERVICE}/VERSION in ${{ inputs.contract_repo }}; an unintentional one needs the spec fixed here."
+          exit 1
 
   build-and-pin:
     name: Build canonical artifact + pin dev
