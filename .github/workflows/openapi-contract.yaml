@@ -418,6 +418,28 @@ jobs:
                 source_sha: $source_sha, source_run: $source_run, published_at: $published_at}' \
               > "${svc_dir}/provenance.json"
 
+            # index.json carries every service's published version and a digest of its
+            # latest.json, and the registry's own CI gates it with `generate_index.py --check`.
+            # Regenerating it here is not tidiness: without it this commit is one the registry
+            # refuses. Seven of the seven bot publications before this was added left the index
+            # untouched and turned the registry red on push, while every hand publication updated
+            # it -- so the gate was, in effect, only ever satisfied by the publisher that did the
+            # work manually. A stale index is also read by things that cannot tell it is stale:
+            # release.yaml regenerates it in memory for the mirror, so the portals served the new
+            # version while the committed index still named the old one, and anything reading the
+            # index from a git checkout got the wrong answer with nothing to indicate it.
+            #
+            # Failing rather than warning if the generator is absent, for the reason the version
+            # allocation above is careful: this loop's whole purpose is to leave the registry in a
+            # state it accepts, and a publish that silently skips the index is exactly the
+            # half-finished push this replaces.
+            if [ ! -f tools/generate_index.py ]; then
+              echo "::error::${REGISTRY_REPO} has no tools/generate_index.py, so this publish" \
+                   "cannot refresh index.json and would push a commit its own CI rejects."
+              exit 1
+            fi
+            python3 tools/generate_index.py --output index.json
+
             git add -A
             if git diff --cached --quiet; then
               # Unreachable via the spec: an identical document breaks out above, and a differing
