@@ -109,6 +109,19 @@ on:
         required: false
         type: string
         default: coderaxis/platform-contracts
+      infra_repo:
+        description: >-
+          The release catalogue. Publishing a contract to the registry is not what makes an
+          environment serve it: the mirror repoints each environment's latest.json at the version
+          that environment's release record NAMES, and a record names one only when the deploy
+          that wrote it also published. So a record naming none silently pins the environment to
+          an older release, which is how org-bff's ADR-0094 surface was live and undocumented on
+          dev for five hours with every gate green. check_environment_contract_pins.py reads
+          releases/ and nothing else can answer what an environment is serving; without it the
+          check is refused rather than reported clean.
+        required: false
+        type: string
+        default: InboxxHQ-CoderAxis/inboxxhq-infra
       frontend_repos:
         description: >-
           Newline-separated `<org>/<repo>` frontends to place under frontend/. These are the apps
@@ -678,6 +691,7 @@ jobs:
         env:
           API_CONTRACTS_REPO: ${{ inputs.api_contracts_repo }}
           PLATFORM_CONTRACTS_REPO: ${{ inputs.platform_contracts_repo }}
+          INFRA_REPO: ${{ inputs.infra_repo }}
           PRIMARY_OWNER: ${{ inputs.fleet_owner }}
           PRIMARY_TOKEN: ${{ steps.token.outputs.token }}
           TOKENS_FILE: ${{ steps.token.outputs.tokens-file }}
@@ -721,6 +735,7 @@ jobs:
 
           select_token registry_token "${API_CONTRACTS_REPO}"
           select_token bundle_token "${PLATFORM_CONTRACTS_REPO}"
+          select_token infra_token "${INFRA_REPO}"
 
       # Both trees, both paths exact: published_specs() looks for
       # contracts/inboxxhq-api-contracts/<stem>/latest.json and
@@ -740,6 +755,17 @@ jobs:
           repository: ${{ inputs.platform_contracts_repo }}
           token: ${{ steps.contract_tokens.outputs.bundle_token }}
           path: contracts/platform-contracts
+
+      # releases/ only. It is the one directory the pin check reads, and infra is large enough
+      # that taking the rest would cost more than every other checkout in this job together.
+      - name: Check out the release catalogue
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.infra_repo }}
+          token: ${{ steps.contract_tokens.outputs.infra_token }}
+          path: infra/inboxxhq-infra
+          sparse-checkout: releases
+          sparse-checkout-cone-mode: false
 
       # The checker cannot make this assertion itself - it has no --require-fleet - and without
       # it every failure mode of the assembly above reads as a pass.
@@ -790,6 +816,35 @@ jobs:
             exit 1
           }
           python3 "${checker}" --workspace "${GITHUB_WORKSPACE}" --summary
+
+      # THE OTHER END OF THE SAME QUESTION. The step above proves the registry holds the document
+      # the service authored. It cannot prove a reader is being shown that document, because the
+      # portal does not serve latest.json off main: release.yaml repoints each environment's copy
+      # at the snapshot that environment's release record names, and `select(.contract_version)`
+      # skips a record that names none - pinning the environment to an older release instead.
+      #
+      # Nothing was red when that happened. org-bff's ADR-0094 telephony and public-onboarding
+      # operations were live on dev while its portal served a five-hour-old 1.5.0, platform-bff
+      # the same, and both were found by a human reading the portal and asking where the URLs
+      # were. That is the detection mechanism this step replaces.
+      #
+      # Placed before the quality step for the same reason the publication step is: that one is
+      # red by design, and a step after a failing step never runs.
+      - name: Each environment's portal documents the contract it is running
+        shell: bash
+        run: |
+          set -euo pipefail
+          checker="${DOCS_PATH}/scripts/check_environment_contract_pins.py"
+          [ -f "${checker}" ] || {
+            echo "::error::${checker} is not in this checkout. It is a required gate, so its" \
+                 "absence fails here rather than passing quietly."
+            exit 1
+          }
+          # dev only. Each environment has its own records and its own portal, and dev is where a
+          # deploy lands first, so a pin that goes stale is stale here before anywhere else. The
+          # checker takes one environment per run; staging and preprod run a promoted digest that
+          # is usually behind main, which it can only skip.
+          python3 "${checker}" --workspace "${GITHUB_WORKSPACE}" --env dev --summary
 
       # The ratchet lives in catalog/openapi-baseline.json: a violation already recorded there is
       # accepted, a new one fails. C3.5 and C3.1-dup are excluded from it by the checker itself -
