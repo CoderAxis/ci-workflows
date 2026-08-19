@@ -80,6 +80,19 @@ on:
         required: false
         type: string
         default: gateways/inboxxhq-edge-gateway
+      cli_path:
+        description: >-
+          Where the operator CLI must land, pinned for the same reason edge_gateway_path is: a
+          checker pins it. check_journey_runner_mechanisms.py reads the journey runners from
+          tools/inboxxhq-cli/internal/cuj/journeys.go and nowhere else, and exits 1 when that file
+          is absent. The CLI is a catalog ARTIFACT rather than a service, so the plan below - which
+          reads catalog/services and keeps only Go runtimes - never fetched it, and that gate has
+          therefore failed on every run since it was wired, always with "journeys.go not found"
+          rather than with anything about a runner binding. It is fetched by rule from the catalog
+          like everything else; only the destination is pinned, because the script's constant is.
+        required: false
+        type: string
+        default: tools/inboxxhq-cli
       api_contracts_repo:
         description: >-
           Per-service published contract registry. check_openapi_publication.py compares every
@@ -193,6 +206,7 @@ jobs:
           FLEET_OWNER: ${{ inputs.fleet_owner }}
           BRAND_OWNER: ${{ inputs.brand_owner }}
           EDGE_GATEWAY_PATH: ${{ inputs.edge_gateway_path }}
+          CLI_PATH: ${{ inputs.cli_path }}
         run: |
           set -euo pipefail
 
@@ -209,9 +223,12 @@ jobs:
 
           import yaml
 
-          catalog = Path(sys.argv[1]) / "catalog" / "services"
+          docs = Path(sys.argv[1])
+          catalog = docs / "catalog" / "services"
           edge_path = os.environ["EDGE_GATEWAY_PATH"].strip("/")
           edge_repo = edge_path.rsplit("/", 1)[-1]
+          cli_path = os.environ["CLI_PATH"].strip("/")
+          cli_repo = cli_path.rsplit("/", 1)[-1]
 
           rows = set()
           for entry in sorted(catalog.glob("*.yaml")):
@@ -244,6 +261,33 @@ jobs:
                   f"would land at {edge_path} and every declared entry point would be reported "
                   "as reaching no edge surface"
               )
+
+          # The operator CLI, which holds the journey runners. It is a catalog ARTIFACT, not a
+          # service, so the loop above cannot reach it however the filters are tuned - and the
+          # journey-runner gate reads journeys.go out of it, so without this the gate could only
+          # ever report a missing file. Planned from the catalog like everything else rather than
+          # cloned by name in the assembly step, so that one plan remains the whole answer to what
+          # this job is about to check.
+          artifacts = docs / "catalog" / "artifacts"
+          cli_rows = {
+              f"{repo['organization']}/{repo['name']}\t{cli_path}"
+              for node in (
+                  yaml.safe_load(entry.read_text(encoding="utf-8")) or {}
+                  for entry in sorted(artifacts.glob("*.yaml"))
+              )
+              for repo in [node.get("repository") or {}]
+              if repo.get("name") == cli_repo
+              and repo.get("resolution", "resolved") == "resolved"
+              and repo.get("organization")
+          }
+          if not cli_rows:
+              raise SystemExit(
+                  f"::error::no resolved artifact in catalog/artifacts names a repository called "
+                  f"{cli_repo}, so nothing would land at {cli_path} and the journey-runner gate "
+                  f"would fail on a missing journeys.go rather than on a runner binding"
+              )
+          rows |= cli_rows
+
           print("\n".join(sorted(rows)))
           PY
 
