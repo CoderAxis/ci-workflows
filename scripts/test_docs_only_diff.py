@@ -531,6 +531,9 @@ UNGATED_JOBS = {
     "org-vocabulary",     # vocabulary, which markdown is full of
     "notify",             # always()
     "docs-only",          # the classifier
+    "pin-only",           # the other classifier: five minutes, and gating it on
+                          # this one would leave its output unset for every job
+                          # that reads both
 }
 
 

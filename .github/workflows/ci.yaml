@@ -182,6 +182,15 @@ jobs:
       - name: Range computation and path classification, against real repositories
         run: python3 scripts/test_docs_only_diff.py
 
+      # The second fast path, over the diff the release cascade generates. Its interesting
+      # cases are inside go.mod rather than in the path list: a `toolchain` bump and a
+      # `replace` directive arrive in the same file as a version pin and must not ride the
+      # fast path, because the scanners it skips can legitimately answer differently after
+      # either. The wiring half additionally asserts that the jobs whose subject IS the
+      # dependency delta - vulnerabilities, dependency-review, build-test - are never skipped.
+      - name: Dependency-pin classification and its wiring
+        run: python3 scripts/test_pin_only_diff.py
+
   # ── org vocabulary (ORG-0001 broad, ORG-0002 identifiers) ──────────────────────────────────
   # Arrived without a job here, which is the omission this file's own header warns about: "new
   # central checkers should arrive with a self-test here". Added now, alongside ORG-0002.

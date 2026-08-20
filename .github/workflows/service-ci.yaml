@@ -203,6 +203,69 @@ jobs:
         shell: bash
         run: rm -rf .docs-only-tools
 
+  # The second fast path, for the diff the release cascade generates rather than the one a
+  # human writes. ADR-0082 fans a released version out to every consumer -- 53 of them for
+  # platform-contracts-go, 90 for platform-shared-go -- and each fan-out is a pull request
+  # containing two lines of go.mod and the matching go.sum rows. Because service CI runs on
+  # both pull_request and push:main, one platform-shared-go release bills ~180 runs of this
+  # 28-job pipeline to answer a question about a version string.
+  #
+  # Most of these jobs cannot answer differently: structure reads the repository layout,
+  # uuid-policy and org-vocabulary scan Go source, source-invariants scans the checkout, and
+  # under a pin-only diff every one of those inputs is byte-identical to the run that already
+  # passed on the base commit.
+  #
+  # What is NOT skipped is the point. build-test, integration and e2e still run, because a
+  # library change is a behaviour change; vulnerabilities and dependency-review still run,
+  # because a bump is exactly when a CVE arrives and the dependency delta is their whole
+  # subject; openapi-generator still runs, because the generator library comes FROM
+  # platform-shared-go and a bump can legitimately change the generated spec; and artifact
+  # still runs, because a merged bump needs an image. That is what makes this a saving rather
+  # than a hole, and test_pin_only_diff.py asserts every line of it.
+  pin-only:
+    name: Dependency-pin-only change
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      pin_only: ${{ steps.classify.outputs.pin_only }}
+    steps:
+      # Full history, for the same reason as docs-only: the before-SHA of a push is exactly
+      # the object a shallow clone does not have.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out the central classifier
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/ci-workflows
+          ref: v1
+          path: .pin-only-tools
+          sparse-checkout: scripts
+
+      # Degrades to `false`, which is the behaviour before this job existed, rather than
+      # failing. Same asymmetry as docs-only: this job's purpose is to SKIP things, so an
+      # unreachable classifier must quietly run the full pipeline it was trying to shorten.
+      - name: Classify the diff
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f .pin-only-tools/scripts/pin-only-diff.py ]]; then
+            echo "::warning::the central dependency-pin classifier is not present in this"
+            echo "::warning::checkout of ci-workflows; running every gate, as before."
+            echo "pin_only=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          python3 .pin-only-tools/scripts/pin-only-diff.py --repo-root .
+
+      - name: Remove the central checkout
+        if: always()
+        shell: bash
+        run: rm -rf .pin-only-tools
+
   # The language-specific jobs below are necessarily conditional, which means an unrecognised
   # language would skip build, test, coverage and CodeQL and still report the pipeline green.
   # Every repo in the fleet is Go today, so this guard costs nothing now and is the difference
@@ -235,7 +298,8 @@ jobs:
   # from the repository being checked; that is the whole point.
   standards:
     name: Repository standards
-    needs: resolve
+    needs: [resolve, pin-only]
+    if: needs.pin-only.outputs.pin_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -497,8 +561,8 @@ jobs:
 
   codeql:
     name: CodeQL
-    needs: [resolve, docs-only]
-    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go'
+    needs: [resolve, docs-only, pin-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go' && needs.pin-only.outputs.pin_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -620,8 +684,8 @@ jobs:
   # ever declaring it. A skipped job can never catch that.
   events:
     name: Event handling compliance
-    needs: [resolve, docs-only]
-    if: needs.docs-only.outputs.docs_only != 'true'
+    needs: [resolve, docs-only, pin-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.pin-only.outputs.pin_only != 'true'
     uses: coderaxis/ci-workflows/.github/workflows/event-handling-compliance.yaml@v1
     with:
       role: ${{ needs.resolve.outputs.role }}
@@ -635,14 +699,14 @@ jobs:
 
   seeding:
     name: Seeding contract
-    needs: [resolve, docs-only]
-    if: needs.docs-only.outputs.docs_only != 'true'
+    needs: [resolve, docs-only, pin-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.pin-only.outputs.pin_only != 'true'
     uses: coderaxis/ci-workflows/.github/workflows/seed-contract-check.yaml@v1
 
   schema:
     name: Schema compatibility
-    needs: [resolve, docs-only]
-    if: needs.docs-only.outputs.docs_only != 'true'
+    needs: [resolve, docs-only, pin-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.pin-only.outputs.pin_only != 'true'
     permissions:
       contents: read
       # The called workflow mints a module-read token from its own OIDC identity, and a called
@@ -658,8 +722,8 @@ jobs:
 
   dockerfile:
     name: Dockerfile standard
-    needs: [resolve, docs-only]
-    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.deployable == 'true'
+    needs: [resolve, docs-only, pin-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.deployable == 'true' && needs.pin-only.outputs.pin_only != 'true'
     uses: coderaxis/ci-workflows/.github/workflows/dockerfile-standard.yaml@v1
     with:
       capabilities: ${{ needs.resolve.outputs.capabilities }}
@@ -672,8 +736,8 @@ jobs:
     # Its README.md and docs/ presence checks look like documentation gates, but the `docs` job
     # below grades the whole required documentation tree against the central standard and still
     # runs, so a documentation commit that deletes README.md is caught there rather than here.
-    needs: [resolve, docs-only]
-    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go'
+    needs: [resolve, docs-only, pin-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go' && needs.pin-only.outputs.pin_only != 'true'
     permissions:
       contents: read
       # The architecture-check step mints a module-read token from this job's OIDC identity to
@@ -1133,8 +1197,8 @@ jobs:
   # makes it cheap enough to run on every repository.
   uuid-policy:
     name: UUID version policy
-    needs: [resolve, docs-only]
-    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go'
+    needs: [resolve, docs-only, pin-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go' && needs.pin-only.outputs.pin_only != 'true'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -1192,7 +1256,8 @@ jobs:
   # ── org vocabulary enforcement ──────────────────────────────────────────────────────────────
   org-vocabulary:
     name: Org vocabulary policy
-    needs: resolve
+    needs: [resolve, pin-only]
+    if: needs.pin-only.outputs.pin_only != 'true'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -1230,8 +1295,8 @@ jobs:
   # ── generated-code and query drift ──────────────────────────────────────────────────────────
   sqlc:
     name: SQLC drift and raw-SQL guard
-    needs: [resolve, docs-only]
-    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go'
+    needs: [resolve, docs-only, pin-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go' && needs.pin-only.outputs.pin_only != 'true'
     permissions:
       contents: read
       id-token: write
@@ -1309,7 +1374,8 @@ jobs:
   # service that had lost its OpenAPI spec passed the OpenAPI gate precisely because it had lost it.
   contracts:
     name: ADR and API contract validation
-    needs: resolve
+    needs: [resolve, pin-only]
+    if: needs.pin-only.outputs.pin_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -1659,8 +1725,8 @@ jobs:
   # the declared answer, it is reviewable, and CI already resolves identity from it.
   contract-classification:
     name: Contract classification
-    needs: [resolve, docs-only]
-    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.repo_kind == 'deployable'
+    needs: [resolve, docs-only, pin-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.repo_kind == 'deployable' && needs.pin-only.outputs.pin_only != 'true'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -1719,8 +1785,8 @@ jobs:
   # RFC-0039 (the normative control definitions).
   gateway-baseline:
     name: Gateway security baseline
-    needs: [resolve, docs-only]
-    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.repo_kind == 'deployable'
+    needs: [resolve, docs-only, pin-only]
+    if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.repo_kind == 'deployable' && needs.pin-only.outputs.pin_only != 'true'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -2309,7 +2375,7 @@ jobs:
   # job: the standard lives in core-docs, the subject is the repository under test.
   source-invariants:
     name: Source invariants
-    needs: [resolve, docs-only]
+    needs: [resolve, docs-only, pin-only]
     # Go deployables and cores carry the callback/signature checks; schema repos carry the
     # forwarding SQL checks (C6/C7). Other languages have no scanner yet and must not get a
     # green tick for checks nobody ran.
@@ -2319,6 +2385,7 @@ jobs:
     # entirely - the kind of precedence slip that reads correct and gates nothing.
     if: >-
       needs.docs-only.outputs.docs_only != 'true'
+      && needs.pin-only.outputs.pin_only != 'true'
       && (needs.resolve.outputs.language == 'go'
           || needs.resolve.outputs.repo_kind == 'schema')
     permissions:
@@ -2371,7 +2438,8 @@ jobs:
   # check_service_docs.py, so the standard is read from the platform, not from the subject.
   docs:
     name: Service documentation
-    needs: resolve
+    needs: [resolve, pin-only]
+    if: needs.pin-only.outputs.pin_only != 'true'
     permissions:
       contents: read
       id-token: write
