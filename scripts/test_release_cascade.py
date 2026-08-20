@@ -44,6 +44,7 @@ def checker_module():
 CHECKER = HERE / "check_module_pins.py"
 
 CORE_ID, SCHEMA_ID, DEPLOYABLE_ID, SHARED_ID = 900000001, 900000002, 900000003, 900000004
+ADAPTER_CORE_ID, ADAPTER_SCHEMA_ID = 900000005, 900000006
 CORE_MOD = "github.com/coderaxis/fixture-core"
 SCHEMA_MOD = "github.com/coderaxis/fixture-core-postgres"
 SHARED_MOD = "github.com/coderaxis/fixture-shared"
@@ -161,6 +162,23 @@ def test_pins_upward() -> None:
           facts("coderaxis/fixture-core-postgres", SCHEMA_ID)["upstream_module"], CORE_MOD)
     check("core has no upstream",
           facts("coderaxis/fixture-core", CORE_ID)["upstream_module"], "")
+
+    # A family whose core was never adopted. The catalog names one, so the family shape says
+    # there is an upstream, and the shape was what this used to answer from - which made the
+    # release gate demand a pin that does not exist and reject every version the module could
+    # ever publish. Three real families are shaped this way, and the first of them to attempt
+    # a release found a payment fix held up by a module nothing imports.
+    #
+    # The graph is asked instead, because "pins directly" is a fact about the go.mod rather
+    # than about how the catalog groups repositories.
+    check("a schema module that does not pin its core declares no upstream",
+          facts("coderaxis/fixture-adapter-core-postgres", ADAPTER_SCHEMA_ID)["upstream_module"],
+          "")
+    # ...and it is still recognised as a schema module, so this is the gate declining to apply
+    # rather than the repository failing to resolve.
+    check("...and is still resolved as a schema module",
+          facts("coderaxis/fixture-adapter-core-postgres", ADAPTER_SCHEMA_ID)["repo_kind"],
+          "schema")
 
 
 def run_checker(fixture: str, mode: str) -> int:

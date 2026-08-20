@@ -1,0 +1,35 @@
+name: fixture-adapter-service
+domain: fixture
+owner: platform-infrastructure
+tier: platform-critical
+service_tier: tier-1
+brands: [inboxxhq]
+repository_pattern: "<brand>-fixture-adapter-service"
+# A family whose core exists, is released, and is imported by nobody. The catalog models the
+# same three repositories as any other service, so the shape alone cannot tell this apart from
+# fixture-service - only the artifact graph knows that the schema module pins platform-shared
+# and not the core. Three real families are shaped this way: stripe-adapter, twilio-adapter
+# and chat-sync.
+repository:
+  organization: coderaxis
+  name: fixture-adapter-core
+  github_id: 900000005
+schema_repository:
+  organization: coderaxis
+  name: fixture-adapter-core-postgres
+  github_id: 900000006
+deployable_repository:
+  organization: InboxxHQ-CoderAxis
+  name: inboxxhq-fixture-adapter-service
+  github_id: 900000007
+archetype: adapter-service
+runtime:
+  language: go
+interfaces:
+  rest:
+    - fixture-adapter-service.http.v1
+database:
+  mode: owned
+  schemas:
+    - name: fixture_adapter
+      migrationTool: goose
