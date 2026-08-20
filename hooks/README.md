@@ -1,115 +1,44 @@
-# Contract hooks (ihq-driven)
+# Local git hooks
 
-`ihq-guard.sh` runs the platform's contract checks locally, so a violation is caught before the
-commit rather than in CI. `install-ihq-guard.sh` puts it into every repository in the workspace.
-
-```bash
-./install-ihq-guard.sh --dry-run    # show what would change
-./install-ihq-guard.sh              # wire every repo
-```
-
-## What runs, and when
-
-| Hook | Mode | Runs |
-| --- | --- | --- |
-| `pre-commit` | `fast` | Only when a staged file is `docs/openapi*.json`, `docs/openapi*.go`, or under `.github/workflows/` |
-| `pre-push` | `full` | Always |
-
-Both call one command:
+Nothing in this directory implements a check any more. The local gate is `ihq git guard`,
+installed by `ihq git hooks install`, and the standard that governs it is
+[local-verification-gate-standard.md](https://github.com/coderaxis/core-docs/blob/main/standards/delivery/local-verification-gate-standard.md).
 
 ```bash
-ihq validate --repo "$(git rev-parse --show-toplevel)" --fail-on error --details
+ihq git hooks install --fleet   # wire every repository in the workspace
+ihq git hooks status            # which repositories are current
+ihq git guard                   # what the hook will run
 ```
 
-That covers operationId presence, uniqueness, ADR-0006 naming and the lockfile; request and
-response examples; response schemas; the RFC-0001 envelope and its binding to `common.v1`;
-RFC-0002 error codes; RFC-0003 pagination; no committed legacy swagger file; and that every call
-to a central workflow pins `@v1`.
+`install-ihq-guard.sh` remains as a redirect: it forwards to `ihq git hooks install --fleet`
+so anyone with the old command in their fingers or in a script lands in the right place.
 
-Errors block, warnings and info findings do not. Raise the bar for a repo that has earned it with
-`IHQ_GUARD_FAIL_ON=warning`. A repository that commits no contract and serves no HTTP is checked
-for the repo-level rules only — the CLI scopes that itself, so the hook is the same everywhere.
+## Why the shell library is gone
 
-Bypass one run with `SKIP_IHQ_GUARD=1`, or everything with `git commit --no-verify`.
+`ihq-guard.sh` used to hold the checks, and the installer **copied** it into 113
+repositories. That is centralised authorship with fanned-out distribution, and the
+difference showed the moment anything needed changing: a new check meant touching 113
+repositories, so in practice the library stayed as it was and the checks stayed in CI.
+Copies drifted, and what a repository actually checked depended on when somebody last
+remembered to re-run the installer there.
 
-## Why this is a sourced library, not a hook
+The lever that fixed it was already present — every copy shelled out to the `ihq` binary.
+So the checks moved into the binary and a repository's hook became a caller with no logic
+in it: rebuilding `ihq` changes what all 124 repositories check, with no fan-out at all.
+It is the same trade the fleet already made for CI, where a service's `ci.yaml` is three
+lines calling `service-ci.yaml@v1` and the tag is what moves.
 
-The fleet had five distinct `pre-commit` variants across 34 repositories and 84 repositories with
-no hooks at all. Replacing them would have discarded gates that already work — auth's auth-core
-sync check, the oasdiff baseline comparison in `pre-push`. So the installer appends a
-marker-guarded block that sources the guard, and writes a hook from scratch only where none
-exists. Re-running replaces the block rather than duplicating it.
+The library was kept for a while as a shim so that any hook still sourcing it would keep
+working. Once no hook did, it was 113 copies of a file with no callers, which reads as
+working machinery to the next person who opens it — so it went too.
 
-One detail worth keeping: every one of the 68 pre-existing hooks ends in `exit 0`, so appending
-at the end left the guard **present in the file and never executed**. The installer inserts
-before the last top-level `exit` instead. A hook that is silently skipped is worse than no hook,
-because the commit looks checked.
+## Where the reasoning went
 
-## `go.work` makes a local check lie
+The engineering rationale that used to live in this file is now held where it applies:
 
-Every service domain has a `go.work` that points the shared modules at the working copies. Any
-hook that runs a **generator** therefore regenerates from uncommitted local code, and reports a
-result CI cannot reproduce — green locally, red in CI, over a diff that exists in no pushed
-commit. Auth's `pre-commit` had exactly this: it ran the tests with `GOWORK=off` and the contract
-check without it.
-
-A hook that runs a generator or resolves a module pin must set `GOWORK=off`, because that is what
-CI resolves. The `ihq validate` guard is unaffected — it reads the committed spec and runs no
-generator — so this applies to service-specific hook steps, not to the shared guard.
-
-### The guard now checks this directly
-
-That rule was written down and nothing enforced it, so on push the shared guard runs
-`GOWORK=off go build ./...` and blocks if it fails. It is the build CI runs, one push earlier.
-
-The failure it exists for: a sweep moved the fleet onto a new
-`servicetokenjwt.GenerateServiceToken` signature, `envutil.IsDeployed` and
-`grpcauth.NewMapAuthorizer`, released `platform-shared-go`, and bumped no consumer. Every
-repository still compiled locally, because every workspace resolved the module to the checkout.
-Twenty-nine of ninety-nine did not compile in CI.
-
-Nine of those were core modules, and that is what made it expensive rather than merely annoying.
-A core module whose CI is red cannot be released — `module-release.yaml` requires a green run for
-the exact commit being tagged — so the fix could not be published, so consumers could not be
-bumped onto it. The workspace hid the break and the break blocked its own repair. Catching it
-before the push is what keeps that loop from forming.
-
-## Dependency bumps are still manual, and that is the next thing to fix
-
-The guard tells a developer their pin is stale. It does not bump anything, and it does not help
-the case that caused the outage above: a shared module releasing a change that dozens of
-consumers need. Today that is a person running `go get` in each repository in dependency order.
-
-The platform answer is fan-out on release — `platform-shared-go` publishing a version opens a bump
-pull request against every consumer, each carrying its own CI. `module-release.yaml` already has
-the fan-out machinery (`bump-module-pin`, and a `Bump ${{ matrix.kind }}` job), so the missing
-piece is coverage and sequencing rather than a new mechanism: cores before the services that
-consume them, and a release that is not considered done until its consumers are green.
-
-Two constraints to design against, both learned the hard way. A full fan-out costs two to three
-hours of runner time, so it belongs on release rather than on every push to a shared module. And
-a consumer bumped onto a version whose own CI never passed just moves the red, which is the
-argument for gating the fan-out on the release actually having been cut.
-
-## What the guard used to need from the CLI
-
-CLI-1 through CLI-5 were the gaps this guard worked around in shell and Python. All five are now
-implemented, and the workarounds are gone with them:
-
-| | Gap | Now |
-| --- | --- | --- |
-| CLI-1 | No way to validate a single repository; a standalone clone silently validated the configured workspace instead | `--repo <path>` resolves without a workspace |
-| CLI-2 | Exit 1 if **any** service in the fleet had errors, so the guard parsed `--json` and counted its own findings | exit code covers the selection |
-| CLI-3 | `ihq validate auth` also matched `inboxxhq-authz-service` | `--repo` takes one path or one exact name |
-| CLI-4 | No workflow-pin check, so the guard ran `grep` | `workflow-pin` check, in the default set |
-| CLI-5 | No way for a clean repo to hold the line at warnings | `--fail-on error\|warning\|info` |
-
-The guard lost its `python3` dependency and about 70 lines along the way.
-
-### Still CI-only
-
-`ihq validate` reads the committed spec, so the controls in `controls/api-contract.yaml` that are
-about Go source or cross-repo state cannot be checked from a spec alone: no runtime docs surface
-(API-0001), conformance imported from the shared suite (API-0003), and the `common.v1` components
-matching the current proto projection (API-0007). API-0002 (one committed spec) and API-0006 (no
-swaggo annotations) would be cheap to add — API-0006 partly exists already as `no-legacy-swagger`.
+| Was here | Now |
+| --- | --- |
+| Why hooks are merged rather than replaced, and the `exit 0` reachability trap | The standard, rules 2 and 3 |
+| That a hook running a generator must set `GOWORK=off`, and the 29-of-99 CI break behind it | The standard's fidelity rule, and `G-161` in the verification gap register |
+| The `ihq validate` gaps CLI-1 to CLI-5 | All five are implemented; the workarounds went with them |
+| Fan-out of dependency bumps on release | [ADR-0082](https://github.com/coderaxis/core-docs/blob/main/adrs/ADR-0082-artifact-graph-and-central-release-cascade.md), which owns the release cascade |
