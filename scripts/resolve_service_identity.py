@@ -167,6 +167,17 @@ def load_artifact_graph(catalog_root: pathlib.Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def graph_pins(graph: dict, repo_name: str) -> set[str] | None:
+    """What this repository actually pins, per the generated artifact graph.
+
+    None means the graph cannot answer - it has not been published, or it does not model
+    this repository - so a caller can fall back rather than read silence as "pins nothing".
+    """
+    if repo_name not in (graph.get("nodes") or {}):
+        return None
+    return {e["to"] for e in graph.get("edges") or [] if e.get("from") == repo_name}
+
+
 def resolve_release_targets(entry: dict, repo_kind: str, repo_name: str,
                             graph: dict) -> dict[str, str]:
     """Derive the module path and every repository a release must open a bump PR against.
@@ -299,22 +310,41 @@ def resolve(catalog_root: pathlib.Path, repo_full: str, repo_id: int,
     deployable = (repo_kind == "deployable"
                   if repo_kind != "unknown" else (want or repo).endswith(DEPLOYABLE_SUFFIXES))
 
-    # The adapter pins the core directly, so releasing the adapter against an unreleased or
-    # pseudo-versioned core is what produced the documented auth skew. The release workflow
-    # gates on this pin, so it needs to know which module is upstream of this one.
-    upstream = (
-        f"github.com/{(entry.get('repository') or {}).get('organization')}"
-        f"/{(entry.get('repository') or {}).get('name')}"
-        if repo_kind == "schema" and (entry.get("repository") or {}).get("name")
-        else ""
+    graph = load_artifact_graph(catalog_root)
+
+    # A schema module that pins its core directly must not release ahead of it: tagging
+    # against a core tag that was never published advertises a dependency consumers cannot
+    # fetch. The release workflow gates on that pin, so it needs to know which module is
+    # upstream of this one.
+    #
+    # Most schema modules do pin their core, and this was taken to mean all of them do -
+    # the family shape (core <- schema <- deployable) was read as the dependency. Three do
+    # not: stripe-adapter-core-postgres, twilio-adapter-core-postgres and
+    # chat-sync-core-postgres depend on platform-shared-go alone, their cores having never
+    # been adopted. For those the gate demanded a pin that does not exist and no release
+    # could pass it, which is how a payment fix came to be blocked by a module nothing
+    # imports.
+    #
+    # The claim being made here is factual - "this repository pins that module" - so it is
+    # read from the artifact graph, which records what is actually pinned and is already
+    # the source the fan-out walks in the other direction. The catalog shape remains the
+    # fallback for a repository the graph does not model, because a gate that quietly
+    # stops applying is worse than one that occasionally asks for a pin.
+    core_ref = _repo_ref(entry.get("repository") or {})
+    pins = graph_pins(graph, repo)
+    pins_its_core = (
+        (entry.get("repository") or {}).get("name") in pins
+        if pins is not None
+        else bool(core_ref)
     )
+    upstream = f"github.com/{core_ref}" if repo_kind == "schema" and core_ref and pins_its_core else ""
 
     return {
         "service": str(entry.get("name") or repo),
         "repo_kind": repo_kind,
         "upstream_module": upstream,
         "required_modules": resolve_required_modules(entry, repo_kind),
-        **resolve_release_targets(entry, repo_kind, repo, load_artifact_graph(catalog_root)),
+        **resolve_release_targets(entry, repo_kind, repo, graph),
         "language": str((entry.get("runtime") or {}).get("language") or "unknown"),
         "archetype": str(entry.get("archetype") or "unresolved"),
         "tier": tier,
