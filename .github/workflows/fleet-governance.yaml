@@ -801,11 +801,25 @@ jobs:
       # is red today by design (96 violations), and a step placed after a failing one never
       # executes, which is how a gate ends up in the state this whole workflow exists to fix.
       #
+      # ORDERING IS NOT ENOUGH, WHICH IS WHY ALL THREE CARRY `!cancelled()`.
+      #
+      # Ordering only protects the step that happens to be first, and it protects it until someone
+      # adds a fourth gate or reorders these for a different good reason. It failed the day it was
+      # relied on: this step went red on voice-ai-agent-service's divergences, and the pin check
+      # below - the one gate that can see whether an environment's portal documents what the
+      # environment is running - never ran at all. A skipped gate reports nothing, and nothing is
+      # indistinguishable from clean in a job summary.
+      #
+      # These three ask three independent questions of the same assembled workspace. None reads
+      # the others' output, so there is no reason for one's answer to suppress another's. The
+      # condition is `!cancelled()` rather than `always()` so that a cancelled run still stops.
+      #
       # The two are kept because they are not the same rule. C3.5 refuses "fewer operations than
       # the service serves" absolutely, with no baseline available for it. This step accepts a
       # recorded set of known-stale divergences and fails on anything new, because 1,646 of them
       # exist and a fatal check would have blocked every pipeline in the fleet on day one.
       - name: Published contracts are the documents their services authored
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -829,8 +843,11 @@ jobs:
       # were. That is the detection mechanism this step replaces.
       #
       # Placed before the quality step for the same reason the publication step is: that one is
-      # red by design, and a step after a failing step never runs.
+      # red by design, and a step after a failing step never runs. `!cancelled()` is what actually
+      # guarantees it, for the reason given on the step above -- this is the gate that was silently
+      # skipped when the publication step went red, and it is the only one that can see a stale pin.
       - name: Each environment's portal documents the contract it is running
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -861,6 +878,7 @@ jobs:
       # worth wiring. Turning the step off to get a green tick would restore precisely the state
       # G3 was in.
       - name: OpenAPI quality and publication fidelity
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
