@@ -222,9 +222,73 @@ check_consumer_style() {
   fi
 }
 
+# check_realtime_topic_is_not_consumed — HARD gate for every role except the
+# sanctioned exceptions.
+#
+# inboxxhq.realtime.events is a delivery channel to open browsers, not a bus.
+# Services echo onto it deliberately lossily: the frame is sent after commit,
+# its error is logged and dropped, and the fact it carries always has a durable
+# copy of record elsewhere — an outbox row, or a row the reader can just fetch.
+# That is stated in each publisher and is the reason the echo is allowed to skip
+# the outbox at all.
+#
+# A backend consumer subscribing here inherits none of that. It would be reading
+# a copy that is documented as droppable, with no replay, no ordering guarantee
+# across the partitions a browser fan-out does not care about, and no dedup
+# ledger — and it would work in every test, because a frame is only lost when a
+# broker hiccups or a producer is mid-restart. The failure arrives later, in
+# production, as a fact that silently did not propagate.
+#
+# The durable copy is what a backend consumer should read, and it exists in
+# every case, which is what makes this a hard gate rather than advice: there is
+# no legitimate backend use that the outbox path does not already serve better.
+#
+# Exempt roles are E and Bridge, which is where realtime-gateway sits — it
+# declares no events of its own, so resolve_role gives it E. It is the one
+# process that SHOULD read this topic, because forwarding these frames to
+# browsers is the entire reason the topic exists.
+#
+# Producers are unaffected. The check looks only for the topic reaching a
+# Consume call, so org-service, order-service and product-service publishing to
+# it stay clean -- verified against all three.
+#
+# This catches only the naive case, and deliberately so. A real consumer names
+# its topic in configuration: realtime-gateway reads KAFKA_TOPIC_REALTIME and
+# passes cfg.Topic to Consume, so the literal sits in a config default nowhere
+# near the subscription, and no proximity rule would find it. Widening this
+# until it did would flag the three legitimate producers, whose literals sit
+# next to a ProducerMessage and are indistinguishable to grep.
+#
+# The gate that actually enforces this reads declarations instead, where the
+# intent is unambiguous: core-docs tests/test_realtime_topic_is_browser_only.py
+# fails any service declaring the topic under kafka.consumes. This one is the
+# cheap complement that catches someone hardcoding it at the call site.
+check_realtime_topic_is_not_consumed() {
+  local topic_pattern='inboxxhq\.realtime\.events|TopicRealtimeEvents'
+
+  if ! grep_go -E "${topic_pattern}" | grep -q .; then
+    return
+  fi
+
+  case "${ROLE}" in
+    E|Bridge)
+      log "role=${ROLE}: realtime topic reference allowed (sanctioned browser fan-out)"
+      return
+      ;;
+  esac
+
+  local hits
+  hits="$(grep_go -E -A4 'Consume\(' | grep -E "${topic_pattern}" || true)"
+  if [[ -n "${hits}" ]]; then
+    fail "role=${ROLE} subscribes a backend consumer to inboxxhq.realtime.events. That topic carries best-effort frames for open browsers -- publishers send them after commit and drop the error -- so a consumer here reads a copy that is allowed to go missing. Read the durable copy instead: the outbox event on inboxxhq.events, or the row itself. Found:"
+    echo "${hits}" | sed 's/^/    /'
+  fi
+}
+
 check_producer_compliance
 check_outbox_write_path
 check_consumer_style
+check_realtime_topic_is_not_consumed
 
 if [[ "${FAILED}" -ne 0 ]]; then
   echo "::error::event-handling compliance FAILED — see errors above."
