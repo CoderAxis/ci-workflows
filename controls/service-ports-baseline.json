@@ -3,18 +3,6 @@
   "frozen_on": "2026-08-21",
   "playbook": "docs/core-docs/playbooks/service-port-migration.md",
   "reasons": {
-    "SP-0005": {
-      "count_on_2026-08-21": 6,
-      "target": 0,
-      "due": "before any service enters Phase 2 of the migration playbook",
-      "why_frozen_and_not_fixed_here": "These live in three service repositories, not in ci-workflows, so this repository cannot fix them. They are frozen so the lane can be introduced green and so a SEVENTH cannot be added while they are outstanding.",
-      "findings": [
-        "inboxxhq-configuration-service: contract declares http=4031, grpc=50091, metrics=9132 - ledger-service's entire port triple, copied. Infra publishes 4033/50093/9135.",
-        "inboxxhq-order-service: contract declares http=4102, metrics=9152 - allocated to no service at all. Infra publishes 4030/9131.",
-        "inboxxhq-voice-ai-agent-service: contract declares websocket=4023 - realtime-gateway's HTTP port. Either a fourth listener needing an RFC-0007 §4.1 amendment, or dead."
-      ],
-      "note": "Nothing dials service.contract.yaml, which is why none of these has caused an outage and why all six could accumulate unseen. They block the migration rather than production: the migration's safety rests on checking a service's ports against a source of truth, and these are the file a reviewer consults to do that."
-    },
     "SP-0007": {
       "count_on_2026-08-21": 321,
       "target": 0,
@@ -23,7 +11,6 @@
     }
   },
   "controls": {
-    "SP-0005": 6,
     "SP-0007": 321
   }
 }
