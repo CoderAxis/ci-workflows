@@ -1,0 +1,312 @@
+name: Service Ports (RFC-0007 §10)
+
+# The required lane RFC-0007 §10 has always asked for and never had.
+#
+# WHAT WAS MISSING. §10 lists four checks CI "MUST verify" and calls a checker for them "a
+# required lane, not advisory". Measured 2026-08-21, check 3 - no *_SERVICE_URL /
+# *_GRPC_ENDPOINT - was already built in BOTH halves, and checks 1, 2 and 4 were not:
+#
+#   3, code       ARCH-0010 in inboxxhq-architecture-check, run per repository by service-ci.yaml
+#   3, manifests  inboxxhq-infra scripts/check-service-addressing.py, run by its own workflow
+#
+# So this job covers 1, 2 and 4 and cross-checks 3 without re-enforcing it. RFC-0007 §12's
+# stated evidence for withdrawing the PREVIOUS port scheme is that its collision guard "does
+# not exist" and "the enforcement the registry depended on was never built". The replacement
+# scheme then specified four checks and shipped three of them unbuilt. This is those three.
+#
+# WHY IT NEEDS A MULTI-REPO WORKSPACE. The facts are in three repositories and every defect
+# worth catching is a disagreement BETWEEN them: manifests in inboxxhq-infra, Dockerfiles and
+# service contracts in the service repos, and the registry every caller resolves through in
+# platform-shared-go. A per-repo gate can only confirm a repository agrees with itself, which
+# is the one thing that was never wrong - all 44 services are internally consistent today, and
+# 39 are consistent about a number the standard withdrew.
+#
+# WHY CENTRAL RATHER THAN IN THE CALLER. The same reason platform-governance.yaml and
+# fleet-governance.yaml are central: most of the fleet is private, so assembling it needs an
+# App token, and ci-app-token can only be reached by a job DEFINED in a central workflow at
+# the released tag - the trust policy conditions on job_workflow_ref precisely so a repository
+# cannot mint by editing its own workflow (ADR-0110).
+#
+# WHY ONLY THE DEPLOYABLES ARE FETCHED. This gate reads Dockerfiles and service.contract.yaml,
+# which exist in deployables and not in the *-core or *-core-postgres modules. Planning those
+# too would triple the assembly for trees no detector opens. The plan asserts what it fetched
+# matches what the catalog named, because a gate run over half a fleet reports on the half it
+# was given and still exits 0.
+
+on:
+  workflow_call:
+    inputs:
+      docs_path:
+        description: >-
+          Where to place the calling docs repo. This is the layout contract, not a preference:
+          check-service-ports.py resolves the service catalog at
+          <workspace>/docs/core-docs/catalog/services to compare each service's
+          `canonical_port`, so core-docs must land at docs/core-docs or that comparison is
+          skipped and says so.
+        required: false
+        type: string
+        default: docs/core-docs
+      fleet_owner:
+        description: >-
+          The account holding the brand-neutral half of the fleet. A GitHub App is installed
+          per account, so the accounts are named here to be minted for, while WHICH
+          repositories are fetched stays a property of the catalog.
+        required: false
+        type: string
+        default: coderaxis
+      brand_owner:
+        description: "The account holding the deployables."
+        required: false
+        type: string
+        default: InboxxHQ-CoderAxis
+      infra_repo:
+        description: >-
+          The manifests. SP-0001 through SP-0004 all read services/*/base/service.yaml and
+          services/*/overlays/*/deployment.yaml; without this tree every one of them reports
+          INDETERMINATE rather than passing, which is loud but useless.
+        required: false
+        type: string
+        default: InboxxHQ-CoderAxis/inboxxhq-infra
+      shared_repo:
+        description: >-
+          Holds servicediscovery/ports.generated.go, which is what every caller resolves
+          through and therefore what SP-0002 compares the manifests against.
+        required: false
+        type: string
+        default: coderaxis/platform-shared-go
+      fail_on:
+        description: "Lowest severity that fails the lane (critical|major|minor)."
+        required: false
+        type: string
+        default: major
+      actions_ref:
+        description: "Ref of coderaxis/ci-workflows to assemble (defaults to the moving major tag)."
+        required: false
+        type: string
+        default: v1
+
+permissions:
+  contents: read
+
+jobs:
+  service-ports:
+    name: Service ports agree across manifests, images and the registry
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # Required by ci-app-token: the OIDC token IS the proof of identity, and without this
+      # the action fails with a clear message rather than a confusing denial.
+      id-token: write
+
+    steps:
+      # Assembled layout, which check-service-ports.py's --workspace resolution depends on:
+      #   $GITHUB_WORKSPACE/
+      #     docs/core-docs/                                     <- the caller
+      #     ci-workflows/
+      #     infra/inboxxhq-infra/services/
+      #     shared/platform-shared-go/platform/servicediscovery/
+      #     services/<service>/<deployable>/
+      #     gateways/<deployable>/
+      - name: Check out the calling docs repository
+        uses: actions/checkout@v4
+        with:
+          path: ${{ inputs.docs_path }}
+
+      - name: Check out ci-workflows (public)
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/ci-workflows
+          ref: ${{ inputs.actions_ref }}
+          path: ci-workflows
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python3 -m pip install --upgrade pip PyYAML
+
+      - name: Mint a read token for the fleet
+        id: token
+        uses: coderaxis/ci-workflows/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ inputs.fleet_owner }}
+          extra-owners: ${{ inputs.brand_owner }}
+          configure-git: "true"
+
+      # Only services/ is fetched. The gate reads no Terraform, no monitoring and no releases,
+      # and the infra working tree runs to gigabytes once providers are initialised.
+      - name: Check out the infrastructure manifests
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.infra_repo }}
+          token: ${{ steps.token.outputs.token }}
+          path: infra/inboxxhq-infra
+          sparse-checkout: services
+
+      - name: Check out the shared registry
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.shared_repo }}
+          token: ${{ steps.token.outputs.token }}
+          path: shared/platform-shared-go
+          sparse-checkout: platform/servicediscovery
+
+      - name: Plan the deployables from the service catalog
+        id: plan
+        shell: bash
+        env:
+          DOCS_PATH: ${{ inputs.docs_path }}
+          FLEET_OWNER: ${{ inputs.fleet_owner }}
+          BRAND_OWNER: ${{ inputs.brand_owner }}
+        run: |
+          set -euo pipefail
+
+          # From the catalog at run time, never from a list written here. A list in this file
+          # would be a second copy of the catalog, and a copy that stops matching makes the
+          # gate scan less than it claims to - which looks exactly like finding nothing.
+          python3 - "${DOCS_PATH}" <<'PY' > "${RUNNER_TEMP}/ports-plan.tsv"
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          catalog = Path(sys.argv[1]) / "catalog" / "services"
+          rows = set()
+          for entry in sorted(catalog.glob("*.yaml")):
+              svc = yaml.safe_load(entry.read_text(encoding="utf-8")) or {}
+              if (svc.get("runtime") or {}).get("language") != "go":
+                  continue
+              name = svc.get("name")
+              repo = svc.get("deployable_repository") or {}
+              # `resolution` marks a catalog entry whose repository is planned rather than
+              # real; cloning one 404s, which would read as an outage rather than as the
+              # catalog saying "not built yet".
+              if repo.get("resolution", "resolved") != "resolved":
+                  continue
+              if not (repo.get("organization") and repo.get("name") and name):
+                  continue
+              # Gateways and BFFs sit at gateways/<repo>; everything else at
+              # services/<service>/<repo>. check-service-ports.py globs both, and resolves a
+              # repository to its service through service.contract.yaml rather than through
+              # its directory name, so only the two shapes matter here.
+              stem = str(name)
+              dest = (f"gateways/{repo['name']}" if stem.endswith(("-gateway", "-bff"))
+                      else f"services/{stem}/{repo['name']}")
+              rows.add(f"{repo['organization']}/{repo['name']}\t{dest}")
+
+          if not rows:
+              raise SystemExit(
+                  "::error::the catalog named no Go deployables, so the plan is empty and "
+                  "SP-0004 and SP-0005 would report INDETERMINATE about an empty tree"
+              )
+          print("\n".join(sorted(rows)))
+          PY
+
+          planned="$(wc -l < "${RUNNER_TEMP}/ports-plan.tsv")"
+          echo "planned=${planned}" >> "${GITHUB_OUTPUT}"
+          echo "catalog named ${planned} deployable repositories"
+
+          # A token is minted per account. An account the catalog names and the mint did not
+          # cover fails every clone from it, and a hundred authentication errors do not say
+          # which of them is the cause.
+          unknown="$(cut -f1 "${RUNNER_TEMP}/ports-plan.tsv" | cut -d/ -f1 | sort -fu \
+                     | grep -vixF -e "${FLEET_OWNER}" -e "${BRAND_OWNER}" || true)"
+          if [ -n "${unknown}" ]; then
+            echo "::error::the catalog names repositories under account(s) this job holds no" \
+                 "token for: ${unknown//$'\n'/, }. Add them to brand_owner/fleet_owner."
+            exit 1
+          fi
+
+      - name: Assemble the deployables
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Shallow and tagless: the checker reads the working tree, never the history.
+          cat > "${RUNNER_TEMP}/clone-repo" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          git clone --quiet --depth 1 --no-tags "https://github.com/${1}.git" "${2}"
+          SH
+          chmod +x "${RUNNER_TEMP}/clone-repo"
+
+          # xargs returns 123 if any invocation failed, and `set -e` turns that into a failed
+          # job - a partially assembled fleet must not reach the gate, because the gate reports
+          # on what it was given and cannot tell a clean repository from an absent one.
+          xargs -a "${RUNNER_TEMP}/ports-plan.tsv" -P 8 -L 1 "${RUNNER_TEMP}/clone-repo"
+
+          # Checked per planned destination rather than by counting: placement is part of the
+          # contract, and a repository cloned to the wrong path is invisible to the globs and
+          # reads exactly like a repository with nothing to report.
+          missing=0
+          while IFS=$'\t' read -r slug dest; do
+            if [ -d "${GITHUB_WORKSPACE}/${dest}" ]; then
+              continue
+            fi
+            echo "::error::${slug} did not land at ${dest}"
+            missing=1
+          done < "${RUNNER_TEMP}/ports-plan.tsv"
+          [ "${missing}" -eq 0 ] || { echo "::error::fleet incomplete; gate not run"; exit 1; }
+
+      - name: Confirm the workspace assembled
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for d in "${{ inputs.docs_path }}" ci-workflows \
+                   infra/inboxxhq-infra/services \
+                   shared/platform-shared-go/platform/servicediscovery; do
+            if [ -d "${GITHUB_WORKSPACE}/${d}" ]; then
+              echo "  present  ${d}"
+            else
+              echo "  MISSING  ${d}"; missing=1
+            fi
+          done
+          # A gate that runs against a half-assembled workspace reports findings about absence
+          # rather than about the platform, and those read identically to real ones.
+          [ "${missing}" -eq 0 ] || { echo "::error::workspace incomplete; gate not run"; exit 1; }
+
+      - name: Control catalog and detector tests
+        working-directory: ci-workflows
+        run: python3 scripts/test_service_ports.py
+
+      - name: Service ports (RFC-0007 §10)
+        working-directory: ci-workflows
+        run: |
+          python3 scripts/check-service-ports.py \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --fail-on "${{ inputs.fail_on }}" \
+            --report "${RUNNER_TEMP}/service-ports.json"
+
+      - name: Port report (summary)
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## RFC-0007 §10 service port report'
+            echo '```'
+            python3 ci-workflows/scripts/check-service-ports.py \
+              --workspace "${GITHUB_WORKSPACE}" \
+              --fail-on "${{ inputs.fail_on }}" || true
+            cat <<'SUMMARY'
+          ```
+          _A service's ports are a property of where it runs: the RFC-0007 §4.1 constants in_
+          _Kubernetes, its own numbers on a workstation. SP-0006 is DEFERRED and reports how_
+          _much of the fleet has migrated; it is promoted to `active` by the post-procedure in_
+          _`docs/core-docs/playbooks/service-port-migration.md`. SP-0007 is ADVISORY: the_
+          _authoritative gates for it are `inboxxhq-infra scripts/check-service-addressing.py`_
+          _and ARCH-0010 in `inboxxhq-architecture-check`._
+          SUMMARY
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the port report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-ports-report
+          path: ${{ runner.temp }}/service-ports.json
+          if-no-files-found: ignore
