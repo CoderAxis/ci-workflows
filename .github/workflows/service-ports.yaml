@@ -200,6 +200,61 @@ jobs:
           extra-owners: ${{ inputs.brand_owner }}
           configure-git: "true"
 
+      # A GitHub App is installed per ACCOUNT, so `token` is an installation token for
+      # fleet_owner and cannot see brand_owner's repositories. GitHub answers a private
+      # repository it cannot see with 404, not 403, so using the primary token for the
+      # manifests reported inboxxhq-infra as a repository that does not exist and skipped
+      # every control that reads it -- the same shape as an assembly failure, and the reason
+      # the workspace guard below refuses rather than passes an incomplete tree.
+      - name: Select each repository's owner token
+        id: tokens
+        shell: bash
+        env:
+          DOCS_REPO: ${{ inputs.docs_repo }}
+          INFRA_REPO: ${{ inputs.infra_repo }}
+          SHARED_REPO: ${{ inputs.shared_repo }}
+          PRIMARY_OWNER: ${{ inputs.fleet_owner }}
+          PRIMARY_TOKEN: ${{ steps.token.outputs.token }}
+          TOKENS_FILE: ${{ steps.token.outputs.tokens-file }}
+        run: |
+          set -euo pipefail
+
+          # Case-insensitively: GitHub routes an owner case-insensitively, so the two
+          # spellings that arrive from different inputs name one account while a plain JSON
+          # key lookup would call them two.
+          token_for() {
+            local owner="${1}"
+            if [ "${owner,,}" = "${PRIMARY_OWNER,,}" ]; then
+              printf '%s' "${PRIMARY_TOKEN}"
+              return 0
+            fi
+            if [ -z "${TOKENS_FILE}" ] || [ ! -f "${TOKENS_FILE}" ]; then
+              return 1
+            fi
+            jq -re --arg o "${owner}" \
+              'to_entries[] | select((.key | ascii_downcase) == ($o | ascii_downcase)) | .value' \
+              "${TOKENS_FILE}"
+          }
+
+          select_token() {
+            local name="${1}" repo="${2}" owner token
+            owner="${repo%%/*}"
+            token="$(token_for "${owner}")" || {
+              echo "::error::no App installation token was minted for '${owner}', which owns" \
+                   "${repo}. A token for another account cannot see it and GitHub answers 404" \
+                   "rather than 403, so the checkout would report a repository that exists as" \
+                   "missing. Name ${owner} in fleet_owner or brand_owner."
+              exit 1
+            }
+            echo "::add-mask::${token}"
+            printf '%s=%s\n' "${name}" "${token}" >> "${GITHUB_OUTPUT}"
+            echo "  ${repo} -> ${owner}'s installation token"
+          }
+
+          select_token docs_token "${DOCS_REPO}"
+          select_token infra_token "${INFRA_REPO}"
+          select_token shared_token "${SHARED_REPO}"
+
       # Only catalog/ is fetched: SP-0005 reads each service's canonical_port and nothing else
       # in a large documentation tree.
       - name: Check out the service catalog
@@ -207,7 +262,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.docs_repo }}
-          token: ${{ steps.token.outputs.token }}
+          token: ${{ steps.tokens.outputs.docs_token }}
           path: docs/core-docs
           sparse-checkout: catalog
 
@@ -218,7 +273,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.infra_repo }}
-          token: ${{ steps.token.outputs.token }}
+          token: ${{ steps.tokens.outputs.infra_token }}
           path: infra/inboxxhq-infra
           sparse-checkout: services
 
@@ -227,7 +282,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.shared_repo }}
-          token: ${{ steps.token.outputs.token }}
+          token: ${{ steps.tokens.outputs.shared_token }}
           path: shared/platform-shared-go
           sparse-checkout: platform/servicediscovery
 
