@@ -1,0 +1,925 @@
+#!/usr/bin/env python3
+"""RFC-0007 §10 port guard (CI). Run against an assembled multi-repo workspace.
+
+Executable, data-driven policy-as-code for the port half of RFC-0007. This is the port-domain
+analogue of check-dockerfile-standard.py / check-gateway-baseline.py: the control catalog
+(controls/service-ports.yaml) defines POLICY ONLY; this file provides DETECTOR implementations
+bound to it by name.
+
+Design (identical framework to check-dockerfile-standard.py):
+  RFC/ADR (intent) -> control catalog (policy + severity + ownership + lifecycle)
+                   -> detector (verifies compliance) -> CI (executes).
+  * DATA-DRIVEN, SEVERITY-AWARE (critical/major fail; minor advisory via --fail-on).
+  * LIFECYCLE-AWARE: a control with `status: deferred` is reported and never enforced, which
+    is how SP-0006 records the migration's destination without gating on it.
+  * RATCHETED: findings are frozen in controls/service-ports-baseline.json. Only a count that
+    RISES fails; a fall is reported as improved. Mirrors check-gateway-baseline.py.
+  * STATIC ANALYSIS ONLY. Never contacts a cluster.
+
+WHY IT NEEDS A WORKSPACE RATHER THAN A REPO
+-------------------------------------------
+The facts this checks live in three repositories and the defects are precisely the
+disagreements BETWEEN them: the manifests are in inboxxhq-infra, the Dockerfiles and service
+contracts are in the service repos, and the registry every caller resolves through is in
+platform-shared-go. A per-repo checker can only ever confirm that a repository agrees with
+itself, which is the one thing that was never wrong - all 44 services are internally
+consistent today, and 39 of them are consistent about a number the standard withdrew.
+
+So --workspace names an assembled tree, laid out as platform-governance.yaml assembles it:
+
+  <workspace>/
+    infra/inboxxhq-infra/services/<service>/{base,overlays}/     manifests
+    services/<domain>/<repo>/                                    Dockerfile, contract
+    gateways/<repo>/                                             Dockerfile, contract
+    shared/platform-shared-go/platform/servicediscovery/ports.generated.go
+
+Trees that are absent are SKIPPED with that recorded as the evidence, never passed. A checker
+that reports "clean" about a directory it was not given is reporting on its own reach.
+
+WHAT THIS DELIBERATELY DOES NOT ENFORCE
+---------------------------------------
+RFC-0007 §10.3 - no *_SERVICE_URL / *_GRPC_ENDPOINT - is ALREADY enforced, in both halves,
+and neither is here:
+
+  application code   ARCH-0010 in inboxxhq-architecture-check (Error, baselined, per repo)
+  manifests          inboxxhq-infra scripts/check-service-addressing.py (ratcheted at 321)
+
+SP-0007 reports the manifest count as an ADVISORY cross-check so the three can be compared,
+and never as a second hard gate. The two existing halves share one deliberately-wide pattern
+so they cannot disagree about what is forbidden; a third independent copy would be a third
+thing to keep in step, and drift between copies of a fact is the failure RFC-0007 §12 records.
+
+Usage:
+  check-service-ports.py --workspace DIR [--controls PATH] [--format text|json|markdown]
+                         [--fail-on critical|major|minor] [--report PATH]
+  check-service-ports.py --workspace DIR --write-baseline
+  check-service-ports.py --write-docs README.md
+  check-service-ports.py --verify-docs README.md
+
+SSOT: this file lives in coderaxis/ci-workflows and is invoked by the central reusable
+workflow .github/workflows/service-ports.yaml.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+try:
+    import yaml
+except ModuleNotFoundError as exc:  # pragma: no cover
+    raise SystemExit("::error::PyYAML is required: python3 -m pip install PyYAML") from exc
+
+SELF_REPO = Path(__file__).resolve().parents[1]
+DEFAULT_CONTROLS = SELF_REPO / "controls" / "service-ports.yaml"
+BASELINE_PATH = SELF_REPO / "controls" / "service-ports-baseline.json"
+BASELINE_COMMENT = ("Frozen RFC-0007 §10 port debt. The gate fails if any count RISES; lower "
+                    "it by fixing violations, then re-run --write-baseline. Every entry must "
+                    "carry a reason and a phase in the migration playbook.")
+
+SEVERITY_ORDER = {"critical": 3, "major": 2, "minor": 1}
+VALID_SEVERITY = set(SEVERITY_ORDER)
+# `deferred` is not a lifecycle borrowed from the neighbouring catalogs. It means the control
+# states a real, current requirement that the fleet does not yet meet, as distinct from
+# `deprecated` (was a requirement, is not) or `superseded` (replaced by another control).
+# SP-0006 is the case it exists for: RFC-0007 §4.1's constants are the standard TODAY and 39
+# services do not meet them, so calling that control deprecated would be false and calling it
+# active would make the lane permanently red.
+VALID_STATUS = {"active", "deferred", "deprecated", "superseded"}
+VALID_SCOPE = {"workspace"}
+REQUIRED_FIELDS = ("id", "title", "owner", "scope", "status", "severity", "policy",
+                   "rationale", "remediation", "detector", "refs")
+
+# RFC-0007 §4.1. Named here rather than read from the RFC because this checker must run with
+# no network and no core-docs checkout; §4.1 records the same values and why they were chosen.
+CONSTANTS = {"http": 8080, "grpc": 50051, "metrics": 9464}
+
+# RFC-0007 §3. These constrain a genuinely shared resource, which is why they survived the
+# withdrawal of the per-service allocation. The §4.1 constants were chosen so none appears
+# here, so SP-0003 and SP-0006 cannot contradict each other.
+RESERVED_PORTS = {80, 443, 3000, 9090, 9091, 9093, 3100, 3200, 4317, 4318, 9095, 5432,
+                  6379, 8500}
+
+# Deliberately identical to ARCH-0010's and to inboxxhq-infra's check-service-addressing.py.
+# SP-0007 only counts what those two enforce; if the three patterns drift, the advisory number
+# stops describing the gated one and becomes worse than no number at all.
+ADDRESS_VAR = re.compile(
+    r"\bname:\s*([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:SERVICE_URL|SERVICE_BASE_URL|SERVICE_HOST"
+    r"|SERVICE_PORT|GRPC_ENDPOINT|GRPC_ADDR|GRPC_ADDRESS|GRPC_URL|GRPC))\b"
+)
+NOT_AN_ADDRESS = re.compile(
+    r"\A(?:[A-Z][A-Z0-9_]*_USE_GRPC|KUBERNETES_SERVICE_(?:HOST|PORT[A-Z0-9_]*))\Z")
+EXEMPT_ADDRESS_VARS = {"CHECKOUT_SUCCESS_URL", "CHECKOUT_CANCEL_URL",
+                       "ORDER_CHECKOUT_SUCCESS_URL", "ORDER_CHECKOUT_CANCEL_URL"}
+
+PORT_ENV_NAMES = ("PORT", "GRPC_PORT", "METRICS_PORT")
+MAX_DETAILS = 25
+
+DOCS_BEGIN = "<!-- BEGIN service-ports-controls (generated: scripts/check-service-ports.py --write-docs) -->"
+DOCS_END = "<!-- END service-ports-controls -->"
+
+
+@dataclass
+class Finding:
+    count: int = 0
+    evidence: str = ""
+    details: list[str] = field(default_factory=list)
+    indeterminate: bool = False
+
+
+def capped(items: list[str]) -> list[str]:
+    return items if len(items) <= MAX_DETAILS else items[:MAX_DETAILS] + [
+        f"... and {len(items) - MAX_DETAILS} more"
+    ]
+
+
+# --- workspace model --------------------------------------------------------------------
+
+@dataclass
+class Service:
+    """One service, assembled from every repository that holds a fact about its ports."""
+    name: str
+    infra_dir: Path
+    published: dict[str, int] = field(default_factory=dict)   # port name -> spec.ports[].port
+    target_ports: dict[str, int] = field(default_factory=dict)
+    overlays: dict[str, dict] = field(default_factory=dict)   # env -> parsed port facts
+    repo_dir: Path | None = None
+    parse_errors: list[str] = field(default_factory=list)
+
+    def all_published(self) -> set[int]:
+        return set(self.published.values())
+
+
+class Workspace:
+    """The assembled tree. Anything absent is recorded as absent, never assumed compliant."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.infra = root / "infra" / "inboxxhq-infra"
+        self.registry_path = (root / "shared" / "platform-shared-go" / "platform" /
+                              "servicediscovery" / "ports.generated.go")
+        self.registry: dict[str, tuple[int, int]] = {}
+        self.registry_error = ""
+        self.services: dict[str, Service] = {}
+        self.repos_by_service: dict[str, Path] = {}
+        self._load_registry()
+        self._load_repos()
+        self._load_services()
+
+    # ports.generated.go is Go source, and parsing it with a regex is a deliberate choice over
+    # `go run`: this checker runs on a Python runner with no Go toolchain, and the file's whole
+    # purpose is to be a flat generated table. The header asserts DO NOT EDIT, so the shape is
+    # the generator's to keep stable, and a shape change fails loudly below rather than
+    # silently yielding an empty registry that would make every SP-0002 comparison vacuous.
+    _REGISTRY_ENTRY = re.compile(
+        r'"([a-z0-9-]+)":\s*\{HTTPPort:\s*(\d+),\s*GRPCPort:\s*(\d+)\}')
+
+    def _load_registry(self) -> None:
+        if not self.registry_path.is_file():
+            self.registry_error = f"{self._rel(self.registry_path)} is absent"
+            return
+        text = self.registry_path.read_text(encoding="utf-8", errors="replace")
+        for match in self._REGISTRY_ENTRY.finditer(text):
+            self.registry[match.group(1)] = (int(match.group(2)), int(match.group(3)))
+        if not self.registry:
+            self.registry_error = (f"{self._rel(self.registry_path)} parsed to zero entries; "
+                                   "the generated table's shape has changed")
+
+    def _rel(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.root))
+        except ValueError:
+            return str(path)
+
+    # A repository's directory name is not its service name: inboxxhq-notification-service-ctx
+    # holds notification-service. service.contract.yaml declares the real one, so it is read
+    # first and the directory name is only a fallback. Getting this backwards turns a working
+    # repository into an SP-0004 finding about a port it legitimately owns.
+    def _load_repos(self) -> None:
+        for pattern in ("services/*/*", "gateways/*"):
+            for path in sorted(self.root.glob(pattern)):
+                if not path.is_dir():
+                    continue
+                name = self._service_name_of(path)
+                if name and name not in self.repos_by_service:
+                    self.repos_by_service[name] = path
+
+    def _service_name_of(self, repo: Path) -> str | None:
+        contract = repo / "service.contract.yaml"
+        if contract.is_file():
+            try:
+                doc = yaml.safe_load(contract.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                doc = {}
+            if isinstance(doc, dict):
+                declared = (doc.get("service") or {}).get("name") if isinstance(
+                    doc.get("service"), dict) else doc.get("name")
+                if isinstance(declared, str) and declared.strip():
+                    return re.sub(r"^inboxxhq-", "", declared.strip())
+        if repo.name.startswith("inboxxhq-"):
+            return repo.name[len("inboxxhq-"):]
+        return None
+
+    def _load_services(self) -> None:
+        services_dir = self.infra / "services"
+        if not services_dir.is_dir():
+            return
+        for path in sorted(services_dir.iterdir()):
+            if not path.is_dir():
+                continue
+            service = Service(name=path.name, infra_dir=path)
+            self._load_base(service)
+            self._load_overlays(service)
+            if not service.published and not service.overlays:
+                # A directory with no Service and no Deployment is a Job or a config bundle
+                # (kafka-topic-init, observability-config). It has no ports to be wrong about.
+                continue
+            service.repo_dir = self.repos_by_service.get(service.name)
+            self.services[service.name] = service
+
+    def _load_base(self, service: Service) -> None:
+        path = service.infra_dir / "base" / "service.yaml"
+        if not path.is_file():
+            return
+        try:
+            docs = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
+        except (OSError, yaml.YAMLError) as exc:
+            service.parse_errors.append(f"{self._rel(path)}: {exc}")
+            return
+        for doc in docs:
+            if not isinstance(doc, dict) or doc.get("kind") != "Service":
+                continue
+            for entry in (doc.get("spec") or {}).get("ports") or []:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name") or f"port-{entry.get('port')}")
+                if isinstance(entry.get("port"), int):
+                    service.published[name] = entry["port"]
+                # A string targetPort names a containerPort by name, which is a valid and
+                # strictly safer spelling; only a numeric one can disagree numerically.
+                if isinstance(entry.get("targetPort"), int):
+                    service.target_ports[name] = entry["targetPort"]
+
+    def _load_overlays(self, service: Service) -> None:
+        overlays = service.infra_dir / "overlays"
+        if not overlays.is_dir():
+            return
+        for env_dir in sorted(overlays.iterdir()):
+            path = env_dir / "deployment.yaml"
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                docs = list(yaml.safe_load_all(text))
+            except (OSError, yaml.YAMLError) as exc:
+                service.parse_errors.append(f"{self._rel(path)}: {exc}")
+                continue
+            facts = {"path": self._rel(path), "container_ports": set(),
+                     "probe_ports": set(), "env_ports": {}}
+            for doc in docs:
+                if not isinstance(doc, dict) or doc.get("kind") != "Deployment":
+                    continue
+                spec = ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
+                for container in spec.get("containers") or []:
+                    if not isinstance(container, dict):
+                        continue
+                    self._collect_container_ports(container, facts)
+            if facts["container_ports"] or facts["probe_ports"]:
+                service.overlays[env_dir.name] = facts
+
+    @staticmethod
+    def _collect_container_ports(container: dict, facts: dict) -> None:
+        for entry in container.get("ports") or []:
+            if isinstance(entry, dict) and isinstance(entry.get("containerPort"), int):
+                facts["container_ports"].add(entry["containerPort"])
+        for entry in container.get("env") or []:
+            if not isinstance(entry, dict):
+                continue
+            name, value = entry.get("name"), entry.get("value")
+            if name in PORT_ENV_NAMES and isinstance(value, (str, int)):
+                try:
+                    facts["env_ports"][name] = int(str(value))
+                except ValueError:
+                    pass
+        for probe in ("livenessProbe", "readinessProbe", "startupProbe"):
+            spec = container.get(probe)
+            if not isinstance(spec, dict):
+                continue
+            for handler in ("httpGet", "tcpSocket", "grpc"):
+                target = spec.get(handler)
+                if isinstance(target, dict) and isinstance(target.get("port"), int):
+                    facts["probe_ports"].add(target["port"])
+
+
+# --- detectors ---------------------------------------------------------------------------
+
+def k8s_ports_internally_consistent(ws: Workspace) -> Finding:
+    if not ws.services:
+        return Finding(evidence="INDETERMINATE: no infra services tree in the workspace",
+                       indeterminate=True)
+    violations = []
+    for service in ws.services.values():
+        for name, port in service.published.items():
+            target = service.target_ports.get(name)
+            if target is not None and target != port:
+                violations.append(f"{service.name}: Service port {name}={port} but "
+                                  f"targetPort={target}; the Service routes to a port it does "
+                                  "not publish")
+        published = service.all_published()
+        for env, facts in service.overlays.items():
+            for port in sorted(facts["container_ports"]):
+                if published and port not in published:
+                    violations.append(f"{service.name}/{env}: containerPort {port} is not "
+                                      f"published by the Service {sorted(published)} "
+                                      f"({facts['path']})")
+            for port in sorted(facts["probe_ports"]):
+                if facts["container_ports"] and port not in facts["container_ports"]:
+                    violations.append(f"{service.name}/{env}: probe targets {port}, which no "
+                                      f"container binds {sorted(facts['container_ports'])} "
+                                      f"({facts['path']})")
+            for var, port in sorted(facts["env_ports"].items()):
+                if facts["container_ports"] and port not in facts["container_ports"]:
+                    violations.append(f"{service.name}/{env}: {var}={port} but containerPorts "
+                                      f"are {sorted(facts['container_ports'])} "
+                                      f"({facts['path']})")
+    if violations:
+        return Finding(len(violations), f"{len(violations)} inconsistent port declaration(s)",
+                       capped(violations))
+    envs = sum(len(s.overlays) for s in ws.services.values())
+    return Finding(evidence=f"every containerPort, targetPort, probe and PORT value agrees "
+                            f"across {len(ws.services)} services and {envs} overlays")
+
+
+def k8s_ports_match_registry(ws: Workspace) -> Finding:
+    if ws.registry_error:
+        return Finding(evidence=f"INDETERMINATE: {ws.registry_error}", indeterminate=True)
+    if not ws.services:
+        return Finding(evidence="INDETERMINATE: no infra services tree in the workspace",
+                       indeterminate=True)
+    violations, unregistered = [], []
+    for service in ws.services.values():
+        entry = ws.registry.get(service.name)
+        if entry is None:
+            # Not every directory under services/ is an addressable service: kafka-exporter and
+            # notification-canary publish a metrics port and are scraped, never resolved by
+            # logical name. Absence from the registry is the correct state for them, so this is
+            # reported rather than counted - counting it would make the control fail on
+            # infrastructure that has nothing to comply with.
+            if service.published:
+                unregistered.append(f"{service.name}: publishes {sorted(service.all_published())} "
+                                    "and has no registry entry (expected for a scrape-only "
+                                    "component; a violation for an addressable service)")
+            continue
+        http_port, grpc_port = entry
+        for name, expected in (("http", http_port), ("grpc", grpc_port)):
+            actual = service.published.get(name)
+            if actual is not None and expected and actual != expected:
+                violations.append(f"{service.name}: Service publishes {name}={actual} but the "
+                                  f"registry resolves callers to {expected}; one of them is "
+                                  "unreachable")
+    if violations:
+        return Finding(len(violations), f"{len(violations)} service(s) disagree with the registry",
+                       capped(violations))
+    checked = sum(1 for s in ws.services if s in ws.registry)
+    evidence = f"{checked} service(s) publish exactly what the registry resolves callers to"
+    return Finding(evidence=evidence, details=capped(unregistered))
+
+
+def no_reserved_ports(ws: Workspace) -> Finding:
+    if not ws.services:
+        return Finding(evidence="INDETERMINATE: no infra services tree in the workspace",
+                       indeterminate=True)
+    violations = []
+    for service in ws.services.values():
+        for name, port in sorted(service.published.items()):
+            if port in RESERVED_PORTS:
+                violations.append(f"{service.name}: publishes {name}={port}, reserved to "
+                                  "platform infrastructure by RFC-0007 §3")
+        for env, facts in service.overlays.items():
+            for port in sorted(facts["container_ports"] & RESERVED_PORTS):
+                violations.append(f"{service.name}/{env}: binds containerPort {port}, reserved "
+                                  "by RFC-0007 §3")
+    if violations:
+        return Finding(len(violations), f"{len(violations)} reserved-port binding(s)",
+                       capped(violations))
+    return Finding(evidence=f"no service among {len(ws.services)} binds an RFC-0007 §3 "
+                            "reserved infrastructure port")
+
+
+_EXPOSE_RE = re.compile(r"^EXPOSE\s+(.*)$", re.MULTILINE)
+_HEALTHCHECK_PORT_RE = re.compile(r"(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)")
+
+
+def dockerfile_ports_are_own(ws: Workspace) -> Finding:
+    if not ws.repos_by_service:
+        return Finding(evidence="INDETERMINATE: no service repositories in the workspace",
+                       indeterminate=True)
+    # Who owns which port, from the manifests. Built once so a Dockerfile naming a port can be
+    # told WHOSE it is - which is the whole difference between this control and DS-0006.
+    owner: dict[int, set[str]] = {}
+    for service in ws.services.values():
+        for port in service.all_published():
+            owner.setdefault(port, set()).add(service.name)
+
+    violations, unchecked = [], []
+    for name, repo in sorted(ws.repos_by_service.items()):
+        dockerfile = repo / "Dockerfile"
+        if not dockerfile.is_file():
+            continue
+        service = ws.services.get(name)
+        if service is None or not service.published:
+            unchecked.append(f"{repo.name}: no Kubernetes Service found for {name!r}, so its "
+                             "own ports cannot be established")
+            continue
+        text = dockerfile.read_text(encoding="utf-8", errors="replace")
+        mine = service.all_published()
+        exposed = {int(tok) for line in _EXPOSE_RE.findall(text)
+                   for tok in re.findall(r"\d+", line)}
+        checked = {int(port) for port in _HEALTHCHECK_PORT_RE.findall(text)}
+        for port in sorted(exposed | checked):
+            if port in mine:
+                continue
+            others = sorted(owner.get(port, set()) - {name})
+            where = "EXPOSE" if port in exposed else "HEALTHCHECK"
+            if others:
+                violations.append(f"{repo.name}: {where} names port {port}, which belongs to "
+                                  f"{', '.join(others)}, not to {name}")
+            else:
+                violations.append(f"{repo.name}: {where} names port {port}, which {name} does "
+                                  f"not publish {sorted(mine)}")
+        if checked and not (checked & mine):
+            violations.append(f"{repo.name}: HEALTHCHECK targets {sorted(checked)}, none of "
+                              f"which {name} publishes")
+    if violations:
+        return Finding(len(violations), f"{len(violations)} Dockerfile port(s) not owned by "
+                                        "their service", capped(sorted(set(violations))))
+    return Finding(evidence=f"every EXPOSE and HEALTHCHECK port across "
+                            f"{len(ws.repos_by_service)} repositories belongs to its own "
+                            "service", details=capped(unchecked))
+
+
+def _contract_ports(repo: Path) -> tuple[dict[str, int], str | None]:
+    path = repo / "service.contract.yaml"
+    if not path.is_file():
+        return {}, None
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return {}, f"{path.name}: {exc}"
+    if not isinstance(doc, dict):
+        return {}, None
+    # Two shapes are live in the fleet: ports nested under `service:` and ports at the top
+    # level. Both are read, because a checker that understands one of them silently skips
+    # every repository using the other.
+    ports = doc.get("ports")
+    if not isinstance(ports, dict):
+        ports = (doc.get("service") or {}).get("ports") if isinstance(
+            doc.get("service"), dict) else None
+    if not isinstance(ports, dict):
+        return {}, None
+    return {str(k): v for k, v in ports.items() if isinstance(v, int)}, None
+
+
+def _catalog_ports(ws: Workspace) -> dict[str, int]:
+    """service -> the `canonical_port` its core-docs catalog entry declares.
+
+    A ninth place a service's HTTP port is written, found while auditing the eighteen in
+    infra. It agrees fleet-wide today, which is exactly why it is worth holding: it is the
+    copy most likely to be forgotten during the migration, because nothing dials it and no
+    rollout reads it. An unread copy that is right is one deploy away from being an unread
+    copy that is wrong.
+    """
+    catalog = ws.root / "docs" / "core-docs" / "catalog" / "services"
+    if not catalog.is_dir():
+        return {}
+    found: dict[str, int] = {}
+    for path in sorted(catalog.glob("*.yaml")):
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(doc, dict) and isinstance(doc.get("canonical_port"), int) and doc.get("name"):
+            found[str(doc["name"])] = doc["canonical_port"]
+    return found
+
+
+def contract_ports_match_service(ws: Workspace) -> Finding:
+    if not ws.repos_by_service:
+        return Finding(evidence="INDETERMINATE: no service repositories in the workspace",
+                       indeterminate=True)
+    owner: dict[int, set[str]] = {}
+    for service in ws.services.values():
+        for port in service.all_published():
+            owner.setdefault(port, set()).add(service.name)
+
+    violations, errors, checked = [], [], 0
+    catalog_ports = _catalog_ports(ws)
+    for name, port in sorted(catalog_ports.items()):
+        service = ws.services.get(name)
+        if service is None or "http" not in service.published:
+            continue
+        if port != service.published["http"]:
+            violations.append(f"catalog/services/{name}.yaml: canonical_port={port} but "
+                              f"base/service.yaml publishes http={service.published['http']}")
+    for name, repo in sorted(ws.repos_by_service.items()):
+        declared, error = _contract_ports(repo)
+        if error:
+            errors.append(f"{repo.name}: {error}")
+            continue
+        if not declared:
+            continue
+        service = ws.services.get(name)
+        if service is None or not service.published:
+            continue
+        checked += 1
+        mine = service.all_published()
+        for concern, port in sorted(declared.items()):
+            expected = service.published.get(concern)
+            if expected is not None and port != expected:
+                violations.append(f"{repo.name}: service.contract.yaml declares {concern}="
+                                  f"{port} but base/service.yaml publishes {expected}")
+                continue
+            if expected is None and port not in mine:
+                others = sorted(owner.get(port, set()) - {name})
+                if others:
+                    violations.append(f"{repo.name}: service.contract.yaml declares {concern}="
+                                      f"{port}, which belongs to {', '.join(others)}")
+                else:
+                    violations.append(f"{repo.name}: service.contract.yaml declares {concern}="
+                                      f"{port}, which no Kubernetes Service publishes")
+    if violations:
+        return Finding(len(violations), f"{len(violations)} contract port(s) disagree with the "
+                                        "manifests", capped(violations))
+    if errors:
+        return Finding(evidence="INDETERMINATE: a service contract could not be parsed",
+                       details=capped(errors), indeterminate=True)
+    catalog_note = (f" and {len(catalog_ports)} catalog canonical_port(s) agree"
+                    if catalog_ports else
+                    "; the core-docs catalog was not in the workspace, so canonical_port "
+                    "was not compared")
+    return Finding(evidence=f"{checked} service contract(s) declare exactly what their "
+                            f"Kubernetes Service publishes{catalog_note}")
+
+
+def k8s_ports_are_constants(ws: Workspace) -> Finding:
+    """SP-0006. Deferred: reported, never enforced. See the catalog for why."""
+    if not ws.services:
+        return Finding(evidence="INDETERMINATE: no infra services tree in the workspace",
+                       indeterminate=True)
+    expected = set(CONSTANTS.values())
+    violations = []
+    for service in ws.services.values():
+        if service.name not in ws.registry:
+            continue
+        off = {name: port for name, port in sorted(service.published.items())
+               if port not in expected}
+        if off:
+            violations.append(f"{service.name}: publishes {off}, not the RFC-0007 §4.1 "
+                              f"constants {sorted(expected)}")
+    migrated = sum(1 for s in ws.services.values()
+                   if s.name in ws.registry and s.published
+                   and s.all_published() <= expected)
+    total = sum(1 for s in ws.services.values() if s.name in ws.registry and s.published)
+    if violations:
+        return Finding(len(violations),
+                       f"{migrated} of {total} addressable service(s) are on the §4.1 "
+                       f"constants; {len(violations)} still to migrate", capped(violations))
+    return Finding(evidence=f"all {total} addressable service(s) publish the §4.1 constants")
+
+
+def manifest_address_vars(ws: Workspace) -> Finding:
+    """SP-0007. Advisory cross-check. Authoritative gates named in the catalog."""
+    services_dir = ws.infra / "services"
+    if not services_dir.is_dir():
+        return Finding(evidence="INDETERMINATE: no infra services tree in the workspace",
+                       indeterminate=True)
+    per_service: dict[str, int] = {}
+    for path in sorted(services_dir.rglob("*.yaml")):
+        service = path.relative_to(services_dir).parts[0]
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in ADDRESS_VAR.finditer(text):
+            var = match.group(1)
+            if var in EXEMPT_ADDRESS_VARS or NOT_AN_ADDRESS.match(var):
+                continue
+            per_service[service] = per_service.get(service, 0) + 1
+    total = sum(per_service.values())
+    if total:
+        worst = sorted(per_service.items(), key=lambda kv: (-kv[1], kv[0]))
+        return Finding(total, f"{total} manifest entries across {len(per_service)} services "
+                              "still supply an upstream address (authoritative gate: "
+                              "inboxxhq-infra scripts/check-service-addressing.py)",
+                       capped([f"{name}: {count}" for name, count in worst]))
+    return Finding(evidence="no manifest supplies an upstream address")
+
+
+DETECTORS = {
+    "k8s_ports_internally_consistent": k8s_ports_internally_consistent,
+    "k8s_ports_match_registry": k8s_ports_match_registry,
+    "no_reserved_ports": no_reserved_ports,
+    "dockerfile_ports_are_own": dockerfile_ports_are_own,
+    "contract_ports_match_service": contract_ports_match_service,
+    "k8s_ports_are_constants": k8s_ports_are_constants,
+    "manifest_address_vars": manifest_address_vars,
+}
+
+
+# --- catalog, evaluation, reporting -------------------------------------------------------
+
+def load_controls(path: Path) -> dict:
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise SystemExit(f"::error::cannot read control catalog {path}: {exc}")
+    if not isinstance(doc, dict) or not isinstance(doc.get("controls"), list):
+        raise SystemExit(f"::error::{path}: expected a controls list")
+    errors, seen = [], set()
+    for index, control in enumerate(doc["controls"]):
+        cid = control.get("id", f"#{index}")
+        missing = [key for key in REQUIRED_FIELDS if not control.get(key)]
+        if missing:
+            errors.append(f"{cid}: missing required field(s) {missing}")
+        if control.get("severity") not in VALID_SEVERITY:
+            errors.append(f"{cid}: severity {control.get('severity')!r} not in "
+                          f"{sorted(VALID_SEVERITY)}")
+        if control.get("status") not in VALID_STATUS:
+            errors.append(f"{cid}: status {control.get('status')!r} not in {sorted(VALID_STATUS)}")
+        if control.get("scope") not in VALID_SCOPE:
+            errors.append(f"{cid}: scope {control.get('scope')!r} not in {sorted(VALID_SCOPE)}")
+        if control.get("detector") not in DETECTORS:
+            errors.append(f"{cid}: unknown detector {control.get('detector')!r}")
+        if cid in seen:
+            errors.append(f"{cid}: duplicate control id (IDs must be unique and stable)")
+        seen.add(cid)
+    if errors:
+        for error in errors:
+            print(f"::error::service-ports catalog invalid: {error}")
+        raise SystemExit(2)
+    return doc
+
+
+def load_baseline() -> tuple[dict[str, int], str]:
+    if not BASELINE_PATH.is_file():
+        return {}, ""
+    try:
+        doc = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+        counts = doc.get("controls", {}) if isinstance(doc, dict) else None
+        if not isinstance(counts, dict):
+            raise ValueError("'controls' is not an object")
+        return {str(k): int(v) for k, v in counts.items()}, ""
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {}, str(exc)
+
+
+def evaluate(ws: Workspace, controls: list[dict], baseline: dict[str, int]) -> list[dict]:
+    results = []
+    for control in controls:
+        cid = control["id"]
+        rec = {
+            "control": cid, "title": control["title"], "severity": control["severity"],
+            "owner": control["owner"], "status": control["status"], "result": "skipped",
+            "evidence": "", "details": [], "count": 0, "remediation": "",
+            "baseline": int(baseline.get(cid, 0)),
+        }
+        if control["status"] in ("deprecated", "superseded"):
+            rec["evidence"] = f"lifecycle status={control['status']} (not evaluated)"
+            results.append(rec)
+            continue
+        finding = DETECTORS[control["detector"]](ws)
+        rec.update(evidence=finding.evidence, details=finding.details, count=finding.count)
+        if control["status"] == "deferred":
+            # Measured and printed, never gated. The number is the migration's remaining work.
+            rec["result"] = "deferred"
+        elif finding.indeterminate:
+            rec["result"] = "indeterminate"
+        elif finding.count > rec["baseline"]:
+            rec["result"] = "fail"
+            rec["remediation"] = " ".join(str(control["remediation"]).split())
+        elif finding.count < rec["baseline"]:
+            rec["result"] = "improved"
+        elif finding.count:
+            rec["result"] = "frozen"
+        else:
+            rec["result"] = "pass"
+        results.append(rec)
+    return results
+
+
+def enforced(rec: dict, threshold: int) -> bool:
+    return rec["result"] == "fail" and SEVERITY_ORDER[rec["severity"]] >= threshold
+
+
+MARK = {"pass": "ok", "fail": "XX", "frozen": "==", "improved": "->", "skipped": "--",
+        "indeterminate": "??", "deferred": ".."}
+
+
+def build_report(ws: Workspace, results: list[dict], doc: dict, fail_on: str,
+                 threshold: int) -> dict:
+    return {
+        "workspace": str(ws.root),
+        "policy_ssot": doc.get("policy_ssot", []),
+        "fail_on": fail_on,
+        "services_seen": len(ws.services),
+        "repositories_seen": len(ws.repos_by_service),
+        "registry_entries": len(ws.registry),
+        "controls_total": len(results),
+        "passed": sum(r["result"] == "pass" for r in results),
+        "frozen": sum(r["result"] == "frozen" for r in results),
+        "improved": sum(r["result"] == "improved" for r in results),
+        "failed": sum(r["result"] == "fail" for r in results),
+        "deferred": sum(r["result"] == "deferred" for r in results),
+        "indeterminate": sum(r["result"] == "indeterminate" for r in results),
+        "skipped": sum(r["result"] == "skipped" for r in results),
+        "enforced_failures": sum(enforced(r, threshold) for r in results),
+        "open_violations": {r["control"]: r["count"] for r in results if r["count"]},
+        "ok": not any(enforced(r, threshold) for r in results),
+        "results": results,
+    }
+
+
+def render_text(report: dict, threshold: int) -> None:
+    results = report["results"]
+    print(f"::group::service-ports controls ({report['services_seen']} services, "
+          f"{report['repositories_seen']} repositories, "
+          f"{report['registry_entries']} registry entries)")
+    for rec in results:
+        suffix = (f" (baseline {rec['baseline']}, now {rec['count']})"
+                  if rec["result"] in ("frozen", "improved") else "")
+        print(f"  [{MARK[rec['result']]}] {rec['control']} [{rec['severity']}/{rec['owner']}] "
+              f"{rec['title']}: {rec['evidence']}{suffix}")
+    print("::endgroup::")
+
+    for rec in results:
+        if rec["result"] == "fail":
+            level = "error" if enforced(rec, threshold) else "warning"
+            tail = f" | fix: {rec['remediation']}" if rec["remediation"] else ""
+            print(f"::{level}::[{rec['control']}][{rec['severity']}] {rec['title']} - "
+                  f"{rec['evidence']}{tail}")
+            for detail in rec["details"]:
+                print(f"    - {detail}")
+        elif rec["result"] == "improved":
+            print(f"::notice::[{rec['control']}] improved from {rec['baseline']} to "
+                  f"{rec['count']} - run --write-baseline to lock the gain in")
+        elif rec["result"] == "deferred":
+            print(f"::notice::[{rec['control']}] deferred: {rec['evidence']}")
+            for detail in rec["details"][:5]:
+                print(f"    - {detail}")
+        elif rec["result"] == "indeterminate":
+            print(f"::notice::[{rec['control']}] {rec['evidence']}")
+
+    ssot = ", ".join(report["policy_ssot"])
+    if report["ok"]:
+        print(f"service-ports: OK - {report['passed']} upheld, {report['frozen']} frozen, "
+              f"{report['deferred']} deferred to the migration playbook.")
+    else:
+        print(f"service-ports: FAILED - {report['enforced_failures']} enforced violation(s), "
+              f"{report['passed']} controls upheld.")
+    print(f"Policy SSOT: {ssot} (fail-on={report['fail_on']}).")
+
+
+def write_baseline(results: list[dict]) -> None:
+    # Deferred controls are excluded on purpose: SP-0006's count is the migration's remaining
+    # work, not debt to be frozen, and freezing it would let the fleet drift AWAY from §4.1 by
+    # one service without anything objecting.
+    counts = {r["control"]: r["count"] for r in results
+              if r["count"] and r["result"] != "deferred"}
+    existing = {}
+    if BASELINE_PATH.is_file():
+        try:
+            doc = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+            if isinstance(doc, dict):
+                existing = {k: v for k, v in doc.items()
+                            if k not in ("_comment", "controls", "frozen_on")}
+        except (OSError, ValueError, json.JSONDecodeError):
+            existing = {}
+    if not counts:
+        if BASELINE_PATH.is_file():
+            BASELINE_PATH.unlink()
+            print(f"service-ports: clean - removed {BASELINE_PATH.name}")
+        else:
+            print("service-ports: clean - no baseline needed")
+        return
+    from datetime import date
+    doc = {"_comment": BASELINE_COMMENT, "frozen_on": date.today().isoformat(),
+           **existing, "controls": counts}
+    BASELINE_PATH.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    print(f"service-ports: wrote {BASELINE_PATH} ({sum(counts.values())} violation(s) frozen)")
+
+
+def render_docs(doc: dict) -> str:
+    lines = [
+        DOCS_BEGIN, "",
+        "_Generated from `controls/service-ports.yaml` by `scripts/check-service-ports.py "
+        "--write-docs` — do not edit by hand._", "",
+        "| Control | Policy | Severity | Owner | Status |",
+        "| ------- | ------ | -------- | ----- | ------ |",
+    ]
+    for control in doc["controls"]:
+        policy = " ".join(str(control["policy"]).split())
+        lines.append(f"| {control['id']} | {policy} | {control['severity']} | "
+                     f"{control['owner']} | {control['status']} |")
+    lines += ["", DOCS_END]
+    return "\n".join(lines)
+
+
+def write_docs(doc: dict, path: Path) -> int:
+    text = path.read_text(encoding="utf-8")
+    if DOCS_BEGIN not in text or DOCS_END not in text:
+        print(f"::error::{path}: markers not found. Add these two lines where the table "
+              f"should go:\n  {DOCS_BEGIN}\n  {DOCS_END}")
+        return 1
+    new = text.split(DOCS_BEGIN, 1)[0] + render_docs(doc) + text.split(DOCS_END, 1)[1]
+    if new != text:
+        path.write_text(new, encoding="utf-8")
+        print(f"service-ports: wrote generated control table into {path}")
+    else:
+        print(f"service-ports: {path} control table already up to date")
+    return 0
+
+
+def verify_docs(doc: dict, path: Path) -> int:
+    text = path.read_text(encoding="utf-8")
+    if DOCS_BEGIN not in text or DOCS_END not in text:
+        print(f"::error::{path}: generated-controls markers not found; run --write-docs")
+        return 1
+    current = DOCS_BEGIN + text.split(DOCS_BEGIN, 1)[1].split(DOCS_END, 1)[0] + DOCS_END
+    if current.strip() != render_docs(doc).strip():
+        print(f"::error::{path}: control table is out of sync with the catalog; run: "
+              "python3 scripts/check-service-ports.py --write-docs " + str(path))
+        return 1
+    print(f"service-ports: {path} control table is in sync with the catalog")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="RFC-0007 §10 port guard.")
+    parser.add_argument("--workspace", default=".",
+                        help="assembled multi-repo workspace root")
+    parser.add_argument("--controls", default=str(DEFAULT_CONTROLS),
+                        help="control catalog YAML")
+    parser.add_argument("--format", choices=("text", "json", "markdown"), default="text")
+    parser.add_argument("--fail-on", choices=("critical", "major", "minor"), default="major")
+    parser.add_argument("--report", help="write the JSON report to this path")
+    parser.add_argument("--write-baseline", action="store_true",
+                        help=f"freeze current violation counts into {BASELINE_PATH.name}")
+    parser.add_argument("--write-docs", metavar="FILE",
+                        help="regenerate the control table in FILE and exit")
+    parser.add_argument("--verify-docs", metavar="FILE",
+                        help="fail if FILE's control table drifted; then exit")
+    args = parser.parse_args(argv)
+
+    controls_path = Path(args.controls)
+    if not controls_path.is_file():
+        print(f"::error::service-ports: control catalog not found: {controls_path}")
+        return 2
+    doc = load_controls(controls_path)
+
+    if args.write_docs:
+        return write_docs(doc, Path(args.write_docs))
+    if args.verify_docs:
+        return verify_docs(doc, Path(args.verify_docs))
+    if args.format == "markdown":
+        print(render_docs(doc))
+        return 0
+
+    root = Path(args.workspace).resolve()
+    if not root.is_dir():
+        print(f"::error::service-ports: not a directory: {root}")
+        return 2
+
+    baseline, baseline_error = load_baseline()
+    if baseline_error and not args.write_baseline:
+        print(f"::error::{BASELINE_PATH} is unreadable: {baseline_error}")
+        return 2
+
+    ws = Workspace(root)
+    # An empty workspace must not report clean. Every detector below would return
+    # INDETERMINATE, which reads as "nothing to see" in a summary line, and a checker that
+    # exits 0 against a tree it was never given is the failure mode fleet-governance.yaml was
+    # written to close.
+    if not ws.services and not ws.repos_by_service:
+        print(f"::error::service-ports: no services found under {root}. Expected "
+              "infra/inboxxhq-infra/services and/or services/*/*; the workspace did not "
+              "assemble, so no control could be evaluated.")
+        return 2
+
+    results = evaluate(ws, doc["controls"], baseline)
+    if args.write_baseline:
+        write_baseline(results)
+        return 0
+
+    threshold = SEVERITY_ORDER[args.fail_on]
+    report = build_report(ws, results, doc, args.fail_on, threshold)
+    if args.report:
+        Path(args.report).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    if args.format == "json":
+        print(json.dumps(report, indent=2))
+    else:
+        render_text(report, threshold)
+    return 0 if report["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

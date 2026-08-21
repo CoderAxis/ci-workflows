@@ -1,0 +1,223 @@
+# Service port control catalog (declarative policy-as-code).
+#
+# This is the single source of WHICH invariants RFC-0007 §10 enforces about ports and their
+# metadata: policy, rationale, remediation, severity, ownership, and lifecycle. The catalog
+# defines POLICY ONLY - it never describes how detection is implemented. Each control's
+# `detector` key binds it to an implementation in scripts/check-service-ports.py, which may
+# evolve WITHOUT any change to this catalog. This mirrors controls/dockerfile-standard.yaml
+# and controls/gateway-baseline.yaml.
+#
+# Control IDs (SP-NNNN) are STABLE and permanent - never rename or recycle; retire a control
+# via `status: deprecated|superseded`. critical/major fail CI; minor is advisory (--fail-on).
+#
+# Policy SSOT (architecture is owned by the RFC/ADR; this catalog only enforces it):
+#   RFC-0007 §4, §10, §11 - Service Addressing & Ingress
+#   ADR-0010              - Environment Service Ports & Ownership
+#   Playbook              - docs/core-docs/playbooks/service-port-migration.md
+#
+# WHY THIS CATALOG EXISTS, AND WHAT IT DELIBERATELY DOES NOT DO
+# -------------------------------------------------------------
+# RFC-0007 §10 lists four checks CI "MUST verify" and calls a checker for them "a required
+# lane, not advisory". Measured 2026-08-21, check 3 was already built in BOTH halves and
+# checks 1, 2 and 4 were not:
+#
+#   3, code      ARCH-0010 in inboxxhq-architecture-check, Error severity, baselined,
+#                run per repository by service-ci.yaml
+#   3, manifests inboxxhq-infra scripts/check-service-addressing.py, ratcheted at 321,
+#                run by that repo's service-addressing.yaml
+#
+# So this catalog covers 1, 2 and 4, and SP-0007 cross-checks 3 WITHOUT re-enforcing it.
+# "No duplicate logic" is a design requirement here for a specific reason, not a slogan: the
+# two existing halves already share one regrettably-wide regex precisely so they cannot
+# disagree about what is forbidden, and a third independent copy of that regex is a third
+# thing to keep in step. RFC-0007 §12's own evidence is what drift between copies costs.
+#
+# WHY §10.2 IS AN AGREEMENT CHECK RATHER THAN A CONSTANT CHECK
+# ------------------------------------------------------------
+# §10 previously read "no service declares a port ... other than the §4 constants". Written
+# literally, that control fails on 39 of the 40 services in the registry on the day it lands.
+# A permanently-red lane gets switched off, and a switched-off lane is the exact mechanism
+# §12 blames for the previous scheme's collapse ("the enforcement the registry depended on
+# was never built").
+#
+# SP-0001/SP-0002/SP-0005 therefore assert AGREEMENT - every place a service's port is
+# written says the same thing, and that thing is what its Kubernetes Service publishes. That
+# is a stronger control during the migration than the constant assertion would be, because
+# agreement is exactly the invariant §11 says a service must not break mid-flight, and it is
+# what makes each migration step verifiable before it ships. SP-0006 holds the constant
+# assertion, `status: deferred`, and is promoted by the playbook's post-procedure.
+
+version: 1
+domain: service-ports
+policy_ssot:
+  - RFC-0007
+  - ADR-0010
+
+controls:
+  - id: SP-0001
+    title: A service's Kubernetes port declarations all agree with each other
+    owner: platform-infrastructure
+    scope: workspace
+    status: active
+    severity: critical
+    policy: >-
+      For every service, each overlay's `containerPort` MUST be published by the service's
+      Service, each liveness/readiness probe port MUST be one of that overlay's
+      `containerPort`s, each `PORT`/`GRPC_PORT`/`METRICS_PORT` environment value MUST be one
+      of them, and every `spec.ports[].port` MUST equal its `targetPort`.
+    rationale: >-
+      This is the invariant RFC-0007 §11 says a migration must not break, and breaking it is
+      not reported by Kubernetes as an error. A targetPort that no container binds produces a
+      Service with no endpoints; a probe port that no container binds produces Pods that
+      never become Ready and a rollout that stalls. Both surface as a 503 at the edge, which
+      is what happened in production on 2026-08-21. A service's ports are written in about
+      eighteen places in this repository, so "they all moved together" is a claim that has to
+      be checked mechanically rather than reviewed.
+    remediation: >-
+      Move the bind port, containerPort, targetPort and every probe port in one change. The
+      finding names each file and the values that disagree.
+    detector: k8s_ports_internally_consistent
+    refs: [RFC-0007, ADR-0010]
+
+  - id: SP-0002
+    title: Kubernetes ports match the generated service registry
+    owner: platform-architecture
+    scope: workspace
+    status: active
+    severity: critical
+    policy: >-
+      Every service's published HTTP and gRPC ports MUST equal the entry for it in
+      platform-shared-go/platform/servicediscovery/ports.generated.go.
+    rationale: >-
+      The registry is what every caller resolves through, so a manifest that disagrees with
+      it is a service nobody can reach - the caller dials the registry's number and the Pod
+      listens on the manifest's. The file is generated FROM these manifests, which makes
+      agreement the normal state and any disagreement a sign that a manifest moved without
+      the registry being regenerated. That is the single most likely way to break a service
+      during the port migration, because the manifest change and the registry release are
+      necessarily separate commits in separate repositories.
+    remediation: >-
+      Regenerate ports.generated.go from inboxxhq-infra services/*/base/service.yaml and
+      release platform-shared-go, or correct the manifest if the manifest is what is wrong.
+    detector: k8s_ports_match_registry
+    refs: [RFC-0007, ADR-0010]
+
+  - id: SP-0003
+    title: No service binds a reserved infrastructure port
+    owner: platform-infrastructure
+    scope: workspace
+    status: active
+    severity: major
+    policy: >-
+      No service may publish or bind a port reserved to platform infrastructure by
+      RFC-0007 §3 (80, 443, 3000, 9090, 9091, 9093, 3100, 3200, 4317, 4318, 9095, 5432,
+      6379, 8500).
+    rationale: >-
+      §3 constrains a genuinely shared resource, unlike the withdrawn per-service allocation,
+      which is why it survived the withdrawal. A service binding 9090 or 5432 collides with
+      Prometheus or PostgreSQL wherever they share a host, and the RFC's §4 constants were
+      chosen so that none of them appears in §3 - which keeps this checkable without
+      exception.
+    remediation: >-
+      Move the service to the RFC-0007 §4.1 constants. If the port is genuinely needed,
+      amend §3 first.
+    detector: no_reserved_ports
+    refs: [RFC-0007]
+
+  - id: SP-0004
+    title: A Dockerfile exposes and health-checks only its own service's ports
+    owner: platform-infrastructure
+    scope: workspace
+    status: active
+    severity: major
+    policy: >-
+      Every port named by a Dockerfile's `EXPOSE` or `HEALTHCHECK` MUST be one the service
+      itself publishes. A port belonging to a different service is a violation regardless of
+      whether the two agree on anything else.
+    rationale: >-
+      RFC-0007 §10 was written around this exact defect: four services had a Dockerfile port
+      that disagreed with what the application binds, and payment-service exposed
+      voice-gateway-service's port. All four passed CI, because the existing Dockerfile
+      control (DS-0006) compares HEALTHCHECK against EXPOSE and never against what the
+      process actually listens on - so a Dockerfile that is internally consistent about the
+      wrong service's port is certified clean. This control asks the question DS-0006
+      cannot: whose port is that.
+    remediation: >-
+      Set EXPOSE and HEALTHCHECK to this service's own ports, taken from its Kubernetes
+      Service. During the port migration they move in the same commit as the manifests.
+    detector: dockerfile_ports_are_own
+    refs: [RFC-0007, ADR-0072]
+
+  - id: SP-0005
+    title: A service's declared ports match what its Kubernetes Service publishes
+    owner: platform-architecture
+    scope: workspace
+    status: active
+    severity: major
+    policy: >-
+      A service's `service.contract.yaml` ports and its core-docs catalog `canonical_port`
+      MUST equal what its Kubernetes Service publishes, and MUST NOT name a port allocated
+      to another service.
+    rationale: >-
+      These are the artefacts a reviewer consults to answer "what are this service's ports",
+      and during a 39-service migration that question gets asked under time pressure. A
+      contract naming another service's ports is the same defect class as SP-0004 in a file
+      nothing dials, which is why it can sit undetected: six such declarations are live
+      today, including configuration-service declaring ledger-service's entire 4031/50091/
+      9132 triple. Nothing has broken because no manifest reads the contract - but the next
+      person to trust it will be the one migrating it. `canonical_port` agrees fleet-wide
+      today and is included for the opposite reason: it is the copy most likely to be
+      forgotten during the migration, precisely because nothing reads it.
+    remediation: >-
+      Correct service.contract.yaml and catalog/services/<name>.yaml against
+      base/service.yaml. The manifests are the source of truth; both are copies.
+    detector: contract_ports_match_service
+    refs: [RFC-0007, ADR-0010]
+
+  - id: SP-0006
+    title: Kubernetes ports are the RFC-0007 §4.1 constants
+    owner: platform-architecture
+    scope: workspace
+    status: deferred
+    severity: critical
+    policy: >-
+      Every service's Kubernetes `spec.ports[].port`, `targetPort`, `containerPort` and probe
+      ports MUST be 8080 (HTTP), 50051 (gRPC) and 9464 (metrics).
+    rationale: >-
+      This is RFC-0007 §4.1's actual requirement and the migration's destination. It is
+      recorded here rather than omitted so the gap between the standard and the fleet is
+      visible in the same place the enforced controls are, instead of being a thing a reader
+      has to notice is missing - which is how §10 came to list four checks with three of them
+      unbuilt.
+    remediation: >-
+      Migrate the service per docs/core-docs/playbooks/service-port-migration.md. Do not
+      activate this control before that playbook's post-procedure: it fails on 39 of 40
+      services today, and a lane that cannot pass is a lane that gets turned off.
+    detector: k8s_ports_are_constants
+    refs: [RFC-0007, ADR-0010]
+
+  - id: SP-0007
+    title: Manifests do not supply an upstream's address (advisory cross-check only)
+    owner: platform-architecture
+    scope: workspace
+    status: active
+    severity: minor
+    policy: >-
+      A Kubernetes manifest SHOULD NOT define a `*_SERVICE_URL`, `*_GRPC_ENDPOINT` or related
+      address variable. This is intentionally ADVISORY: inboxxhq-infra's
+      scripts/check-service-addressing.py is the authoritative, hard-enforcing ratchet for
+      manifests, and ARCH-0010 in inboxxhq-architecture-check is the authoritative Error-
+      severity gate for application code. This control exists only so the three can be
+      compared, never to duplicate their enforcement.
+    rationale: >-
+      RFC-0007 §10.3 is the one check of the four that was already built, and it is built
+      twice on purpose - the two halves share one deliberately-wide pattern so they cannot
+      disagree about what is forbidden. A third hard gate would be a third copy of that
+      pattern to keep in step, and drift between copies of a fact is the failure §12 records.
+      Reporting the count here keeps it visible to anyone reading the port controls without
+      making this file a place the count can be enforced from.
+    remediation: >-
+      Run inboxxhq-infra's scripts/check-service-addressing.py for the authoritative result;
+      this control's finding is informational.
+    detector: manifest_address_vars
+    refs: [RFC-0007]

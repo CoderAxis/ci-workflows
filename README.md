@@ -626,6 +626,79 @@ _Generated from `controls/workflow-centralization.yaml` by `scripts/check-workfl
 
 <!-- END workflow-centralization-controls -->
 
+## Service ports (`controls/service-ports.yaml`)
+
+RFC-0007 §10 lists four checks CI "MUST verify" and calls a checker for them "a required lane, not
+advisory". Measured 2026-08-21, one of the four was built — twice, deliberately — and three were not:
+
+| §10 check | Enforced by | Where |
+| --- | --- | --- |
+| 3, application code | `ARCH-0010` in `inboxxhq-architecture-check` (Error, baselined) | `service-ci.yaml`, per repo |
+| 3, Kubernetes manifests | `scripts/check-service-addressing.py` in `inboxxhq-infra` (ratcheted) | its own `service-addressing.yaml` |
+| 1, 2, 4 | [`scripts/check-service-ports.py`](scripts/check-service-ports.py) | [`service-ports.yaml`](.github/workflows/service-ports.yaml) |
+
+The irony is worth naming, because RFC-0007 records it about the scheme this one replaced: §12's
+stated evidence for withdrawing the previous per-service port registry is that its collision guard
+"does not exist" and "the enforcement the registry depended on was never built". The replacement then
+specified four checks of its own and shipped three unbuilt.
+
+**It needs a workspace, not a repository.** Every defect worth catching here is a disagreement
+*between* repositories — the manifests are in `inboxxhq-infra`, the Dockerfiles and service contracts
+in the service repos, the registry every caller resolves through in `platform-shared-go`, and the
+`canonical_port` in core-docs' catalog. A per-repo gate can only confirm a repository agrees with
+itself, which is the one thing that was never wrong: all 44 services are internally consistent today,
+and 39 of them are consistent about a number the standard withdrew.
+
+```bash
+# against an assembled workspace (the layout service-ports.yaml builds)
+python3 scripts/check-service-ports.py --workspace /path/to/workspace
+
+# freeze today's findings, or regenerate this README's table
+python3 scripts/check-service-ports.py --workspace /path/to/workspace --write-baseline
+python3 scripts/check-service-ports.py --write-docs README.md
+python3 scripts/test_service_ports.py
+```
+
+Two things it deliberately does **not** do.
+
+**SP-0007 does not enforce the `*_SERVICE_URL` prohibition, it only counts it.** The two existing
+halves share one deliberately-wide pattern precisely so they cannot disagree about what is forbidden;
+a third independent hard gate would be a third copy of that pattern to keep in step, and drift
+between copies of a fact is the failure RFC-0007 §12 records. This is the same relationship DS-0012
+has with `seed-contract-check.yaml`.
+
+**SP-0006 does not assert the RFC-0007 §4.1 constants.** Written as §10 originally stated it — "no
+service declares a port other than the §4 constants" — that control fails on 39 of 40 services on the
+day it lands, and a permanently-red lane is a lane somebody switches off. It carries
+`status: deferred`: reported on every run, never enforced, promoted to `active` by the post-procedure
+in `docs/core-docs/playbooks/service-port-migration.md`. The controls that *are* enforced assert
+**agreement** instead — every place a service's port is written says the same thing, and that thing is
+what its Kubernetes Service publishes. During a 39-service migration that is the stronger control:
+agreement is exactly the invariant RFC-0007 §11 says a service must not break, and it is what makes
+each step verifiable before it ships.
+
+`controls/service-ports-baseline.json` freezes what was open on 2026-08-21 — six contract
+declarations and the 321 manifest address entries the infra ratchet already owns. Counts may only
+fall, and every entry carries a reason and the migration phase that clears it.
+
+### Control catalog (policy-as-code)
+
+<!-- BEGIN service-ports-controls (generated: scripts/check-service-ports.py --write-docs) -->
+
+_Generated from `controls/service-ports.yaml` by `scripts/check-service-ports.py --write-docs` — do not edit by hand._
+
+| Control | Policy | Severity | Owner | Status |
+| ------- | ------ | -------- | ----- | ------ |
+| SP-0001 | For every service, each overlay's `containerPort` MUST be published by the service's Service, each liveness/readiness probe port MUST be one of that overlay's `containerPort`s, each `PORT`/`GRPC_PORT`/`METRICS_PORT` environment value MUST be one of them, and every `spec.ports[].port` MUST equal its `targetPort`. | critical | platform-infrastructure | active |
+| SP-0002 | Every service's published HTTP and gRPC ports MUST equal the entry for it in platform-shared-go/platform/servicediscovery/ports.generated.go. | critical | platform-architecture | active |
+| SP-0003 | No service may publish or bind a port reserved to platform infrastructure by RFC-0007 §3 (80, 443, 3000, 9090, 9091, 9093, 3100, 3200, 4317, 4318, 9095, 5432, 6379, 8500). | major | platform-infrastructure | active |
+| SP-0004 | Every port named by a Dockerfile's `EXPOSE` or `HEALTHCHECK` MUST be one the service itself publishes. A port belonging to a different service is a violation regardless of whether the two agree on anything else. | major | platform-infrastructure | active |
+| SP-0005 | A service's `service.contract.yaml` ports and its core-docs catalog `canonical_port` MUST equal what its Kubernetes Service publishes, and MUST NOT name a port allocated to another service. | major | platform-architecture | active |
+| SP-0006 | Every service's Kubernetes `spec.ports[].port`, `targetPort`, `containerPort` and probe ports MUST be 8080 (HTTP), 50051 (gRPC) and 9464 (metrics). | critical | platform-architecture | deferred |
+| SP-0007 | A Kubernetes manifest SHOULD NOT define a `*_SERVICE_URL`, `*_GRPC_ENDPOINT` or related address variable. This is intentionally ADVISORY: inboxxhq-infra's scripts/check-service-addressing.py is the authoritative, hard-enforcing ratchet for manifests, and ARCH-0010 in inboxxhq-architecture-check is the authoritative Error- severity gate for application code. This control exists only so the three can be compared, never to duplicate their enforcement. | minor | platform-architecture | active |
+
+<!-- END service-ports-controls -->
+
 ## CI identity (`controls/ci-identity.yaml`)
 
 Guards the GitHub-OIDC `sub` patterns in the Terraform trust policies that let CI assume AWS roles.
