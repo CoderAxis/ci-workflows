@@ -63,8 +63,9 @@ controls:
     policy: >-
       For every service, each overlay's `containerPort` MUST be published by the service's
       Service, each liveness/readiness probe port MUST be one of that overlay's
-      `containerPort`s, each `PORT`/`GRPC_PORT`/`METRICS_PORT` environment value MUST be one
-      of them, and every `spec.ports[].port` MUST equal its `targetPort`.
+      `containerPort`s, every `spec.ports[].port` MUST equal its `targetPort`, and each
+      `PORT`/`GRPC_PORT`/`METRICS_PORT` environment value MUST equal the port the Service
+      publishes FOR THAT CONCERN — not merely one of the ports it publishes.
     rationale: >-
       This is the invariant RFC-0007 §11 says a migration must not break, and breaking it is
       not reported by Kubernetes as an error. A targetPort that no container binds produces a
@@ -73,6 +74,11 @@ controls:
       is what happened in production on 2026-08-21. A service's ports are written in about
       eighteen places in this repository, so "they all moved together" is a claim that has to
       be checked mechanically rather than reviewed.
+      The per-concern half of the environment check is the part set membership missed:
+      `PORT: 50051` on a service publishing `http: 4015` is a member of that service's port set
+      and still wrong, because it advertises the HTTP listener on the gRPC number. Agreement
+      about the wrong thing passes a set test, and a half-finished migration is exactly where
+      that mistake gets made.
     remediation: >-
       Move the bind port, containerPort, targetPort and every probe port in one change. The
       finding names each file and the values that disagree.
@@ -195,6 +201,81 @@ controls:
       services today, and a lane that cannot pass is a lane that gets turned off.
     detector: k8s_ports_are_constants
     refs: [RFC-0007, ADR-0010]
+
+  - id: SP-0008
+    title: pprof is the §4.1 constant and is never reachable from the cluster
+    owner: platform-infrastructure
+    scope: workspace
+    status: active
+    severity: major
+    policy: >-
+      Any `PPROF_PORT` a deployment sets MUST be 6060, and no service may publish pprof from
+      its Kubernetes Service or bind it as a `containerPort`.
+    rationale: >-
+      pprof is the fourth listener RFC-0007 §4.1 names and the only one nothing was checking:
+      SP-0001 through SP-0006 read the three ports that appear in a Service, and pprof
+      deliberately does not appear in one. Absent from the Service is not the same as correct,
+      and it was not correct - two services carry a PPROF_PORT that is neither 6060 nor
+      anything else the RFC allows, which no control objected to. The half that matters more is
+      the second: §9 requires pprof to bind 127.0.0.1 and stay disabled outside local
+      development, so a containerPort for it is a debug and heap-dump surface reachable from
+      anywhere in the cluster, arriving through a one-line manifest edit that reads like every
+      other port declaration.
+    remediation: >-
+      Set PPROF_PORT to 6060, or delete it and let the shared library supply the constant.
+      Never give pprof a containerPort or a Service port.
+    detector: pprof_is_the_constant_and_stays_private
+    refs: [RFC-0007, ADR-0010]
+
+  - id: SP-0009
+    title: The local-development allocation stays per-service
+    owner: platform-architecture
+    scope: workspace
+    status: active
+    severity: critical
+    policy: >-
+      `ports.generated.go` MUST declare a `localPorts` table holding a distinct HTTP and gRPC
+      port for every service in `clusterPorts`.
+    rationale: >-
+      RFC-0007 §4.2 keeps a per-service port for a workstation, where every service shares one
+      network namespace and the second to want 8080 cannot have it. That only holds while the
+      local table is a DIFFERENT table from the cluster one, and until 2026-08-21 it was not:
+      both branches of ServiceRegistry.Resolve read one map generated from the Kubernetes
+      manifests, so the first service to publish 8080 in the cluster would have become 8080 on
+      every laptop as well - §4.2 defeated by the mechanism meant to deliver it, silently, with
+      the only symptom an unexplained bind failure on a developer machine. This control is what
+      makes that regression loud. It also carries the uniqueness guard §12 records as never
+      having been built, which finally has one table to be about: collisions matter exactly
+      where a namespace is shared, and after the migration that is only here.
+    remediation: >-
+      Regenerate ports.generated.go from BOTH sources - the manifests for clusterPorts and
+      localports.yaml for localPorts. If a service is missing, add it to localports.yaml with
+      an HTTP and gRPC port no other service holds.
+    detector: local_allocation_is_per_service
+    refs: [RFC-0007, ADR-0010]
+
+  - id: SP-0010
+    title: Metrics are scraped by port name, never by number
+    owner: platform-infrastructure
+    scope: workspace
+    status: active
+    severity: major
+    policy: >-
+      Every `ServiceMonitor` endpoint MUST select its target by port name (`port: metrics`) and
+      MUST NOT name a port number.
+    rationale: >-
+      This is what makes metrics continuity across the port migration free, and RFC-0007 §9
+      states plainly that keeping it that way is a requirement rather than an observation. A
+      ServiceMonitor naming a number is one more copy of the port - the eighteenth - and it is
+      the copy that breaks most quietly, because a scrape against a closed port produces a
+      service with no metrics rather than an error anybody is paged for. All 41 ServiceMonitors
+      satisfy this today, which is why the control is cheap now and would be expensive to add
+      after somebody had written a number.
+    remediation: >-
+      Replace the numeric port with the Service port's name. The names (http, grpc, metrics) do
+      not change during the migration; that is what they are for.
+    detector: metrics_are_scraped_by_port_name
+    refs: [RFC-0007]
 
   - id: SP-0007
     title: Manifests do not supply an upstream's address (advisory cross-check only)

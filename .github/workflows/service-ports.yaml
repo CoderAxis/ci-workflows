@@ -36,16 +36,41 @@ name: Service Ports (RFC-0007 §10)
 on:
   workflow_call:
     inputs:
-      docs_path:
+      caller_path:
         description: >-
-          Where to place the calling docs repo. This is the layout contract, not a preference:
-          check-service-ports.py resolves the service catalog at
-          <workspace>/docs/core-docs/catalog/services to compare each service's
-          `canonical_port`, so core-docs must land at docs/core-docs or that comparison is
-          skipped and says so.
+          Where to place the CALLING repository inside the assembled workspace, which is also
+          how this lane learns which of the three subject trees the caller already is.
+          Whichever tree the caller supplies is not fetched again, so the run is about the
+          commit under review rather than about that repository's default branch.
+
+          This is the layout contract, not a preference: check-service-ports.py resolves the
+          service catalog at <workspace>/docs/core-docs/catalog/services, the manifests at
+          infra/inboxxhq-infra/services and the registry at
+          shared/platform-shared-go/platform/servicediscovery, so a tree in the wrong place is
+          a tree no detector opens - which reads exactly like a tree with nothing to report.
+
+          Only three values do anything: docs/core-docs, infra/inboxxhq-infra and
+          shared/platform-shared-go. Anything else assembles all three from their default
+          branches and checks the caller out somewhere no detector reads, which is a valid way
+          for an unrelated repository to run the fleet-wide report.
         required: false
         type: string
         default: docs/core-docs
+      docs_path:
+        description: >-
+          Deprecated alias for caller_path, kept so existing callers keep working. Setting both
+          is a configuration error and fails the run rather than picking one.
+        required: false
+        type: string
+        default: ""
+      docs_repo:
+        description: >-
+          The service catalog, holding each service's `canonical_port`. Fetched only when the
+          caller is not core-docs itself; SP-0005 states outright when the catalog was not in
+          the workspace rather than treating its absence as agreement.
+        required: false
+        type: string
+        default: coderaxis/core-docs
       fleet_owner:
         description: >-
           The account holding the brand-neutral half of the fleet. A GitHub App is installed
@@ -102,16 +127,54 @@ jobs:
     steps:
       # Assembled layout, which check-service-ports.py's --workspace resolution depends on:
       #   $GITHUB_WORKSPACE/
-      #     docs/core-docs/                                     <- the caller
+      #     docs/core-docs/                                     <- one of these three
+      #     infra/inboxxhq-infra/services/                         is the caller; the other
+      #     shared/platform-shared-go/platform/servicediscovery/   two are fetched
       #     ci-workflows/
-      #     infra/inboxxhq-infra/services/
-      #     shared/platform-shared-go/platform/servicediscovery/
       #     services/<service>/<deployable>/
       #     gateways/<deployable>/
-      - name: Check out the calling docs repository
+      #
+      # WHY THE CALLER'S TREE IS NEVER RE-FETCHED. Every tree here used to come from its default
+      # branch, with the caller additionally placed at docs/core-docs. That is correct for
+      # core-docs and useless for anyone else: an inboxxhq-infra pull request that half-migrates
+      # a service would have been checked against main, so the lane would report the fleet as
+      # consistent and the change that breaks it as fine. The migration's commits land in
+      # inboxxhq-infra and platform-shared-go, so those are exactly the two repositories whose
+      # own commit has to be the subject.
+      - name: Resolve where the caller goes
+        id: layout
+        shell: bash
+        env:
+          CALLER_PATH: ${{ inputs.caller_path }}
+          DOCS_PATH: ${{ inputs.docs_path }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DOCS_PATH}" ] && [ "${DOCS_PATH}" != "${CALLER_PATH}" ]; then
+            if [ "${CALLER_PATH}" != "docs/core-docs" ]; then
+              echo "::error::caller_path=${CALLER_PATH} and the deprecated docs_path=${DOCS_PATH}" \
+                   "disagree. Set caller_path alone."
+              exit 1
+            fi
+            caller="${DOCS_PATH}"
+          else
+            caller="${CALLER_PATH}"
+          fi
+          echo "caller=${caller}" >> "${GITHUB_OUTPUT}"
+          for tree in docs/core-docs infra/inboxxhq-infra shared/platform-shared-go; do
+            key="fetch_${tree##*/}"
+            key="${key//-/_}"
+            if [ "${tree}" = "${caller}" ]; then
+              echo "${key}=false" >> "${GITHUB_OUTPUT}"
+              echo "caller supplies ${tree}"
+            else
+              echo "${key}=true" >> "${GITHUB_OUTPUT}"
+            fi
+          done
+
+      - name: Check out the calling repository
         uses: actions/checkout@v4
         with:
-          path: ${{ inputs.docs_path }}
+          path: ${{ steps.layout.outputs.caller }}
 
       - name: Check out ci-workflows (public)
         uses: actions/checkout@v4
@@ -137,9 +200,21 @@ jobs:
           extra-owners: ${{ inputs.brand_owner }}
           configure-git: "true"
 
+      # Only catalog/ is fetched: SP-0005 reads each service's canonical_port and nothing else
+      # in a large documentation tree.
+      - name: Check out the service catalog
+        if: steps.layout.outputs.fetch_core_docs == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.docs_repo }}
+          token: ${{ steps.token.outputs.token }}
+          path: docs/core-docs
+          sparse-checkout: catalog
+
       # Only services/ is fetched. The gate reads no Terraform, no monitoring and no releases,
       # and the infra working tree runs to gigabytes once providers are initialised.
       - name: Check out the infrastructure manifests
+        if: steps.layout.outputs.fetch_inboxxhq_infra == 'true'
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.infra_repo }}
@@ -148,6 +223,7 @@ jobs:
           sparse-checkout: services
 
       - name: Check out the shared registry
+        if: steps.layout.outputs.fetch_platform_shared_go == 'true'
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.shared_repo }}
@@ -159,7 +235,9 @@ jobs:
         id: plan
         shell: bash
         env:
-          DOCS_PATH: ${{ inputs.docs_path }}
+          # Always the assembled location, never the caller_path input: the catalog is at
+          # docs/core-docs whether the caller supplied it or it was fetched.
+          DOCS_PATH: docs/core-docs
           FLEET_OWNER: ${{ inputs.fleet_owner }}
           BRAND_OWNER: ${{ inputs.brand_owner }}
         run: |
@@ -257,7 +335,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for d in "${{ inputs.docs_path }}" ci-workflows \
+          for d in docs/core-docs/catalog ci-workflows \
                    infra/inboxxhq-infra/services \
                    shared/platform-shared-go/platform/servicediscovery; do
             if [ -d "${GITHUB_WORKSPACE}/${d}" ]; then

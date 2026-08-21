@@ -1591,6 +1591,70 @@ jobs:
   # It fails rather than warns. An unreleased change to central logic is not a housekeeping item -
   # it means the fleet's actual behaviour is undocumented, and the longer it holds the larger the
   # release becomes and the less anyone can reason about what a rollback would restore.
+  # The RFC-0007 §10 port controls, held to the standard the comment at the top of this file
+  # sets: "new central checkers should arrive with a self-test here". check-service-ports.py
+  # arrived without one, which is worse for this checker than for most. It is the gate two
+  # repositories now block their pushes on and the one `ihq git guard` delegates to, so a bug in
+  # a detector is a fleet-wide event in both directions - and the only tree it reads is somebody
+  # else's, so nothing in this repository would notice.
+  #
+  # The regressions the suite pins are the ones already survived once: a two-table registry read
+  # by whichever table happened to come last, so the manifests were compared against the LOCAL
+  # allocation; SP-0001 accepting a PORT value that matched some other concern's containerPort;
+  # and SP-0002 passing a service whose registry entry is zero, which is a caller that cannot
+  # resolve it at all.
+  service-ports-controls:
+    name: Service ports - control catalog and detector self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      # Catalog shape, detector binding and the per-detector behaviour, including that every
+      # control names an implemented detector: a control whose detector does not exist reads as
+      # enforcement to anyone auditing the catalog and evaluates to nothing.
+      - name: The SP controls and their detectors behave
+        run: python3 scripts/test_service_ports.py
+
+      # The control table in README.md is generated from the catalog, so the two can disagree
+      # silently - and the table is what a reader consults to learn what is enforced. A drifted
+      # table describing controls that no longer exist is the documentation equivalent of a dead
+      # detector.
+      - name: The documented control table matches the catalog
+        run: python3 scripts/check-service-ports.py --verify-docs README.md
+
+      # An empty workspace must not report clean. This is the failure mode the whole lane is
+      # built against: every detector returns INDETERMINATE, the summary line reads as "nothing
+      # to see", and a checker that exits 0 against a tree it was never given is indistinguishable
+      # from a fleet with no defects.
+      - name: A workspace that did not assemble is refused, not passed
+        shell: bash
+        run: |
+          set -uo pipefail
+          empty="$(mktemp -d)"
+          out="$(python3 scripts/check-service-ports.py --workspace "${empty}" 2>&1)"
+          code=$?
+          echo "${out}"
+          if [ "${code}" -eq 0 ]; then
+            echo "::error::the checker exited 0 against an empty workspace. A green run has to mean" \
+                 "the controls were evaluated, not that nothing was found to evaluate them against."
+            exit 1
+          fi
+          if ! echo "${out}" | grep -q "no services found"; then
+            echo "::error::the checker refused the empty workspace without saying why, so a caller" \
+                 "cannot tell a broken assembly from a real finding."
+            exit 1
+          fi
+
   release-drift:
     name: Release drift - the v1 tag matches main
     runs-on: ubuntu-latest
