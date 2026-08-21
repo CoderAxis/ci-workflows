@@ -1641,8 +1641,12 @@ jobs:
         run: |
           set -uo pipefail
           empty="$(mktemp -d)"
+          # `shell: bash` runs with -e, so the non-zero exit this step exists to observe would
+          # abort the step at the assignment and never reach the checks below.
+          set +e
           out="$(python3 scripts/check-service-ports.py --workspace "${empty}" 2>&1)"
           code=$?
+          set -e
           echo "${out}"
           if [ "${code}" -eq 0 ]; then
             echo "::error::the checker exited 0 against an empty workspace. A green run has to mean" \
