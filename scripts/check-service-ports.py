@@ -801,10 +801,23 @@ def write_baseline(results: list[dict]) -> None:
         else:
             print("service-ports: clean - no baseline needed")
         return
+    # A control that reached zero leaves `controls`, and its reason has to leave
+    # with it. Carrying it forward leaves the file asserting that findings which
+    # were just fixed are still frozen -- which is how SP-0005 came to describe
+    # three contract defects for a while after they were corrected.
+    reasons = existing.get("reasons")
+    if isinstance(reasons, dict):
+        existing = {**existing,
+                    "reasons": {k: v for k, v in reasons.items() if k in counts}}
+
     from datetime import date
     doc = {"_comment": BASELINE_COMMENT, "frozen_on": date.today().isoformat(),
            **existing, "controls": counts}
-    BASELINE_PATH.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    # ensure_ascii=False because the file is written and read as UTF-8, so
+    # escaping turns the section signs this file is full of into \u00a7 and
+    # makes every reason harder to read for no gain.
+    BASELINE_PATH.write_text(
+        json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"service-ports: wrote {BASELINE_PATH} ({sum(counts.values())} violation(s) frozen)")
 
 
