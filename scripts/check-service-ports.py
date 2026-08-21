@@ -16,6 +16,25 @@ Design (identical framework to check-dockerfile-standard.py):
     RISES fails; a fall is reported as improved. Mirrors check-gateway-baseline.py.
   * STATIC ANALYSIS ONLY. Never contacts a cluster.
 
+WHICH PORT TYPES ARE ASSERTED
+-----------------------------
+RFC-0007 §4.1 names four listeners, and the first revision of this checker asserted the first
+three unevenly and the fourth not at all:
+
+  HTTP     SP-0001 agreement, SP-0002 against the registry, SP-0006 the constant
+  gRPC     the same three
+  metrics  SP-0001 agreement and SP-0006 the constant, plus SP-0010 for the scrape config.
+           NOT compared against the registry, and deliberately: the registry holds the two
+           ports a caller dials, and Prometheus does not resolve through it. Adding a metrics
+           port there would be a copy of a fact nothing reads, which is the failure §12 records.
+  pprof    SP-0008. Nothing checked it before, and two services carry a PPROF_PORT that is not
+           6060. It is the one port whose correct state is "declared but unreachable", so the
+           control asserts both the constant and the absence from any Service or containerPort.
+
+SP-0001 also asserts each port ENVIRONMENT value against its own concern rather than against
+the set of container ports. Set membership passes PORT=50051 on a service publishing http=4015,
+which is an HTTP listener advertised on the gRPC number: agreement about the wrong thing.
+
 WHY IT NEEDS A WORKSPACE RATHER THAN A REPO
 -------------------------------------------
 The facts this checks live in three repositories and the defects are precisely the
@@ -32,6 +51,12 @@ So --workspace names an assembled tree, laid out as platform-governance.yaml ass
     services/<domain>/<repo>/                                    Dockerfile, contract
     gateways/<repo>/                                             Dockerfile, contract
     shared/platform-shared-go/platform/servicediscovery/ports.generated.go
+
+ports.generated.go holds TWO tables since the RFC-0007 §4 split: clusterPorts, generated from
+the manifests, and localPorts, the per-service allocation §4.2 retains for a workstation. They
+have the same shape, so each is located by name -- collecting entries from both would leave
+SP-0002 comparing the manifests against the local table, which reads as green while the two
+agree and turns red the moment a service migrates.
 
 Trees that are absent are SKIPPED with that recorded as the evidence, never passed. A checker
 that reports "clean" about a directory it was not given is reporting on its own reach.
@@ -95,7 +120,15 @@ REQUIRED_FIELDS = ("id", "title", "owner", "scope", "status", "severity", "polic
 
 # RFC-0007 §4.1. Named here rather than read from the RFC because this checker must run with
 # no network and no core-docs checkout; §4.1 records the same values and why they were chosen.
+#
+# All FOUR listeners §4.1 names are here, not the three that appear in a Service. pprof is
+# absent from every Service on purpose -- §9 requires it to bind 127.0.0.1 and stay disabled
+# outside local development -- but "absent from the Service" is not the same as "unchecked", and
+# it was unchecked: two services carry a PPROF_PORT that is not 6060, which nothing objected to.
+# SP-0008 asserts the constant AND the absence, because both are §4.1 requirements and the
+# second is the one that would let a debug endpoint become reachable in a cluster.
 CONSTANTS = {"http": 8080, "grpc": 50051, "metrics": 9464}
+PPROF_CONSTANT = 6060
 
 # RFC-0007 §3. These constrain a genuinely shared resource, which is why they survived the
 # withdrawal of the per-service allocation. The §4.1 constants were chosen so none appears
@@ -116,6 +149,12 @@ EXEMPT_ADDRESS_VARS = {"CHECKOUT_SUCCESS_URL", "CHECKOUT_CANCEL_URL",
                        "ORDER_CHECKOUT_SUCCESS_URL", "ORDER_CHECKOUT_CANCEL_URL"}
 
 PORT_ENV_NAMES = ("PORT", "GRPC_PORT", "METRICS_PORT")
+# Which listener each of those describes. Membership in the containerPort set was the only
+# thing checked before, and membership is too weak to catch the mistake this migration makes:
+# PORT=50051 in a service whose Service still publishes http=4015 is a set member, so it passed,
+# and it is a Pod serving HTTP where the gRPC listener is expected.
+PORT_ENV_CONCERN = {"PORT": "http", "GRPC_PORT": "grpc", "METRICS_PORT": "metrics"}
+PPROF_ENV_NAME = "PPROF_PORT"
 MAX_DETAILS = 25
 
 DOCS_BEGIN = "<!-- BEGIN service-ports-controls (generated: scripts/check-service-ports.py --write-docs) -->"
@@ -146,6 +185,10 @@ class Service:
     published: dict[str, int] = field(default_factory=dict)   # port name -> spec.ports[].port
     target_ports: dict[str, int] = field(default_factory=dict)
     overlays: dict[str, dict] = field(default_factory=dict)   # env -> parsed port facts
+    # ServiceMonitor endpoints, as declared: a string is a port NAME, an int is a number.
+    # RFC-0007 §9 requires the name, and the distinction is the whole content of SP-0010.
+    monitor_ports: list[object] = field(default_factory=list)
+    monitor_path: str = ""
     repo_dir: Path | None = None
     parse_errors: list[str] = field(default_factory=list)
 
@@ -161,8 +204,10 @@ class Workspace:
         self.infra = root / "infra" / "inboxxhq-infra"
         self.registry_path = (root / "shared" / "platform-shared-go" / "platform" /
                               "servicediscovery" / "ports.generated.go")
-        self.registry: dict[str, tuple[int, int]] = {}
+        self.registry: dict[str, tuple[int, int]] = {}       # clusterPorts: what a Pod answers on
+        self.local_registry: dict[str, tuple[int, int]] = {}  # localPorts: what a laptop binds
         self.registry_error = ""
+        self.local_registry_error = ""
         self.services: dict[str, Service] = {}
         self.repos_by_service: dict[str, Path] = {}
         self._load_registry()
@@ -177,16 +222,56 @@ class Workspace:
     _REGISTRY_ENTRY = re.compile(
         r'"([a-z0-9-]+)":\s*\{HTTPPort:\s*(\d+),\s*GRPCPort:\s*(\d+)\}')
 
+    # THE TABLE HAS TO BE NAMED, and this is the one place in this file where a loose match
+    # would be actively dangerous rather than merely imprecise.
+    #
+    # The file now holds two tables of identical shape: clusterPorts, generated from the
+    # manifests, and localPorts, the per-service allocation a workstation binds (RFC-0007 §4.2).
+    # Matching entries anywhere in the file collects both, and because a dict keeps the last
+    # write, SP-0002 would end up comparing the manifests against the LOCAL table. That reads
+    # as green today, when the two agree for every unmigrated service, and turns red the moment
+    # a service migrates -- with a finding that looks exactly like the outage SP-0002 exists to
+    # catch. So each table is located by name and parsed from its own block.
+    @staticmethod
+    def _table(text: str, name: str) -> str | None:
+        opener = f"var {name} = map[string]ServiceEndpoint{{"
+        start = text.find(opener)
+        if start < 0:
+            return None
+        end = text.find("\n}", start)
+        return text[start + len(opener):end if end > 0 else len(text)]
+
     def _load_registry(self) -> None:
         if not self.registry_path.is_file():
             self.registry_error = f"{self._rel(self.registry_path)} is absent"
+            self.local_registry_error = self.registry_error
             return
         text = self.registry_path.read_text(encoding="utf-8", errors="replace")
-        for match in self._REGISTRY_ENTRY.finditer(text):
-            self.registry[match.group(1)] = (int(match.group(2)), int(match.group(3)))
-        if not self.registry:
-            self.registry_error = (f"{self._rel(self.registry_path)} parsed to zero entries; "
-                                   "the generated table's shape has changed")
+
+        cluster = self._table(text, "clusterPorts")
+        if cluster is None:
+            legacy = " (it still declares the pre-split `standardPorts`, which served both " \
+                     "environments from one table)" if "standardPorts" in text else ""
+            self.registry_error = (f"{self._rel(self.registry_path)} declares no `clusterPorts` "
+                                  f"table{legacy}")
+        else:
+            for match in self._REGISTRY_ENTRY.finditer(cluster):
+                self.registry[match.group(1)] = (int(match.group(2)), int(match.group(3)))
+            if not self.registry:
+                self.registry_error = (f"{self._rel(self.registry_path)} parsed to zero cluster "
+                                       "entries; the generated table's shape has changed")
+
+        local = self._table(text, "localPorts")
+        if local is None:
+            self.local_registry_error = (f"{self._rel(self.registry_path)} declares no "
+                                         "`localPorts` table, so the local-development "
+                                         "allocation RFC-0007 §4.2 retains cannot be read")
+        else:
+            for match in self._REGISTRY_ENTRY.finditer(local):
+                self.local_registry[match.group(1)] = (int(match.group(2)), int(match.group(3)))
+            if not self.local_registry:
+                self.local_registry_error = (f"{self._rel(self.registry_path)} parsed to zero "
+                                             "local entries")
 
     def _rel(self, path: Path) -> str:
         try:
@@ -232,6 +317,7 @@ class Workspace:
                 continue
             service = Service(name=path.name, infra_dir=path)
             self._load_base(service)
+            self._load_monitor(service)
             self._load_overlays(service)
             if not service.published and not service.overlays:
                 # A directory with no Service and no Deployment is a Job or a config bundle
@@ -263,6 +349,28 @@ class Workspace:
                 if isinstance(entry.get("targetPort"), int):
                     service.target_ports[name] = entry["targetPort"]
 
+    def _load_monitor(self, service: Service) -> None:
+        path = service.infra_dir / "base" / "servicemonitor.yaml"
+        if not path.is_file():
+            return
+        try:
+            docs = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
+        except (OSError, yaml.YAMLError) as exc:
+            service.parse_errors.append(f"{self._rel(path)}: {exc}")
+            return
+        service.monitor_path = self._rel(path)
+        for doc in docs:
+            if not isinstance(doc, dict) or doc.get("kind") != "ServiceMonitor":
+                continue
+            for endpoint in (doc.get("spec") or {}).get("endpoints") or []:
+                if not isinstance(endpoint, dict):
+                    continue
+                # `port` names a Service port; `targetPort` may be either. Both are collected
+                # because either one spelled as a number is the defect §9 describes.
+                for key in ("port", "targetPort"):
+                    if key in endpoint and endpoint[key] is not None:
+                        service.monitor_ports.append(endpoint[key])
+
     def _load_overlays(self, service: Service) -> None:
         overlays = service.infra_dir / "overlays"
         if not overlays.is_dir():
@@ -278,7 +386,7 @@ class Workspace:
                 service.parse_errors.append(f"{self._rel(path)}: {exc}")
                 continue
             facts = {"path": self._rel(path), "container_ports": set(),
-                     "probe_ports": set(), "env_ports": {}}
+                     "probe_ports": set(), "env_ports": {}, "pprof_ports": set()}
             for doc in docs:
                 if not isinstance(doc, dict) or doc.get("kind") != "Deployment":
                     continue
@@ -302,6 +410,11 @@ class Workspace:
             if name in PORT_ENV_NAMES and isinstance(value, (str, int)):
                 try:
                     facts["env_ports"][name] = int(str(value))
+                except ValueError:
+                    pass
+            if name == PPROF_ENV_NAME and isinstance(value, (str, int)):
+                try:
+                    facts["pprof_ports"].add(int(str(value)))
                 except ValueError:
                     pass
         for probe in ("livenessProbe", "readinessProbe", "startupProbe"):
@@ -345,6 +458,17 @@ def k8s_ports_internally_consistent(ws: Workspace) -> Finding:
                     violations.append(f"{service.name}/{env}: {var}={port} but containerPorts "
                                       f"are {sorted(facts['container_ports'])} "
                                       f"({facts['path']})")
+                # ...and it must be the port for ITS OWN concern. Membership alone accepts
+                # PORT=50051 on a service publishing http=4015, which is an HTTP listener
+                # advertised on the gRPC number - agreement about the wrong thing.
+                concern = PORT_ENV_CONCERN[var]
+                expected = service.published.get(concern)
+                if expected is not None and port != expected:
+                    violations.append(f"{service.name}/{env}: {var}={port} but the Service "
+                                      f"publishes {concern}={expected} ({facts['path']})")
+                elif expected is None and service.published:
+                    violations.append(f"{service.name}/{env}: {var}={port} but the Service "
+                                      f"publishes no {concern} port ({facts['path']})")
     if violations:
         return Finding(len(violations), f"{len(violations)} inconsistent port declaration(s)",
                        capped(violations))
@@ -376,10 +500,20 @@ def k8s_ports_match_registry(ws: Workspace) -> Finding:
         http_port, grpc_port = entry
         for name, expected in (("http", http_port), ("grpc", grpc_port)):
             actual = service.published.get(name)
-            if actual is not None and expected and actual != expected:
+            if actual is None:
+                continue
+            if expected and actual != expected:
                 violations.append(f"{service.name}: Service publishes {name}={actual} but the "
                                   f"registry resolves callers to {expected}; one of them is "
                                   "unreachable")
+            elif not expected:
+                # Zero is how the generator records "this service has no listener of that
+                # kind", and the callers treat it as unresolvable rather than dialling it. A
+                # Service that publishes the port anyway is reachable by everything except the
+                # registry, which is the one path RFC-0007 §5 allows.
+                violations.append(f"{service.name}: Service publishes {name}={actual} but the "
+                                  f"registry records no {name} port, so a caller resolving by "
+                                  "name is refused rather than routed")
     if violations:
         return Finding(len(violations), f"{len(violations)} service(s) disagree with the registry",
                        capped(violations))
@@ -564,30 +698,177 @@ def contract_ports_match_service(ws: Workspace) -> Finding:
                             f"Kubernetes Service publishes{catalog_note}")
 
 
+def _off_constant(service: Service) -> list[str]:
+    """Every port of this service that is not the §4.1 constant for its own concern.
+
+    PER CONCERN, not "is it one of the three numbers". The set test accepts a Service
+    publishing http=9464, which is three quarters of a migration and a metrics endpoint served
+    where callers expect an API. It also accepts a Service on the constants whose overlays are
+    still on the old numbers, which is the half-migrated state RFC-0007 §11 says takes a service
+    down - so containerPorts, probes and the port environment values are read here too. SP-0001
+    catches that disagreement from the other direction; both matter, because SP-0001 is what
+    holds during the migration and this is what says the migration finished.
+    """
+    off = []
+    for name, port in sorted(service.published.items()):
+        want = CONSTANTS.get(name)
+        if want is None:
+            off.append(f"publishes an unrecognised port name {name!r}={port}")
+        elif port != want:
+            off.append(f"publishes {name}={port}, not {want}")
+    for name, port in sorted(service.target_ports.items()):
+        want = CONSTANTS.get(name)
+        if want is not None and port != want:
+            off.append(f"routes {name} to targetPort {port}, not {want}")
+    for env, facts in sorted(service.overlays.items()):
+        for port in sorted(facts["container_ports"] - set(CONSTANTS.values())):
+            off.append(f"{env} binds containerPort {port}")
+        for port in sorted(facts["probe_ports"] - set(CONSTANTS.values())):
+            off.append(f"{env} probes {port}")
+        for var, port in sorted(facts["env_ports"].items()):
+            want = CONSTANTS[PORT_ENV_CONCERN[var]]
+            if port != want:
+                off.append(f"{env} sets {var}={port}, not {want}")
+    return off
+
+
 def k8s_ports_are_constants(ws: Workspace) -> Finding:
     """SP-0006. Deferred: reported, never enforced. See the catalog for why."""
     if not ws.services:
         return Finding(evidence="INDETERMINATE: no infra services tree in the workspace",
                        indeterminate=True)
-    expected = set(CONSTANTS.values())
-    violations = []
+    violations, migrated, total = [], 0, 0
     for service in ws.services.values():
-        if service.name not in ws.registry:
+        if service.name not in ws.registry or not service.published:
             continue
-        off = {name: port for name, port in sorted(service.published.items())
-               if port not in expected}
+        total += 1
+        off = _off_constant(service)
         if off:
-            violations.append(f"{service.name}: publishes {off}, not the RFC-0007 §4.1 "
-                              f"constants {sorted(expected)}")
-    migrated = sum(1 for s in ws.services.values()
-                   if s.name in ws.registry and s.published
-                   and s.all_published() <= expected)
-    total = sum(1 for s in ws.services.values() if s.name in ws.registry and s.published)
+            violations.append(f"{service.name}: {'; '.join(off[:4])}"
+                              + (f" (+{len(off) - 4} more)" if len(off) > 4 else ""))
+        else:
+            migrated += 1
     if violations:
         return Finding(len(violations),
                        f"{migrated} of {total} addressable service(s) are on the §4.1 "
                        f"constants; {len(violations)} still to migrate", capped(violations))
-    return Finding(evidence=f"all {total} addressable service(s) publish the §4.1 constants")
+    return Finding(evidence=f"all {total} addressable service(s) are on the §4.1 constants, "
+                            "in every place their ports are written")
+
+
+def pprof_is_the_constant_and_stays_private(ws: Workspace) -> Finding:
+    """SP-0008. The fourth listener in RFC-0007 §4.1, and the one nothing was checking.
+
+    Two halves, because pprof is the one port whose correct state is "declared but not
+    reachable". §4.1 fixes it at 6060; §9 requires it to bind 127.0.0.1 and stay disabled
+    outside local development. So a service may name it and must not publish it, and the
+    interesting failure is not a wrong number -- it is a debug endpoint that acquires a
+    containerPort and becomes reachable from inside the cluster.
+    """
+    if not ws.services:
+        return Finding(evidence="INDETERMINATE: no infra services tree in the workspace",
+                       indeterminate=True)
+    violations, declared = [], 0
+    for service in ws.services.values():
+        for name, port in sorted(service.published.items()):
+            if port == PPROF_CONSTANT or "pprof" in name.lower():
+                violations.append(f"{service.name}: the Service publishes {name}={port}; "
+                                  "RFC-0007 §9 keeps pprof on 127.0.0.1 and off the network")
+        for env, facts in sorted(service.overlays.items()):
+            for port in sorted(facts["pprof_ports"]):
+                declared += 1
+                if port != PPROF_CONSTANT:
+                    violations.append(f"{service.name}/{env}: PPROF_PORT={port}, not the "
+                                      f"RFC-0007 §4.1 constant {PPROF_CONSTANT} "
+                                      f"({facts['path']})")
+            if PPROF_CONSTANT in facts["container_ports"]:
+                violations.append(f"{service.name}/{env}: binds containerPort "
+                                  f"{PPROF_CONSTANT}, which exposes pprof to the cluster "
+                                  f"({facts['path']})")
+    if violations:
+        return Finding(len(violations), f"{len(violations)} pprof port declaration(s) that "
+                                        "§4.1 or §9 forbids", capped(violations))
+    return Finding(evidence=f"{declared} PPROF_PORT declaration(s) are all {PPROF_CONSTANT} and "
+                            "no service publishes or binds it")
+
+
+def local_allocation_is_per_service(ws: Workspace) -> Finding:
+    """SP-0009. The local carve-out is still a carve-out.
+
+    RFC-0007 §4.2 keeps a per-service port for the laptop, where all services share one network
+    namespace and the second to want 8080 cannot have it. That only works while the local table
+    is a DIFFERENT table from the cluster one: until 2026-08-21 both branches of
+    ServiceRegistry.Resolve read one map generated from the manifests, so the first service to
+    publish 8080 in Kubernetes would have become 8080 locally too, and §4.2's whole purpose
+    would have been defeated by the mechanism meant to deliver it.
+
+    Two assertions, and they are the two ways that can come back. The local table must exist and
+    hold every service the cluster table holds -- a missing entry resolves to localhost:0, which
+    dials and reports a refused connection rather than the missing allocation. And no two
+    services may share a local port, which is the collision guard RFC-0007 §12 records as never
+    having been built. Both go red immediately if the local table is ever regenerated from the
+    manifests again, because the manifests converge on one number and this table must not.
+    """
+    if ws.local_registry_error:
+        return Finding(evidence=f"INDETERMINATE: {ws.local_registry_error}", indeterminate=True)
+    if not ws.registry:
+        return Finding(evidence="INDETERMINATE: the cluster port table could not be read, so "
+                                "the local allocation has nothing to be complete against",
+                       indeterminate=True)
+    violations = []
+    for name in sorted(ws.registry):
+        if name not in ws.local_registry:
+            violations.append(f"{name} is in the cluster table with no local-development "
+                              "allocation, so it resolves to localhost:0 on a workstation")
+    for index, concern in ((0, "http"), (1, "grpc")):
+        seen: dict[int, str] = {}
+        for name in sorted(ws.local_registry):
+            port = ws.local_registry[name][index]
+            if not port:
+                continue
+            if port in seen:
+                violations.append(f"local {concern} port {port} is allocated to both "
+                                  f"{seen[port]} and {name}; on one host the second to start "
+                                  "cannot bind it")
+            seen[port] = name
+    if violations:
+        return Finding(len(violations), f"{len(violations)} defect(s) in the local-development "
+                                        "allocation", capped(violations))
+    return Finding(evidence=f"{len(ws.local_registry)} services hold a distinct local HTTP and "
+                            "gRPC port, independent of what Kubernetes publishes")
+
+
+def metrics_are_scraped_by_port_name(ws: Workspace) -> Finding:
+    """SP-0010. Metrics continuity across the migration, which is free only while it is checked.
+
+    RFC-0007 §9: every ServiceMonitor selects its endpoint by port NAME. That is what makes a
+    service's move to 9464 invisible to Prometheus, and §9 states plainly that keeping it that
+    way is a requirement rather than an observation - a ServiceMonitor naming a number would be
+    one more copy of the port, and it would break silently, because a failed scrape looks like a
+    service with no metrics rather than like a misconfiguration.
+    """
+    if not ws.services:
+        return Finding(evidence="INDETERMINATE: no infra services tree in the workspace",
+                       indeterminate=True)
+    violations, checked = [], 0
+    for service in ws.services.values():
+        if not service.monitor_ports:
+            continue
+        checked += 1
+        for port in service.monitor_ports:
+            if isinstance(port, bool) or not isinstance(port, int):
+                continue
+            violations.append(f"{service.name}: {service.monitor_path} scrapes port {port} by "
+                              "number; RFC-0007 §9 requires the port name, so that a service "
+                              "moving to 9464 does not silently stop being scraped")
+    if violations:
+        return Finding(len(violations), f"{len(violations)} ServiceMonitor endpoint(s) naming a "
+                                       "number", capped(violations))
+    if not checked:
+        return Finding(evidence="INDETERMINATE: no ServiceMonitor found in the workspace",
+                       indeterminate=True)
+    return Finding(evidence=f"all {checked} ServiceMonitor(s) select their endpoint by port "
+                            "name, so metrics survive a port change unchanged")
 
 
 def manifest_address_vars(ws: Workspace) -> Finding:
@@ -623,6 +904,9 @@ DETECTORS = {
     "contract_ports_match_service": contract_ports_match_service,
     "k8s_ports_are_constants": k8s_ports_are_constants,
     "manifest_address_vars": manifest_address_vars,
+    "pprof_is_the_constant_and_stays_private": pprof_is_the_constant_and_stays_private,
+    "local_allocation_is_per_service": local_allocation_is_per_service,
+    "metrics_are_scraped_by_port_name": metrics_are_scraped_by_port_name,
 }
 
 

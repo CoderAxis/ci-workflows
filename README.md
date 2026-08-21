@@ -677,9 +677,22 @@ what its Kubernetes Service publishes. During a 39-service migration that is the
 agreement is exactly the invariant RFC-0007 §11 says a service must not break, and it is what makes
 each step verifiable before it ships.
 
-`controls/service-ports-baseline.json` freezes what was open on 2026-08-21 — six contract
-declarations and the 321 manifest address entries the infra ratchet already owns. Counts may only
-fall, and every entry carries a reason and the migration phase that clears it.
+**All four listeners RFC-0007 §4.1 names are asserted, which took three more controls.** The first
+revision covered HTTP and gRPC in three places each, metrics in two, and pprof nowhere — pprof is
+absent from every Service on purpose (§9 keeps it on 127.0.0.1), and absent from the manifests was
+being read as nothing to check. SP-0008 asserts the constant *and* the absence, so a
+`containerPort: 6060` that would make a heap-dump surface reachable in-cluster is a finding rather
+than a one-line manifest edit that reads like any other port. SP-0010 asserts what makes metrics
+continuity free: every `ServiceMonitor` selects by port *name*, which §9 states is a requirement and
+not an observation. SP-0009 asserts the thing the whole local/Kubernetes split rests on — that
+`localPorts` is a table of its own, complete and collision-free — because until 2026-08-21 both
+branches of `Resolve` read one table generated from the manifests, and the first service to publish
+8080 in the cluster would have made 8080 its port on every laptop too.
+
+`controls/service-ports-baseline.json` freezes what was open on 2026-08-21 — the 321 manifest
+address entries the infra ratchet already owns, and eight `PPROF_PORT` values on two services that
+clear when those services migrate. Counts may only fall, and every entry carries a reason and the
+migration phase that clears it.
 
 ### Control catalog (policy-as-code)
 
@@ -689,12 +702,15 @@ _Generated from `controls/service-ports.yaml` by `scripts/check-service-ports.py
 
 | Control | Policy | Severity | Owner | Status |
 | ------- | ------ | -------- | ----- | ------ |
-| SP-0001 | For every service, each overlay's `containerPort` MUST be published by the service's Service, each liveness/readiness probe port MUST be one of that overlay's `containerPort`s, each `PORT`/`GRPC_PORT`/`METRICS_PORT` environment value MUST be one of them, and every `spec.ports[].port` MUST equal its `targetPort`. | critical | platform-infrastructure | active |
+| SP-0001 | For every service, each overlay's `containerPort` MUST be published by the service's Service, each liveness/readiness probe port MUST be one of that overlay's `containerPort`s, every `spec.ports[].port` MUST equal its `targetPort`, and each `PORT`/`GRPC_PORT`/`METRICS_PORT` environment value MUST equal the port the Service publishes FOR THAT CONCERN — not merely one of the ports it publishes. | critical | platform-infrastructure | active |
 | SP-0002 | Every service's published HTTP and gRPC ports MUST equal the entry for it in platform-shared-go/platform/servicediscovery/ports.generated.go. | critical | platform-architecture | active |
 | SP-0003 | No service may publish or bind a port reserved to platform infrastructure by RFC-0007 §3 (80, 443, 3000, 9090, 9091, 9093, 3100, 3200, 4317, 4318, 9095, 5432, 6379, 8500). | major | platform-infrastructure | active |
 | SP-0004 | Every port named by a Dockerfile's `EXPOSE` or `HEALTHCHECK` MUST be one the service itself publishes. A port belonging to a different service is a violation regardless of whether the two agree on anything else. | major | platform-infrastructure | active |
 | SP-0005 | A service's `service.contract.yaml` ports and its core-docs catalog `canonical_port` MUST equal what its Kubernetes Service publishes, and MUST NOT name a port allocated to another service. | major | platform-architecture | active |
 | SP-0006 | Every service's Kubernetes `spec.ports[].port`, `targetPort`, `containerPort` and probe ports MUST be 8080 (HTTP), 50051 (gRPC) and 9464 (metrics). | critical | platform-architecture | deferred |
+| SP-0008 | Any `PPROF_PORT` a deployment sets MUST be 6060, and no service may publish pprof from its Kubernetes Service or bind it as a `containerPort`. | major | platform-infrastructure | active |
+| SP-0009 | `ports.generated.go` MUST declare a `localPorts` table holding a distinct HTTP and gRPC port for every service in `clusterPorts`. | critical | platform-architecture | active |
+| SP-0010 | Every `ServiceMonitor` endpoint MUST select its target by port name (`port: metrics`) and MUST NOT name a port number. | major | platform-infrastructure | active |
 | SP-0007 | A Kubernetes manifest SHOULD NOT define a `*_SERVICE_URL`, `*_GRPC_ENDPOINT` or related address variable. This is intentionally ADVISORY: inboxxhq-infra's scripts/check-service-addressing.py is the authoritative, hard-enforcing ratchet for manifests, and ARCH-0010 in inboxxhq-architecture-check is the authoritative Error- severity gate for application code. This control exists only so the three can be compared, never to duplicate their enforcement. | minor | platform-architecture | active |
 
 <!-- END service-ports-controls -->
