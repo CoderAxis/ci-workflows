@@ -14,10 +14,17 @@
       "target": 0,
       "due": "with each service's own atomic port migration: configuration-service in wave B, org-service in wave F",
       "why_frozen_and_not_fixed_here": "Two services set a PPROF_PORT that is not the RFC-0007 §4.1 constant 6060 -- configuration-service on 6095 and org-service on 6063 -- across all four overlays each. Neither is reachable: both set PPROF_ENABLED=false, neither declares a containerPort for it, and no Service publishes it, so this is a wrong number in a variable nothing currently reads. It is frozen rather than fixed on its own because editing a deployment's pod template rolls the service, and RFC-0007 §11 requires a service's port change to be one atomic commit and nothing else -- a separate pprof rollout would be a second production change per service for a value with no runtime effect. Each entry clears when that service migrates, which is the same commit that has to touch these files anyway."
+    },
+    "SP-0012": {
+      "count_on_2026-08-22": 4,
+      "target": 0,
+      "due": "as soon as the platform-identity-service image reading PORT is promoted to all four environments",
+      "why_frozen_and_not_fixed_here": "These four are one service's four overlays during a rename, and they are the safe half of it. platform-identity-service was the only service in the fleet reading HTTP_PORT rather than PORT, which is why the fleet-wide migration -- carried out by rewriting PORT -- passed it by and left it binding 4050 while its containerPort, its Service and both its probes moved to 8080, crash-looping platform login in three environments. The service now reads PORT. Until the image carrying that change is promoted, the overlays set PORT and HTTP_PORT to the same 8080 so that whichever image is running binds the right port and there is no window. Deleting HTTP_PORT before the promotion would put the un-promoted environments back on 4050, which is the outage this is recovering from. The pair goes when the image lands, and this entry with it."
     }
   },
   "controls": {
     "SP-0008": 8,
+    "SP-0012": 4,
     "SP-0007": 298
   }
 }
