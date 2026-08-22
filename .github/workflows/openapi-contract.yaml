@@ -296,7 +296,16 @@ jobs:
             echo "No breaking changes against the published ${SERVICE} baseline."
             exit 0
           fi
-          echo "::error::${SPEC_FILE} breaks the published ${SERVICE} contract. An intentional break needs a major bump of ${SERVICE}/VERSION in ${REGISTRY_REPO}; an unintentional one needs the spec fixed here."
+          # The remedy has to name moving the baseline, because that is the only thing that
+          # clears this gate. It used to advise a major bump of VERSION, which this step does
+          # not read -- the baseline is latest.json, and the step that rewrites it is the
+          # publish below, which never runs while this one is failing. Three changes followed
+          # that advice, found it did nothing, and ended in a by-hand publish anyway
+          # (org-bff v2.7.0, v5.0.0, v6.0.0). Advice that cannot work is worse than none: it
+          # spends the reader's time before they start looking for the real answer.
+          echo "::error::${SPEC_FILE} breaks the published ${SERVICE} contract."
+          echo "::error::If the break is unintentional, fix the spec here."
+          echo "::error::If it is intentional, the baseline has to move, and this gate cannot move it -- the publish step that rewrites ${SERVICE}/latest.json runs only after this check passes. Declare it in ${REGISTRY_REPO} by hand: copy this spec to ${SERVICE}/latest.json and ${SERVICE}/vN.0.0.json, set ${SERVICE}/VERSION to vN.0.0, update ${SERVICE}/provenance.json with the new digest and source sha, and run tools/generate_index.py."
           exit 1
 
       - name: Mint a token that may write the registry
