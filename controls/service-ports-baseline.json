@@ -1,6 +1,6 @@
 {
   "_comment": "Frozen RFC-0007 §10 port debt. The gate fails if any count RISES; lower it by fixing violations, then re-run --write-baseline. Every entry must carry a reason and a phase in the migration playbook.",
-  "frozen_on": "2026-08-21",
+  "frozen_on": "2026-08-22",
   "playbook": "docs/core-docs/playbooks/service-port-migration.md",
   "reasons": {
     "SP-0007": {
@@ -17,7 +17,7 @@
     }
   },
   "controls": {
-    "SP-0007": 321,
-    "SP-0008": 8
+    "SP-0008": 8,
+    "SP-0007": 298
   }
 }
