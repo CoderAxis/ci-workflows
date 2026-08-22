@@ -148,12 +148,22 @@ NOT_AN_ADDRESS = re.compile(
 EXEMPT_ADDRESS_VARS = {"CHECKOUT_SUCCESS_URL", "CHECKOUT_CANCEL_URL",
                        "ORDER_CHECKOUT_SUCCESS_URL", "ORDER_CHECKOUT_CANCEL_URL"}
 
-PORT_ENV_NAMES = ("PORT", "GRPC_PORT", "METRICS_PORT")
+PORT_ENV_NAMES = ("PORT", "HTTP_PORT", "GRPC_PORT", "METRICS_PORT")
 # Which listener each of those describes. Membership in the containerPort set was the only
 # thing checked before, and membership is too weak to catch the mistake this migration makes:
 # PORT=50051 in a service whose Service still publishes http=4015 is a set member, so it passed,
 # and it is a Pod serving HTTP where the gRPC listener is expected.
-PORT_ENV_CONCERN = {"PORT": "http", "GRPC_PORT": "grpc", "METRICS_PORT": "metrics"}
+#
+# HTTP_PORT is here because a control that reads only the variable most services use tells you
+# nothing about the one that does not. platform-identity-service reads HTTP_PORT; the migration
+# rewrote PORT across the fleet, left HTTP_PORT at 4050, and this file agreed that everything
+# lined up — containerPort, targetPort and both probes had all moved to 8080 and did match each
+# other. The process kept binding 4050, the probes checked 8080, and platform login crash-looped
+# in three environments behind a green lane. The lesson is not "add HTTP_PORT" but that the
+# variable the process actually reads is the only one worth comparing, so any new spelling of it
+# belongs in this tuple on the day it appears.
+PORT_ENV_CONCERN = {"PORT": "http", "HTTP_PORT": "http",
+                    "GRPC_PORT": "grpc", "METRICS_PORT": "metrics"}
 PPROF_ENV_NAME = "PPROF_PORT"
 MAX_DETAILS = 25
 
