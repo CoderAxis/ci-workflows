@@ -233,13 +233,26 @@ class Workspace:
     # a service migrates -- with a finding that looks exactly like the outage SP-0002 exists to
     # catch. So each table is located by name and parsed from its own block.
     @staticmethod
-    def _table(text: str, name: str) -> str | None:
-        opener = f"var {name} = map[string]ServiceEndpoint{{"
+    def _table(text: str, name: str, value_type: str = "ServiceEndpoint") -> str | None:
+        opener = f"var {name} = map[string]{value_type}{{"
         start = text.find(opener)
         if start < 0:
             return None
         end = text.find("\n}", start)
         return text[start + len(opener):end if end > 0 else len(text)]
+
+    # The cluster table records which listeners a service runs, not on what port: every service
+    # in Kubernetes answers on the §4.1 constants, so a per-service number there would be a copy
+    # of a constant that each caller pins separately. The ports below are therefore read from
+    # the same constants the resolver uses, and the table supplies only membership and shape.
+    #
+    # Which still has to be read. A service with no gRPC listener must resolve to no gRPC port
+    # rather than to 50051, or SP-0002 would require org-bff's Service to publish a gRPC port it
+    # does not serve.
+    _CLUSTER_HTTP_PORT = 8080
+    _CLUSTER_GRPC_PORT = 50051
+    _LISTENERS_ENTRY = re.compile(
+        r'"([a-z0-9-]+)":\s*\{HTTP:\s*(true|false),\s*GRPC:\s*(true|false)\}')
 
     def _load_registry(self) -> None:
         if not self.registry_path.is_file():
@@ -248,15 +261,26 @@ class Workspace:
             return
         text = self.registry_path.read_text(encoding="utf-8", errors="replace")
 
-        cluster = self._table(text, "clusterPorts")
+        cluster = self._table(text, "clusterListeners", "listeners")
         if cluster is None:
-            legacy = " (it still declares the pre-split `standardPorts`, which served both " \
-                     "environments from one table)" if "standardPorts" in text else ""
-            self.registry_error = (f"{self._rel(self.registry_path)} declares no `clusterPorts` "
-                                  f"table{legacy}")
+            if self._table(text, "clusterPorts") is not None:
+                legacy = (" (it still declares `clusterPorts`, which recorded a port per service "
+                          "-- the copy the §4.1 constants removed)")
+            elif "standardPorts" in text:
+                legacy = (" (it still declares the pre-split `standardPorts`, which served both "
+                          "environments from one table)")
+            else:
+                legacy = ""
+            self.registry_error = (f"{self._rel(self.registry_path)} declares no "
+                                   f"`clusterListeners` table{legacy}")
         else:
-            for match in self._REGISTRY_ENTRY.finditer(cluster):
-                self.registry[match.group(1)] = (int(match.group(2)), int(match.group(3)))
+            for match in self._LISTENERS_ENTRY.finditer(cluster):
+                name, has_http, has_grpc = match.group(1), match.group(2) == "true", \
+                    match.group(3) == "true"
+                self.registry[name] = (
+                    self._CLUSTER_HTTP_PORT if has_http else 0,
+                    self._CLUSTER_GRPC_PORT if has_grpc else 0,
+                )
             if not self.registry:
                 self.registry_error = (f"{self._rel(self.registry_path)} parsed to zero cluster "
                                        "entries; the generated table's shape has changed")
@@ -733,11 +757,11 @@ def _off_constant(service: Service) -> list[str]:
 
 
 def k8s_ports_are_constants(ws: Workspace) -> Finding:
-    """SP-0006. Deferred: reported, never enforced. See the catalog for why."""
+    """SP-0006. Enforced since the fleet migration; it now catches a service moving back off."""
     if not ws.services:
         return Finding(evidence="INDETERMINATE: no infra services tree in the workspace",
                        indeterminate=True)
-    violations, migrated, total = [], 0, 0
+    violations, on_constants, total = [], 0, 0
     for service in ws.services.values():
         if service.name not in ws.registry or not service.published:
             continue
@@ -747,11 +771,11 @@ def k8s_ports_are_constants(ws: Workspace) -> Finding:
             violations.append(f"{service.name}: {'; '.join(off[:4])}"
                               + (f" (+{len(off) - 4} more)" if len(off) > 4 else ""))
         else:
-            migrated += 1
+            on_constants += 1
     if violations:
         return Finding(len(violations),
-                       f"{migrated} of {total} addressable service(s) are on the §4.1 "
-                       f"constants; {len(violations)} still to migrate", capped(violations))
+                       f"{on_constants} of {total} addressable service(s) are on the §4.1 "
+                       f"constants; {len(violations)} off them", capped(violations))
     return Finding(evidence=f"all {total} addressable service(s) are on the §4.1 constants, "
                             "in every place their ports are written")
 

@@ -184,21 +184,23 @@ controls:
     title: Kubernetes ports are the RFC-0007 §4.1 constants
     owner: platform-architecture
     scope: workspace
-    status: deferred
+    status: active
     severity: critical
     policy: >-
       Every service's Kubernetes `spec.ports[].port`, `targetPort`, `containerPort` and probe
       ports MUST be 8080 (HTTP), 50051 (gRPC) and 9464 (metrics).
     rationale: >-
-      This is RFC-0007 §4.1's actual requirement and the migration's destination. It is
-      recorded here rather than omitted so the gap between the standard and the fleet is
-      visible in the same place the enforced controls are, instead of being a thing a reader
-      has to notice is missing - which is how §10 came to list four checks with three of them
-      unbuilt.
+      This is RFC-0007 §4.1's actual requirement, and as of the fleet migration it is also
+      what every addressable service does. It was deferred while it described a destination
+      rather than a state, because a lane that cannot pass is a lane that gets turned off.
+      It is enforced now for the opposite reason: with all 39 services on the constants, the
+      only thing this control can catch is a service moving back off them, and a single
+      service doing that is the whole failure mode - a Service publishing a port its callers
+      do not dial, which Kubernetes reports as a rollout that stalls rather than as an error.
     remediation: >-
-      Migrate the service per docs/core-docs/playbooks/service-port-migration.md. Do not
-      activate this control before that playbook's post-procedure: it fails on 39 of 40
-      services today, and a lane that cannot pass is a lane that gets turned off.
+      Put the service back on 8080/50051/9464. A new service should be born on them: nothing
+      needs allocating, because the constants are the same for every service and only its
+      local-development ports in platform-shared-go's localports.yaml must be unique.
     detector: k8s_ports_are_constants
     refs: [RFC-0007, ADR-0010]
 
