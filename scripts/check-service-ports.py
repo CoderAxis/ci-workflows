@@ -154,14 +154,19 @@ PORT_ENV_NAMES = ("PORT", "HTTP_PORT", "GRPC_PORT", "METRICS_PORT")
 # PORT=50051 in a service whose Service still publishes http=4015 is a set member, so it passed,
 # and it is a Pod serving HTTP where the gRPC listener is expected.
 #
-# HTTP_PORT is here because a control that reads only the variable most services use tells you
-# nothing about the one that does not. platform-identity-service reads HTTP_PORT; the migration
-# rewrote PORT across the fleet, left HTTP_PORT at 4050, and this file agreed that everything
-# lined up — containerPort, targetPort and both probes had all moved to 8080 and did match each
-# other. The process kept binding 4050, the probes checked 8080, and platform login crash-looped
-# in three environments behind a green lane. The lesson is not "add HTTP_PORT" but that the
-# variable the process actually reads is the only one worth comparing, so any new spelling of it
-# belongs in this tuple on the day it appears.
+# HTTP_PORT is listed as a spelling being retired, not as an accepted synonym.
+#
+# RFC-0007 §3 names this variable PORT and SYNC-019 withdrew HTTP_PORT. One service still read
+# the old name, and that alone was the whole defect: the fleet-wide migration rewrote PORT
+# everywhere and did not touch a variable spelled differently, so platform-identity-service kept
+# binding 4050 while its containerPort, Service and both probes moved to 8080 — and this file
+# said the service was internally consistent, because the four things it compared did agree with
+# each other. Platform login crash-looped in three environments behind a green lane.
+#
+# It is read here so that while both names are set during the rename, neither can drift from the
+# other or from the Service. SP-0012 is what actually ends it, by failing any manifest that still
+# carries a retired spelling; when the last one is gone this entry goes with it.
+RETIRED_PORT_ENV_NAMES = {"HTTP_PORT": "PORT"}
 PORT_ENV_CONCERN = {"PORT": "http", "HTTP_PORT": "http",
                     "GRPC_PORT": "grpc", "METRICS_PORT": "metrics"}
 PPROF_ENV_NAME = "PPROF_PORT"
@@ -1007,8 +1012,49 @@ def resolvers_pin_a_constants_registry(ws: Workspace) -> Finding:
                             "so they resolve to the §4.1 constants")
 
 
+def port_env_has_one_name(ws: Workspace) -> Finding:
+    """SP-0012. One name for one thing.
+
+    RFC-0007 §3 names the HTTP bind variable PORT, and SYNC-019 withdrew HTTP_PORT. Every
+    control above compares a port against another port; this one compares a name against the
+    contract, because the fleet-wide migration was carried out by rewriting PORT and a second
+    spelling is invisible to that operation by construction.
+
+    That is not hypothetical. One service of thirty-nine read HTTP_PORT. The migration rewrote
+    PORT in 159 overlays, did not touch that variable, and platform-identity-service went on
+    binding 4050 while its containerPort, its Service and both its probes moved to 8080 --
+    crash-looping platform login in dev, staging and preprod at once. SP-0001 was green
+    throughout, correctly: the four declarations it compares did agree with each other. The
+    value that decides where the process binds was simply not among them.
+
+    So a synonym is the finding, not the drift a synonym eventually causes. Two names for one
+    thing cannot be kept in agreement by inspection -- every future change has to remember both,
+    and the one that gets remembered is the one everybody else uses.
+    """
+    if not ws.services:
+        return Finding(evidence="INDETERMINATE: no infra services tree in the workspace",
+                       indeterminate=True)
+    violations = []
+    for service in ws.services.values():
+        for env, facts in sorted(service.overlays.items()):
+            for var in sorted(facts["env_ports"]):
+                if var in RETIRED_PORT_ENV_NAMES:
+                    violations.append(
+                        f"{service.name}/{env}: sets {var}, a retired spelling of "
+                        f"{RETIRED_PORT_ENV_NAMES[var]} (RFC-0007 §3, SYNC-019). A fleet-wide "
+                        f"change to {RETIRED_PORT_ENV_NAMES[var]} does not reach this variable "
+                        f"({facts['path']})")
+    if violations:
+        return Finding(len(violations),
+                       f"{len(violations)} manifest(s) setting a retired port variable name",
+                       capped(violations))
+    return Finding(evidence="every manifest names the HTTP bind port PORT, so a change to it "
+                            "reaches the whole fleet")
+
+
 DETECTORS = {
     "k8s_ports_internally_consistent": k8s_ports_internally_consistent,
+    "port_env_has_one_name": port_env_has_one_name,
     "k8s_ports_match_registry": k8s_ports_match_registry,
     "no_reserved_ports": no_reserved_ports,
     "dockerfile_ports_are_own": dockerfile_ports_are_own,

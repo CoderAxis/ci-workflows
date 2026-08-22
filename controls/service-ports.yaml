@@ -279,6 +279,34 @@ controls:
     detector: metrics_are_scraped_by_port_name
     refs: [RFC-0007]
 
+  - id: SP-0012
+    title: The HTTP bind port has one variable name across the fleet
+    owner: platform-architecture
+    scope: workspace
+    status: active
+    severity: critical
+    policy: >-
+      A Deployment MUST name the HTTP bind port `PORT`. `HTTP_PORT` is a retired spelling
+      (RFC-0007 §3, SYNC-019) and MUST NOT appear.
+    rationale: >-
+      Every other control here compares one port against another. This one compares a name,
+      because a second name is invisible to any fleet-wide change by construction. One service
+      of thirty-nine read HTTP_PORT; the port migration rewrote PORT across 159 overlays, never
+      touched that variable, and platform-identity-service kept binding 4050 while its
+      containerPort, its Service and both its probes moved to 8080 - crash-looping platform
+      login in dev, staging and preprod simultaneously. SP-0001 stayed green the whole time, and
+      correctly so: the four declarations it compares did agree with each other. The value that
+      decides where the process actually binds was not one of them. Two names for one thing
+      cannot be held in agreement by inspection, because every future change has to remember
+      both and will remember the one everyone else uses.
+    remediation: >-
+      Rename the variable to PORT in the service that reads it and in every overlay that sets
+      it. During the rename both may be set to the same value so that neither the old image nor
+      the new one binds the wrong port; the baseline holds that transitional pair and must fall
+      to zero once the image reading PORT is promoted everywhere.
+    detector: port_env_has_one_name
+    refs: [RFC-0007, ADR-0010]
+
   - id: SP-0011
     title: A service that resolves by name pins a registry that answers with the constants
     owner: platform-architecture
