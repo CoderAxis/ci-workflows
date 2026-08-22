@@ -279,6 +279,35 @@ controls:
     detector: metrics_are_scraped_by_port_name
     refs: [RFC-0007]
 
+  - id: SP-0011
+    title: A service that resolves by name pins a registry that answers with the constants
+    owner: platform-architecture
+    scope: workspace
+    status: active
+    severity: critical
+    policy: >-
+      A service whose code calls `servicediscovery` MUST require platform-shared-go v1.48.0 or
+      later, the first release whose registry answers cluster resolution with the RFC-0007 §4.1
+      constants rather than a generated per-service port.
+    rationale: >-
+      Every other control in this file compares two written numbers. This one is about a number
+      nobody wrote. A service that resolves by name carries no address in its manifest, its
+      Dockerfile or its contract - that is the point of resolving - so the port it actually dials
+      comes from whichever registry snapshot its go.mod pinned. A stale pin is therefore invisible
+      to all ten of the other controls, and it fails in the worst possible way: the repository is
+      correct, the manifests are correct, the lane is green, and the running process dials a port
+      nothing publishes. At the fleet migration edge-gateway was nine minor versions back and
+      would have resolved auth-service to :4002 and voice-gateway to :4020, taking every upstream
+      down. It was caught by the pre-push guard compiling the way CI does, not by any port
+      control, and only because a gitignored go.work had been hiding it - the local suite built
+      against the library working copy and passed, while the image is built from the pin.
+    remediation: >-
+      `go get github.com/coderaxis/platform-shared-go@v1.48.0 && go mod tidy`, then rebuild. Verify
+      with GOWORK=off, because a go.work in the repository will resolve to a local checkout and
+      tell you nothing about the pin the image is built from.
+    detector: resolvers_pin_a_constants_registry
+    refs: [RFC-0007, ADR-0010]
+
   - id: SP-0007
     title: Manifests do not supply an upstream's address (advisory cross-check only)
     owner: platform-architecture

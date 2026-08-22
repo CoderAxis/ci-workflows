@@ -920,6 +920,83 @@ def manifest_address_vars(ws: Workspace) -> Finding:
     return Finding(evidence="no manifest supplies an upstream address")
 
 
+# The first platform-shared-go release whose registry answers cluster resolution with the
+# RFC-0007 §4.1 constants instead of a generated per-service port.
+CONSTANTS_REGISTRY_MIN = (1, 48, 0)
+
+SHARED_GO_REQUIRE = re.compile(
+    r"^\s*(?:require\s+)?github\.com/coderaxis/platform-shared-go\s+v(\d+)\.(\d+)\.(\d+)",
+    re.MULTILINE)
+
+
+def _pinned_shared_go(gomod: Path) -> tuple[int, int, int] | None:
+    match = SHARED_GO_REQUIRE.search(gomod.read_text(encoding="utf-8", errors="replace"))
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3))) if match else None
+
+
+def _resolves_by_name(repo: Path) -> bool:
+    """Whether this repo asks the registry where a service lives, as opposed to being told."""
+    for path in repo.rglob("*.go"):
+        if path.name.endswith("_test.go") or "vendor" in path.parts:
+            continue
+        try:
+            if "servicediscovery." in path.read_text(encoding="utf-8", errors="replace"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def resolvers_pin_a_constants_registry(ws: Workspace) -> Finding:
+    """SP-0011. The drift no manifest can show you.
+
+    Every other control here reads a number someone wrote down, so it can compare two
+    written things. This one is about a number nobody wrote: a service that resolves by
+    name has no address in its manifest, its Dockerfile or its contract, and gets one at
+    runtime from whichever registry snapshot its go.mod pinned. So the port it actually
+    dials is a property of a dependency version, and a stale pin is invisible to every
+    check that reads configuration -- including all nine above.
+
+    That is not a theoretical gap. At the fleet migration edge-gateway was nine minor
+    versions back, on a tag whose registry still held the pre-migration allocation. The
+    manifests were correct, SP-0001 through SP-0010 were green, and the gateway would have
+    resolved auth-service to :4002 and voice-gateway to :4020 -- ports no Service publishes
+    any more. Every upstream unreachable, from a repository in which nothing was wrong.
+
+    It was caught by the pre-push guard building the way CI does rather than by any port
+    control, and only because a gitignored go.work had been masking it locally: the local
+    suite compiled against the working copy of the library and passed, while the image is
+    built from the pin. A green local run says nothing here, which is precisely why this
+    belongs in CI.
+    """
+    if not ws.repos_by_service:
+        return Finding(evidence="INDETERMINATE: no service repositories in the workspace",
+                       indeterminate=True)
+    minimum = "v" + ".".join(map(str, CONSTANTS_REGISTRY_MIN))
+    violations, resolvers = [], 0
+    for name, repo in sorted(ws.repos_by_service.items()):
+        gomod = repo / "go.mod"
+        if not gomod.is_file() or not _resolves_by_name(repo):
+            continue
+        resolvers += 1
+        pinned = _pinned_shared_go(gomod)
+        if pinned is None:
+            violations.append(f"{name}: resolves services by name but pins no "
+                              "platform-shared-go, so it has no registry to resolve against")
+        elif pinned < CONSTANTS_REGISTRY_MIN:
+            violations.append(
+                f"{name}: pins platform-shared-go v{'.'.join(map(str, pinned))}, whose registry "
+                f"answers with pre-migration per-service ports that no Service publishes; "
+                f"needs {minimum} or later")
+    if violations:
+        return Finding(len(violations),
+                       f"{resolvers - len(violations)} of {resolvers} name-resolving service(s) "
+                       f"pin a registry that answers with the §4.1 constants",
+                       capped(violations))
+    return Finding(evidence=f"all {resolvers} name-resolving service(s) pin {minimum} or later, "
+                            "so they resolve to the §4.1 constants")
+
+
 DETECTORS = {
     "k8s_ports_internally_consistent": k8s_ports_internally_consistent,
     "k8s_ports_match_registry": k8s_ports_match_registry,
@@ -931,6 +1008,7 @@ DETECTORS = {
     "pprof_is_the_constant_and_stays_private": pprof_is_the_constant_and_stays_private,
     "local_allocation_is_per_service": local_allocation_is_per_service,
     "metrics_are_scraped_by_port_name": metrics_are_scraped_by_port_name,
+    "resolvers_pin_a_constants_registry": resolvers_pin_a_constants_registry,
 }
 
 
