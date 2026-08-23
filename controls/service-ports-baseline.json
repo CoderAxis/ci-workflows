@@ -1,6 +1,6 @@
 {
   "_comment": "Frozen RFC-0007 §10 port debt. The gate fails if any count RISES; lower it by fixing violations, then re-run --write-baseline. Every entry must carry a reason and a phase in the migration playbook.",
-  "frozen_on": "2026-08-22",
+  "frozen_on": "2026-08-23",
   "playbook": "docs/core-docs/playbooks/service-port-migration.md",
   "reasons": {
     "SP-0007": {
@@ -8,12 +8,6 @@
       "target": 0,
       "due": "per service, before that service enters Phase 2",
       "why_frozen_and_not_fixed_here": "SP-0007 is an ADVISORY cross-check and is never the gate for this number. The authoritative ratchet is inboxxhq-infra scripts/check-service-addressing.py, which froze the same 321 and is already shrinking it; ARCH-0010 in inboxxhq-architecture-check gates the application-code half at Error severity. The number is recorded here only so a reader of the port controls sees it, and it is expected to track the infra ratchet exactly. If the two ever disagree, one of the three patterns has drifted and that is itself the finding."
-    },
-    "SP-0008": {
-      "count_on_2026-08-21": 8,
-      "target": 0,
-      "due": "with each service's own atomic port migration: configuration-service in wave B, org-service in wave F",
-      "why_frozen_and_not_fixed_here": "Two services set a PPROF_PORT that is not the RFC-0007 §4.1 constant 6060 -- configuration-service on 6095 and org-service on 6063 -- across all four overlays each. Neither is reachable: both set PPROF_ENABLED=false, neither declares a containerPort for it, and no Service publishes it, so this is a wrong number in a variable nothing currently reads. It is frozen rather than fixed on its own because editing a deployment's pod template rolls the service, and RFC-0007 §11 requires a service's port change to be one atomic commit and nothing else -- a separate pprof rollout would be a second production change per service for a value with no runtime effect. Each entry clears when that service migrates, which is the same commit that has to touch these files anyway."
     },
     "SP-0012": {
       "count_on_2026-08-22": 4,
@@ -23,8 +17,7 @@
     }
   },
   "controls": {
-    "SP-0008": 8,
-    "SP-0012": 4,
+    "SP-0012": 2,
     "SP-0007": 298
   }
 }
