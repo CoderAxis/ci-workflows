@@ -1,0 +1,88 @@
+name: Frontend SDK contract
+
+# Consumer pin against inboxxhq-api-contracts. Producer CI (openapi-contract.yaml)
+# already proves a BFF published a spec. This workflow proves a browser app that
+# generates an HTTP SDK is pinned to one of those published versions and that the
+# committed snapshot is that document, byte for byte. Runtime /api/docs-json is
+# not a contract source (ADR-0067).
+#
+# Thin caller, same shape as seed-contract-check.yaml / workflow-lint.yaml:
+#
+#   jobs:
+#     sdk-contract:
+#       permissions: { contents: read, id-token: write }
+#       uses: coderaxis/ci-workflows/.github/workflows/frontend-sdk-contract.yaml@v1
+#
+# id-token is required to mint a read token for the (private) contract registry.
+# The caller forwards no secrets.
+
+on:
+  workflow_call:
+    inputs:
+      actions_ref:
+        description: "Ref of coderaxis/ci-workflows providing the checker (defaults to the moving major tag)."
+        required: false
+        type: string
+        default: v1
+      registry_owner:
+        description: "Account that owns the published contract registry."
+        required: false
+        type: string
+        default: InboxxHQ-CoderAxis
+      registry_repository:
+        description: "Repository name of the published contract registry."
+        required: false
+        type: string
+        default: inboxxhq-api-contracts
+
+permissions:
+  contents: read
+
+jobs:
+  sdk-contract:
+    name: Frontend SDK contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout the frontend app
+        uses: actions/checkout@v4
+
+      - name: Checkout the central checker
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/ci-workflows
+          ref: ${{ inputs.actions_ref }}
+          path: .coderaxis-ci
+
+      - name: Mint a read token for the contract registry
+        id: registry_token
+        uses: coderaxis/ci-workflows/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ inputs.registry_owner }}
+          repositories: ${{ inputs.registry_repository }}
+
+      - name: Checkout the published contract registry
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.registry_owner }}/${{ inputs.registry_repository }}
+          token: ${{ steps.registry_token.outputs.token }}
+          path: .contract-registry
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Enforce frontend SDK contract (ADR-0048, ADR-0067, ADR-0090)
+        run: >
+          python3 .coderaxis-ci/scripts/check-frontend-sdk-contract.py
+          --root .
+          --registry .contract-registry
+          --controls .coderaxis-ci/controls/frontend-sdk-contract.yaml
