@@ -1174,6 +1174,29 @@ jobs:
           print(f"{len(cases)} floor-comparison cases hold")
           PY
 
+  # Consumer half of the API-contract gate. Producer CI already proves a BFF published a spec;
+  # this checker proves a browser app that generates an HTTP SDK is pinned to one of those
+  # published versions. Same two-direction obligation as the catalogs above: a clean fixture
+  # must produce zero findings, and a dirty tree must still fire FE-SDK-0001..0004.
+  frontend-sdk-contract:
+    name: Frontend SDK contract - catalog + detector self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Control catalog loads and detectors discriminate
+        run: python3 scripts/test_frontend_sdk_contract.py
+
   # ---------------------------------------------------------------------------
   # The gateway security baseline gate (GW-0001..GW-0008) judges every deployable in the fleet, so
   # it earns the same self-check the API-contract gate above gets: the catalog, the detector and

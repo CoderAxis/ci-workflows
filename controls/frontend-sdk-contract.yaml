@@ -1,0 +1,90 @@
+# Frontend SDK contract (consumer pin against the published registry).
+#
+# Producer repos (services, BFFs, gateways) are gated by controls/api-contract.yaml:
+# they must *publish* docs/openapi.json. This catalog is the matching consumer gate:
+# a browser app that generates an HTTP SDK must pin a *published version* from
+# inboxxhq-api-contracts and the committed spec file must be that document, byte for
+# byte. Runtime /api/docs-json is not a contract source (ADR-0067).
+#
+# Control IDs (FE-SDK-NNNN) are stable. critical/major fail CI.
+
+version: 1
+domain: frontend-sdk-contract
+policy_ssot:
+  - ADR-0048
+  - ADR-0067
+  - ADR-0090
+
+controls:
+  - id: FE-SDK-0001
+    title: An app that generates an HTTP SDK pins a published contract version
+    owner: platform-architecture
+    scope: lock
+    status: active
+    severity: critical
+    policy: >-
+      If package.json defines a generate:api script, the repository MUST commit
+      api-contract.lock.json naming registry service, version, spec_file,
+      spec_digest (sha256:<hex>), and generated_dir.
+    rationale: >-
+      Without a pin, regeneration silently tracks whatever a local pod served last,
+      and CI cannot say which published contract the committed SDK claims to implement.
+    remediation: >-
+      Add api-contract.lock.json pointing at inboxxhq-api-contracts/<service>/vX.Y.Z.json
+      and copy that file to spec_file. Bump the pin in a dedicated PR when adopting a
+      new published version.
+    detector: lockfile_present
+
+  - id: FE-SDK-0002
+    title: The committed OpenAPI snapshot is the pinned published document
+    owner: platform-architecture
+    scope: spec
+    status: active
+    severity: critical
+    policy: >-
+      sha256(spec_file) MUST equal lock.spec_digest, and MUST equal
+      sha256(registry/<service>/<version>.json).
+    rationale: >-
+      A lock that names v6.0.0 while spec_file is a live-pod dump is how the frontend
+      and the registry tell different stories about the same API. The digest is the
+      whole guarantee; pretty-printed copies that differ by whitespace still fail.
+    remediation: >-
+      Copy contracts/inboxxhq-api-contracts/<service>/<version>.json over spec_file,
+      or run pnpm generate:api which performs that copy from the lock.
+    detector: spec_matches_published_pin
+
+  - id: FE-SDK-0003
+    title: SDK generation does not fetch a runtime docs-json endpoint
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: critical
+    policy: >-
+      scripts/generate-api-sdk.js MUST NOT default to, or reference, an /api/docs-json
+      URL. Generation reads the lock and the registry.
+    rationale: >-
+      ADR-0067 removed runtime docs as a contract source. A generator that still curls
+      localhost:4000/api/docs-json reintroduces the side channel the registry exists
+      to close.
+    remediation: >-
+      Generate from api-contract.lock.json via frontend-core generate-from-lock.js.
+    detector: no_runtime_docs_json_generator
+
+  - id: FE-SDK-0004
+    title: The committed generated SDK directory exists
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    policy: >-
+      lock.generated_dir MUST exist and contain at least one .ts file. This control
+      does not regenerate the tree; FE-SDK-0002 proves the input document. Stale
+      generated models relative to that document are caught by pnpm generate:api --check.
+    rationale: >-
+      A pin without a generated client is a lockfile pointing at nothing the app can
+      import. Existence is the cheap half; byte-drift of the generated tree is the
+      local --check half, because OpenAPI Generator needs Java and is not duplicated
+      inside this Python gate.
+    remediation: >-
+      Run pnpm generate:api and commit generated_dir.
+    detector: generated_dir_present
