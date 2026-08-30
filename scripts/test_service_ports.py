@@ -108,6 +108,29 @@ def monitor_yaml(name: str, port):
     })
 
 
+LOCALPORTS = yaml.safe_dump({
+    "version": 1,
+    "services": {
+        "alpha-service": {"http": 4002, "grpc": 50060, "metrics": 9102},
+        "beta-service": {"http": 4003, "grpc": 50061, "metrics": 9103},
+        "gamma-gateway": {"http": 4100, "grpc": 0, "metrics": 9150},
+    },
+})
+
+# Routing config: resources to NAMES. No port key anywhere, which is the invariant SP-0016
+# holds. The gateway is a third service so the duplicate-name control has something real to
+# count, and so SP-0017 has both a Kubernetes and a local environment to judge.
+GATEWAY_REGISTRY = yaml.safe_dump({
+    "service_registry": {
+        "version": "1.0",
+        "domain_services": [
+            {"name": "inboxxhq-alpha-service", "resources": ["alpha"],
+             "health_path": "/health", "docs_path": "/swagger/doc.json"},
+        ],
+    },
+})
+
+
 BASE_TREE = {
     "shared/platform-shared-go/platform/servicediscovery/ports.generated.go": REGISTRY,
     "infra/inboxxhq-infra/services/alpha-service/base/service.yaml":
@@ -132,6 +155,18 @@ BASE_TREE = {
     "services/beta/inboxxhq-beta-service/Dockerfile":
         "FROM alpine:3.24\nEXPOSE 8080\n"
         "HEALTHCHECK CMD wget -q http://localhost:8080/health/live\nCMD [\"/app/beta\"]\n",
+    # The SOURCE of the §4.2 local allocation. The values are deliberately NOT the §4.1
+    # constants: a fixture whose "local" ports were 8080/50051 would make SP-0013 pass by
+    # agreeing with the defect it exists to catch.
+    "shared/platform-shared-go/platform/servicediscovery/localports.yaml": LOCALPORTS,
+    "services/alpha/inboxxhq-alpha-service/env.example":
+        "ENVIRONMENT=local\nPORT=4002\nGRPC_PORT=50060\nMETRICS_PORT=9102\n",
+    "gateways/inboxxhq-gamma-gateway/config/base/service-registry.yaml":
+        GATEWAY_REGISTRY,
+    "gateways/inboxxhq-gamma-gateway/config/environments/prod.yaml":
+        "environment: prod\nserver:\n  port: 8080\n  host: \"0.0.0.0\"\n",
+    "gateways/inboxxhq-gamma-gateway/config/environments/local.yaml":
+        "environment: local\nserver:\n  port: 4100\n  host: \"0.0.0.0\"\n",
 }
 
 
@@ -163,8 +198,9 @@ def run(overrides: dict[str, str] | None = None, drop: tuple[str, ...] = ()):
 ws = run()
 expect(len(ws.services) == 2, f"conformant: expected 2 services, got {len(ws.services)}")
 expect(len(ws.registry) == 2, f"conformant: expected 2 registry entries, got {len(ws.registry)}")
-expect(len(ws.repos_by_service) == 2,
-       f"conformant: expected 2 repos, got {sorted(ws.repos_by_service)}")
+expect(len(ws.repos_by_service) == 3,
+       f"conformant: expected 3 repos (two services and a gateway), got "
+       f"{sorted(ws.repos_by_service)}")
 
 for name, detector in (
     ("SP-0001", m.k8s_ports_internally_consistent),
@@ -176,6 +212,13 @@ for name, detector in (
     ("SP-0008", m.pprof_is_the_constant_and_stays_private),
     ("SP-0009", m.local_allocation_is_per_service),
     ("SP-0010", m.metrics_are_scraped_by_port_name),
+    ("SP-0013", m.local_allocation_source_is_valid),
+    ("SP-0014", m.env_example_matches_local_allocation),
+    ("SP-0015", m.contracts_hold_no_foreign_ports),
+    ("SP-0016", m.routing_config_holds_no_ports),
+    ("SP-0017", m.gateway_bind_port_is_right_for_its_environment),
+    ("SP-0018", m.one_repository_per_service),
+    ("SP-0019", m.service_repos_hold_no_manifests),
 ):
     finding = detector(ws)
     expect(finding.count == 0 and not finding.indeterminate,
@@ -505,6 +548,131 @@ ws = run({"infra/inboxxhq-infra/services/alpha-service/overlays/dev/configmap-pa
           "  - name: CHECKOUT_SUCCESS_URL\n    value: https://example.test\n"})
 expect(m.manifest_address_vars(ws).count == 0,
        "SP-0007: transport toggles, the Kubernetes API host and external URLs are not addresses")
+
+
+# --- SP-0013..SP-0019: the defects found on 2026-08-30 ---------------------------------------
+#
+# Each fixture below is the real defect, reduced. A control whose test invents a defect nobody
+# ever committed proves the detector runs; these prove it catches the thing that got through.
+
+# SP-0013: demo-service sat in the allocation as the CLUSTER constants, captured by
+# regenerating the local table from manifests that had already migrated.
+ws = run({"shared/platform-shared-go/platform/servicediscovery/localports.yaml":
+          yaml.safe_dump({"version": 1, "services": {
+              "alpha-service": {"http": 8080, "grpc": 50051, "metrics": 9464},
+              "beta-service": {"http": 4003, "grpc": 50061, "metrics": 9103},
+              "gamma-gateway": {"http": 4100, "grpc": 0, "metrics": 9150}}})})
+finding = m.local_allocation_source_is_valid(ws)
+expect(finding.count >= 1 and "CLUSTER constant" in " ".join(finding.details),
+       f"SP-0013: a local allocation holding the §4.1 constants must be caught; got {finding.details}")
+
+# SP-0013: two services sharing a local port -- the collision §4.2 exists to prevent.
+ws = run({"shared/platform-shared-go/platform/servicediscovery/localports.yaml":
+          yaml.safe_dump({"version": 1, "services": {
+              "alpha-service": {"http": 4002, "grpc": 50060, "metrics": 9102},
+              "beta-service": {"http": 4003, "grpc": 50061, "metrics": 9102},
+              "gamma-gateway": {"http": 4100, "grpc": 0, "metrics": 9150}}})})
+finding = m.local_allocation_source_is_valid(ws)
+expect(finding.count >= 1 and "already held by" in " ".join(finding.details),
+       f"SP-0013: a duplicate local port must be caught; got {finding.details}")
+
+# SP-0013: a zero means "no listener", not a collision, however many services have one.
+ws = run({"shared/platform-shared-go/platform/servicediscovery/localports.yaml":
+          yaml.safe_dump({"version": 1, "services": {
+              "alpha-service": {"http": 4002, "grpc": 0, "metrics": 9102},
+              "beta-service": {"http": 4003, "grpc": 0, "metrics": 9103},
+              "gamma-gateway": {"http": 4100, "grpc": 0, "metrics": 9150}}}),
+          "shared/platform-shared-go/platform/servicediscovery/ports.generated.go":
+          registry_go(local={"alpha-service": (4002, 0), "beta-service": (4003, 0)})})
+finding = m.local_allocation_source_is_valid(ws)
+expect(finding.count == 0,
+       f"SP-0013: 0 marks an absent listener and must never count as a collision; "
+       f"got {finding.details}")
+
+# SP-0014: dashboard-service's env.example carried the cluster constants.
+ws = run({"services/alpha/inboxxhq-alpha-service/env.example":
+          "ENVIRONMENT=local\nPORT=8080\nGRPC_PORT=50051\nMETRICS_PORT=9464\n"})
+finding = m.env_example_matches_local_allocation(ws)
+expect(finding.count == 3 and "CLUSTER constant" in " ".join(finding.details),
+       f"SP-0014: env.example on the constants must be caught, and named as such; got {finding.details}")
+
+# SP-0015: call-routing-service listed its upstreams' gRPC ports, two schemes out of date.
+ws = run({"services/alpha/inboxxhq-alpha-service/service.contract.yaml":
+          "service:\n  name: alpha-service\nports:\n  http: 8080\n  grpc: 50051\n"
+          "dependencies:\n  services:\n    - name: beta-service\n      type: grpc\n"
+          "      port: 50011\n"})
+finding = m.contracts_hold_no_foreign_ports(ws)
+expect(finding.count == 1 and "upstream" in " ".join(finding.details),
+       f"SP-0015: an upstream port in a contract must be caught; got {finding.details}")
+
+# SP-0015: ...and the same file's second answer about its own metrics port.
+ws = run({"services/alpha/inboxxhq-alpha-service/service.contract.yaml":
+          "service:\n  name: alpha-service\nports:\n  http: 8080\n  grpc: 50051\n"
+          "  metrics: 9464\nobservability:\n  metrics:\n    port: 9121\n"
+          "    path: /metrics\n"})
+finding = m.contracts_hold_no_foreign_ports(ws)
+expect(finding.count == 1 and "second answer" in " ".join(finding.details),
+       f"SP-0015: a contradicting metrics port must be caught; got {finding.details}")
+
+# SP-0016: edge-gateway's routing config held 99 keys of the withdrawn allocation.
+ws = run({"gateways/inboxxhq-gamma-gateway/config/base/service-registry.yaml":
+          yaml.safe_dump({"service_registry": {"domain_services": [
+              {"name": "inboxxhq-alpha-service", "port": 4002, "grpc_port": 50060,
+               "resources": ["alpha"]}]}})})
+finding = m.routing_config_holds_no_ports(ws)
+expect(finding.count == 2, f"SP-0016: both port keys must be caught; got {finding.details}")
+
+# SP-0017: prod committed `server.port: 80`, the ingress's own reserved port.
+ws = run({"gateways/inboxxhq-gamma-gateway/config/environments/prod.yaml":
+          "environment: prod\nserver:\n  port: 80\n"})
+finding = m.gateway_bind_port_is_right_for_its_environment(ws)
+expect(finding.count == 1 and "RESERVED" in " ".join(finding.details),
+       f"SP-0017: a reserved bind port must be caught and named reserved; got {finding.details}")
+
+# SP-0017: dev committed 4000 -- a per-service number in a Kubernetes environment.
+ws = run({"gateways/inboxxhq-gamma-gateway/config/environments/dev.yaml":
+          "environment: dev\nserver:\n  port: 4100\n"})
+finding = m.gateway_bind_port_is_right_for_its_environment(ws)
+expect(finding.count == 1 and "8080" in " ".join(finding.details),
+       f"SP-0017: a per-service port in a cluster environment must be caught; got {finding.details}")
+
+# SP-0017: local is NOT a fifth cluster. A workstation on its own port is correct, and a
+# control that fails it here is the §12.1 over-correction rebuilt in CI.
+ws = run()
+expect(m.gateway_bind_port_is_right_for_its_environment(ws).count == 0,
+       "SP-0017: local.yaml on the §4.2 port must pass; treating it as a cluster is the "
+       "over-correction §12.1 records")
+ws = run({"gateways/inboxxhq-gamma-gateway/config/environments/local.yaml":
+          "environment: local\nserver:\n  port: 4999\n"})
+expect(m.gateway_bind_port_is_right_for_its_environment(ws).count == 1,
+       "SP-0017: local.yaml disagreeing with the allocation must still be caught")
+
+# SP-0018: a stale second checkout claiming the same service name takes its own Dockerfile
+# out of SP-0004 -- exempt from the check precisely because it is stale.
+ws = run({"services/alpha/inboxxhq-alpha-service-ctx/service.contract.yaml":
+          "service:\n  name: alpha-service\n  ports:\n    http: 8080\n",
+          "services/alpha/inboxxhq-alpha-service-ctx/Dockerfile":
+          "FROM alpine:3.24\nEXPOSE 4009\n"})
+expect(m.dockerfile_ports_are_own(ws).count == 0,
+       "SP-0018 premise: the stale copy's Dockerfile is invisible to SP-0004, which is why "
+       "SP-0018 has to exist")
+finding = m.one_repository_per_service(ws)
+expect(finding.count == 1 and "alpha-service" in " ".join(finding.details),
+       f"SP-0018: two directories claiming one service name must be caught; got {finding.details}")
+
+# SP-0019: observability-service carried its own manifests, on pre-migration ports.
+ws = run({"services/alpha/inboxxhq-alpha-service/k8s/base/service.yaml":
+          service_yaml("alpha-service", 4032, 50092, 9133)})
+finding = m.service_repos_hold_no_manifests(ws)
+expect(finding.count == 1 and "4032" in " ".join(finding.details),
+       f"SP-0019: in-repo manifests must be caught, with their stale ports named; got {finding.details}")
+
+# SP-0013/SP-0014 must be honestly INDETERMINATE without a source, never a silent pass.
+ws = run(drop=("shared/platform-shared-go/platform/servicediscovery/localports.yaml",))
+expect(m.local_allocation_source_is_valid(ws).count == 1,
+       "SP-0013: a missing allocation source is a finding, not a pass")
+expect(m.env_example_matches_local_allocation(ws).indeterminate,
+       "SP-0014: without the allocation source the control must report indeterminate")
 
 
 # --- catalog wiring ---------------------------------------------------------------------------
