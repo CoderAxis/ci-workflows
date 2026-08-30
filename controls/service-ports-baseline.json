@@ -1,23 +1,18 @@
 {
-  "_comment": "Frozen RFC-0007 §10 port debt. The gate fails if any count RISES; lower it by fixing violations, then re-run --write-baseline. Every entry must carry a reason and a phase in the migration playbook.",
-  "frozen_on": "2026-08-23",
+  "_comment": "Frozen RFC-0007 \u00a710 port debt. The gate fails if any count RISES; lower it by fixing violations, then re-run --write-baseline. Every entry must carry a reason and a phase in the migration playbook.",
+  "frozen_on": "2026-08-30",
   "playbook": "docs/core-docs/playbooks/service-port-migration.md",
   "reasons": {
     "SP-0007": {
       "count_on_2026-08-21": 321,
       "target": 0,
       "due": "per service, before that service enters Phase 2",
-      "why_frozen_and_not_fixed_here": "SP-0007 is an ADVISORY cross-check and is never the gate for this number. The authoritative ratchet is inboxxhq-infra scripts/check-service-addressing.py, which froze the same 321 and is already shrinking it; ARCH-0010 in inboxxhq-architecture-check gates the application-code half at Error severity. The number is recorded here only so a reader of the port controls sees it, and it is expected to track the infra ratchet exactly. If the two ever disagree, one of the three patterns has drifted and that is itself the finding."
-    },
-    "SP-0012": {
-      "count_on_2026-08-22": 4,
-      "target": 0,
-      "due": "as soon as the platform-identity-service image reading PORT is promoted to all four environments",
-      "why_frozen_and_not_fixed_here": "These four are one service's four overlays during a rename, and they are the safe half of it. platform-identity-service was the only service in the fleet reading HTTP_PORT rather than PORT, which is why the fleet-wide migration -- carried out by rewriting PORT -- passed it by and left it binding 4050 while its containerPort, its Service and both its probes moved to 8080, crash-looping platform login in three environments. The service now reads PORT. Until the image carrying that change is promoted, the overlays set PORT and HTTP_PORT to the same 8080 so that whichever image is running binds the right port and there is no window. Deleting HTTP_PORT before the promotion would put the un-promoted environments back on 4050, which is the outage this is recovering from. The pair goes when the image lands, and this entry with it."
+      "why_frozen_and_not_fixed_here": "SP-0007 is an ADVISORY cross-check; the authoritative ratchet is inboxxhq-infra scripts/check-service-addressing.py, and ARCH-0010 gates the application-code half. Lowered 296 -> 24 on 2026-08-30 by deleting every entry whose owning service's code provably no longer reads it: 12 of the 15 services had already migrated to servicediscovery/grpcx and their manifests were simply still setting variables nothing consumed. The 24 that remain are READ by running code -- call-routing-service (4 vars), org-service (USER_SERVICE_BASE_URL) and order-service (STRIPE_ADAPTER_SERVICE_URL) -- so deleting them would drop each to a localhost default in a cluster. They come out per service, in this order and not before: migrate the code to resolve by logical name, release, promote to all four environments, THEN delete the manifest entry. That is RFC-0007 \u00a711 atomicity, and platform-identity-service is what skipping it looks like.",
+      "count_on_2026-08-30": 24
     }
   },
   "controls": {
-    "SP-0012": 2,
-    "SP-0007": 298
-  }
+    "SP-0007": 24
+  },
+  "_notes": "SP-0012 closed 2026-08-30. Its entry was NOT deleted because the debt was written off: preprod and prod both pin sha256:f474fc84 (commit a02b5dc7), which reads PORT, so the HTTP_PORT pair the entry protected had become the pure legacy its own DELETE-WHEN comment described. The condition was checked against the gitops digest in overlays/*/kustomization.yaml, not the release ledger -- releases/*.json still records a02b5dc7 as ['dev','staging'] and would have said preprod was un-promoted. The digest is what the cluster runs.\\n\\nSP-0013..SP-0019 are deliberately absent from `controls` below. They were added the same day with the fleet already conformant, so their baseline is 0 and any finding fails the lane. A new control that lands pre-baselined at its current violation count is a control that never fails on the day it would have mattered."
 }
