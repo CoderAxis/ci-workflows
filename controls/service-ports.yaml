@@ -361,3 +361,188 @@ controls:
       this control's finding is informational.
     detector: manifest_address_vars
     refs: [RFC-0007]
+
+  # ── SP-0013..SP-0018 ────────────────────────────────────────────────────────────────────
+  # Added 2026-08-30, after an audit found the withdrawn per-service allocation still stated
+  # in six places two weeks after the fleet stopped using it. None changed what a Pod bound;
+  # every one was a plausible answer to "what port does this service use?". SP-0001..SP-0012
+  # check the numbers a service RUNS on and were all green throughout. These check the places
+  # a withdrawn number can still be WRITTEN, which is a different question and the one that
+  # kept coming back.
+
+  - id: SP-0013
+    title: The local allocation's source is a real per-service allocation
+    owner: platform-architecture
+    scope: workspace
+    status: active
+    severity: critical
+    policy: >-
+      `localports.yaml` MUST exist and give every service an `http`, `grpc` and `metrics`
+      port; no entry may be a §4.1 cluster constant or a §3 reserved port; no two services may
+      share a non-zero port within a concern; and `ports.generated.go`'s `localPorts` table
+      MUST agree with it.
+    rationale: >-
+      SP-0009 asserts the same uniqueness against ports.generated.go, which is the GENERATED
+      COPY. A defect that reaches the source is therefore invisible to it, and one had:
+      demo-service sat in localports.yaml as {http: 8080, grpc: 50051} because it was captured
+      from its manifests AFTER that service moved to the §4.1 constants. SP-0009 passed --
+      8080/50051 was a pair no other service held locally, so it was unique and looked
+      allocated -- while the actual meaning was that demo-service's "own" local port was the
+      one every service in the fleet binds. That is not a collision with one service, it is a
+      collision with all of them, and it is exactly the regeneration failure localports.yaml's
+      own header warns about. A control that reads only the copy cannot see it. This one reads
+      the source, and rejects the cluster constants as values outright.
+    remediation: >-
+      Give the service a local http, grpc and metrics port no other service holds, in
+      localports.yaml, then regenerate ports.generated.go. Never copy a value from
+      inboxxhq-infra services/*/base/service.yaml into this file -- those are §4.1 constants
+      and identical for every service.
+    detector: local_allocation_source_is_valid
+    refs: [RFC-0007, ADR-0010]
+
+  - id: SP-0014
+    title: env.example carries the local allocation, exactly
+    owner: platform-architecture
+    scope: workspace
+    status: active
+    severity: major
+    policy: >-
+      Where a repository has an `env.example`, its `PORT`, `GRPC_PORT` and `METRICS_PORT` MUST
+      equal that service's entry in `localports.yaml`.
+    rationale: >-
+      RFC-0007 §4.2 names env.example as one of only two things entitled to the per-service
+      numbers, and nothing compared the two, so it drifted the way an uncompared copy does.
+      dashboard-service's env.example read PORT=8080, GRPC_PORT=50051, METRICS_PORT=9464 --
+      the cluster constants, in the one file whose entire purpose is to hold the port a
+      workstation binds. A developer copying it to .env got a service that works alone and
+      fails to bind the moment a second service is running, with no error that names the
+      cause. The metrics half had drifted further still: it lived ONLY in env.example, in 42
+      independent copies with no source, and two of them had landed on 9150.
+    remediation: >-
+      Set the three variables from localports.yaml. If the service has no entry there, add one
+      -- do not copy the constants out of a manifest.
+    detector: env_example_matches_local_allocation
+    refs: [RFC-0007]
+
+  - id: SP-0015
+    title: A service contract declares its own ports, once, and no one else's
+    owner: platform-architecture
+    scope: workspace
+    status: active
+    severity: major
+    policy: >-
+      `service.contract.yaml` MUST NOT carry a `port` under `dependencies.services[]`, nor an
+      `observability.metrics.port`. A contract's ports belong in its `ports:` block.
+    rationale: >-
+      Two contracts still listed their upstreams' gRPC ports -- call-routing-service named
+      user-service 50004, org-service 50002, presence-service 50011 -- numbers from a scheme
+      two revisions dead, which nothing had read since resolution moved to the
+      servicediscovery registry (RFC-0007 §5). Being dead is why they were wrong; being wrong
+      cost nothing, so nothing corrected them. The same two files also carried
+      observability.metrics.port 9121 and 9122 while their own `ports:` block six lines above
+      said 9464, so each file gave two different answers about one service's metrics port.
+    remediation: >-
+      Delete the port from the dependency; addresses come from the registry. Delete
+      observability.metrics.port; the `ports:` block already states it.
+    detector: contracts_hold_no_foreign_ports
+    refs: [RFC-0007, ADR-0023]
+
+  - id: SP-0016
+    title: Gateway routing config maps resources to names, never to ports
+    owner: platform-architecture
+    scope: workspace
+    status: active
+    severity: critical
+    policy: >-
+      A gateway's `service-registry.yaml` MUST NOT carry `port`, `grpc_port`, `metrics_port`
+      or `http_port` on any entry.
+    rationale: >-
+      edge-gateway's routing config held 99 port keys across 35 entries -- the withdrawn §5
+      allocation in full, including a 4xxx block for services that had bound 8080 for weeks.
+      Nothing read them: upstreams.go resolves every address through servicediscovery, and the
+      struct fields they parsed into were referenced nowhere. That is what made them durable.
+      A number no code reads is never corrected by a failure, but it is still read by people,
+      and this file's header additionally told the next engineer to allocate a port for each
+      new service -- so it did not merely record the withdrawn scheme, it recruited for it.
+      Routing config answers "which service owns this path". The address that name resolves to
+      depends on the environment, which this file cannot see, so it cannot hold the answer.
+    remediation: >-
+      Delete the port keys. Keep name, resources, health_path and docs_path.
+    detector: routing_config_holds_no_ports
+    refs: [RFC-0007, ADR-0023]
+
+  - id: SP-0017
+    title: A gateway's committed bind port is right for its environment
+    owner: platform-infrastructure
+    scope: workspace
+    status: active
+    severity: critical
+    policy: >-
+      In `config/environments/`, a Kubernetes environment's `server.port` MUST be 8080 and
+      MUST NOT be a §3 reserved port; `local.yaml` MUST be that gateway's §4.2 local port.
+    rationale: >-
+      edge-gateway's prod, staging and preprod configs committed `server.port: 80` -- the
+      ingress's own reserved port, bound by the gateway that sits behind it. It was harmless
+      only because the deployment sets PORT over it, which means the file had been wrong for
+      as long as the override had been right, and the file is what an engineer reads. That
+      exact shape has already cost this platform an outage: upstreams.go carries a comment
+      about prod spending one "pointed at :80". The dev config was wrong the other way, at
+      4000, with a comment claiming RFC-0007 required it -- true for local, false for a
+      cluster, and stated as policy. This control checks both directions, which is why it
+      knows local is different rather than treating a workstation as a fifth cluster.
+    remediation: >-
+      Set 8080 for dev, staging, preprod and prod. Set local.yaml from localports.yaml.
+    detector: gateway_bind_port_is_right_for_its_environment
+    refs: [RFC-0007]
+
+  - id: SP-0018
+    title: One directory per service name
+    owner: platform-infrastructure
+    scope: workspace
+    status: active
+    severity: major
+    policy: >-
+      No two directories under `services/*/*` or `gateways/*` may resolve to the same service
+      name.
+    rationale: >-
+      inboxxhq-notification-service-ctx was an abandoned linked git WORKTREE of
+      inboxxhq-notification-service -- not a clone, so it shared the object store and could
+      never diverge in a way `git remote` would show. It sat detached at a HEAD carrying two
+      commits that were not on main by SHA but were patch-identical to commits that were
+      (`git cherry` reported both as equivalent-upstream). That is the shape that made it
+      durable: two off-branch commits read as unfinished work to anyone who glanced, so it was
+      never deleted, while being already-merged by content meant there was never anything to
+      merge. It survived four months in the middle.
+      Its cost here is that both directories declared `notification-service`. The loader keeps
+      the first claimant and drops the rest -- right for resolution, silently wrong for
+      enforcement -- so the abandoned copy's Dockerfile (EXPOSE 4009, the pre-migration number)
+      was outside SP-0004 entirely. The fleet reported 42 repositories compliant while a 43rd
+      sat beside them, unexamined, stating a withdrawn port. A control that can be escaped by
+      duplicating a directory is not a control.
+    remediation: >-
+      Delete the stale checkout, or give it a distinct service name in its contract.
+    detector: one_repository_per_service
+    refs: [RFC-0007]
+
+  - id: SP-0019
+    title: A service repository carries no Kubernetes manifests of its own
+    owner: platform-infrastructure
+    scope: workspace
+    status: active
+    severity: major
+    policy: >-
+      No service repository may carry its own `k8s/`, `kubernetes/` or `deploy/k8s/`
+      manifests. The deployed set is `inboxxhq-infra services/<service>/`.
+    rationale: >-
+      inboxxhq-observability-service was the only repository of 42 carrying its own manifests,
+      declaring 4032/50092/9133 and last touched before the port migration; the manifests that
+      actually deploy it said 8080/50051/9464. Nothing referenced the in-repo set, no lane
+      built it, and that is precisely why it stayed wrong -- an unreferenced manifest is never
+      corrected by a deployment failing. It remained a complete, plausible, checked-in answer
+      to what ports this service uses, one directory away from the service's code and four
+      repositories away from the truth.
+    remediation: >-
+      Delete the in-repo manifests. Change ports in inboxxhq-infra services/<service>/.
+    detector: service_repos_hold_no_manifests
+    refs: [RFC-0007]
+

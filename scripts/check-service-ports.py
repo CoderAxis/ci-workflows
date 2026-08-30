@@ -136,6 +136,11 @@ PPROF_CONSTANT = 6060
 RESERVED_PORTS = {80, 443, 3000, 9090, 9091, 9093, 3100, 3200, 4317, 4318, 9095, 5432,
                   6379, 8500}
 
+# The four environments RFC-0007 §4.1 governs. "local" is deliberately NOT one of them: §4.2
+# is the whole point of the split, and a control that treats a workstation as a fifth cluster
+# is the over-correction §12.1 was written to record.
+K8S_ENVIRONMENTS = {"dev", "staging", "preprod", "prod"}
+
 # Deliberately identical to ARCH-0010's and to inboxxhq-infra's check-service-addressing.py.
 # SP-0007 only counts what those two enforce; if the three patterns drift, the advisory number
 # stops describing the gated one and becomes worse than no number at all.
@@ -219,15 +224,44 @@ class Workspace:
         self.infra = root / "infra" / "inboxxhq-infra"
         self.registry_path = (root / "shared" / "platform-shared-go" / "platform" /
                               "servicediscovery" / "ports.generated.go")
+        self.alloc_path = (root / "shared" / "platform-shared-go" / "platform" /
+                           "servicediscovery" / "localports.yaml")
         self.registry: dict[str, tuple[int, int]] = {}       # clusterPorts: what a Pod answers on
         self.local_registry: dict[str, tuple[int, int]] = {}  # localPorts: what a laptop binds
+        # localports.yaml, the SOURCE the local half is generated from. ports.generated.go is
+        # the derived copy, so a defect that reaches the source is invisible to any control
+        # that reads only the copy -- which is how demo-service came to hold {8080, 50051} as
+        # its "local" allocation. SP-0013 reads the source.
+        self.alloc: dict[str, dict[str, int]] = {}
         self.registry_error = ""
         self.local_registry_error = ""
+        self.alloc_error = ""
         self.services: dict[str, Service] = {}
         self.repos_by_service: dict[str, Path] = {}
+        self.repo_service_names: dict[str, list[Path]] = {}
         self._load_registry()
+        self._load_allocation()
         self._load_repos()
         self._load_services()
+
+    def _load_allocation(self) -> None:
+        if not self.alloc_path.is_file():
+            self.alloc_error = (f"{self._rel(self.alloc_path)} is missing; the RFC-0007 §4.2 "
+                                "local allocation has no source")
+            return
+        try:
+            doc = yaml.safe_load(self.alloc_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            self.alloc_error = f"{self._rel(self.alloc_path)}: {exc}"
+            return
+        entries = doc.get("services")
+        if not isinstance(entries, dict) or not entries:
+            self.alloc_error = (f"{self._rel(self.alloc_path)} declares no `services` map, so "
+                                "the local allocation cannot be read")
+            return
+        for name, e in entries.items():
+            if isinstance(e, dict):
+                self.alloc[name] = {k: e[k] for k in ("http", "grpc", "metrics") if k in e}
 
     # ports.generated.go is Go source, and parsing it with a regex is a deliberate choice over
     # `go run`: this checker runs on a Python runner with no Go toolchain, and the file's whole
@@ -328,7 +362,16 @@ class Workspace:
                 if not path.is_dir():
                     continue
                 name = self._service_name_of(path)
-                if name and name not in self.repos_by_service:
+                if not name:
+                    continue
+                # Record EVERY claimant, not just the winner. The `not in` guard below keeps
+                # the first and drops the rest, which is correct for resolution and silently
+                # wrong for enforcement: a second checkout declaring the same service name
+                # takes its Dockerfile and contract out of SP-0004/SP-0005 entirely, so a
+                # stale copy is exempt from the controls precisely because it is stale.
+                # SP-0018 reads this map and fails the duplicate.
+                self.repo_service_names.setdefault(name, []).append(path)
+                if name not in self.repos_by_service:
                     self.repos_by_service[name] = path
 
     def _service_name_of(self, repo: Path) -> str | None:
@@ -1052,6 +1095,280 @@ def port_env_has_one_name(ws: Workspace) -> Finding:
                             "reaches the whole fleet")
 
 
+
+# --- SP-0013..SP-0018: keeping the withdrawn allocation withdrawn ----------------------------
+#
+# Everything above this line checks the numbers a service RUNS on. These six check the places a
+# per-service number can survive after the fleet has stopped using one. That distinction is the
+# lesson of RFC-0007 §12: the allocation was withdrawn in 2026-08, every manifest moved, and
+# 2026-08-30 still found six independent copies of it -- in a gateway's routing config, in two
+# service contracts, in an abandoned manifest set, in a stale second checkout, and in the
+# allocation file itself. None of them changed what any Pod bound, and every one of them was a
+# correct-looking answer to "what port does this service use?" for anyone who read it.
+#
+# A withdrawn standard is not deleted by withdrawing it. It is deleted by failing the build of
+# anything that still states it.
+
+def local_allocation_source_is_valid(ws: Workspace) -> Finding:
+    if ws.alloc_error:
+        return Finding(1, ws.alloc_error, [ws.alloc_error])
+    violations = []
+    for concern in ("http", "grpc", "metrics"):
+        seen: dict[int, str] = {}
+        for name in sorted(ws.alloc):
+            port = ws.alloc[name].get(concern)
+            if port is None:
+                violations.append(
+                    f"{name}: no {concern} port in the local allocation "
+                    f"({ws._rel(ws.alloc_path)})")
+                continue
+            if port == 0:            # 0 = no listener of that kind; never a collision
+                continue
+            if port == CONSTANTS[concern]:
+                violations.append(
+                    f"{name}: local {concern} port is {port}, the RFC-0007 §4.1 CLUSTER "
+                    f"constant. Every service binds that in Kubernetes, so as a LOCAL port it "
+                    f"collides with the whole fleet -- the one thing §4.2 exists to prevent. "
+                    f"This is what regenerating the local table from the manifests produces "
+                    f"({ws._rel(ws.alloc_path)})")
+                continue
+            if port in RESERVED_PORTS:
+                violations.append(
+                    f"{name}: local {concern} port {port} is a §3 reserved infrastructure "
+                    f"port ({ws._rel(ws.alloc_path)})")
+            if port in seen:
+                violations.append(
+                    f"{name}: local {concern} port {port} is already held by {seen[port]}. "
+                    f"A workstation shares one network namespace, so the second of the two to "
+                    f"start cannot bind ({ws._rel(ws.alloc_path)})")
+            else:
+                seen[port] = name
+    # the derived copy must still say what the source says
+    for name, pair in sorted(ws.local_registry.items()):
+        e = ws.alloc.get(name)
+        if e is None:
+            violations.append(
+                f"{name}: in ports.generated.go localPorts but absent from "
+                f"{ws._rel(ws.alloc_path)}, so the generated table has a source nothing holds")
+        elif (e.get("http"), e.get("grpc")) != pair:
+            violations.append(
+                f"{name}: ports.generated.go says {pair} but {ws._rel(ws.alloc_path)} says "
+                f"({e.get('http')}, {e.get('grpc')}); regenerate")
+    if violations:
+        return Finding(len(violations),
+                       f"{len(violations)} defect(s) in the local allocation source",
+                       capped(violations))
+    return Finding(evidence=f"{len(ws.alloc)} services hold a unique, non-reserved local port "
+                            f"per concern, and none of them is a §4.1 cluster constant")
+
+
+ENV_EXAMPLE_VARS = {"PORT": "http", "GRPC_PORT": "grpc", "METRICS_PORT": "metrics"}
+
+
+def env_example_matches_local_allocation(ws: Workspace) -> Finding:
+    if ws.alloc_error:
+        return Finding(indeterminate=True, evidence=ws.alloc_error)
+    violations, checked = [], 0
+    for service, repo in sorted(ws.repos_by_service.items()):
+        path = repo / "env.example"
+        if not path.is_file():
+            continue
+        entry = ws.alloc.get(service)
+        if entry is None:
+            violations.append(f"{service}: has env.example but no entry in "
+                              f"{ws._rel(ws.alloc_path)}")
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            violations.append(f"{service}: {exc}")
+            continue
+        checked += 1
+        for var, concern in sorted(ENV_EXAMPLE_VARS.items()):
+            m = re.search(rf"^{var}=(\d+)\s*$", text, re.M)
+            if not m:
+                continue
+            got, want = int(m.group(1)), entry.get(concern)
+            if want is None or got == want:
+                continue
+            extra = ""
+            if got == CONSTANTS[concern]:
+                extra = (" -- that is the §4.1 CLUSTER constant, which every service binds, so "
+                         "the second service started locally from this file fails to bind")
+            violations.append(
+                f"{service}: env.example sets {var}={got} but the §4.2 allocation says "
+                f"{want}{extra} ({ws._rel(path)})")
+    if violations:
+        return Finding(len(violations),
+                       f"{len(violations)} env.example port(s) disagreeing with the allocation",
+                       capped(violations))
+    return Finding(evidence=f"all {checked} env.example file(s) carry exactly the §4.2 local "
+                            f"allocation")
+
+
+def contracts_hold_no_foreign_ports(ws: Workspace) -> Finding:
+    violations = []
+    for service, repo in sorted(ws.repos_by_service.items()):
+        path = repo / "service.contract.yaml"
+        if not path.is_file():
+            continue
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+        for dep in (doc.get("dependencies") or {}).get("services") or []:
+            if isinstance(dep, dict) and "port" in dep:
+                violations.append(
+                    f"{service}: declares port {dep['port']} for upstream "
+                    f"{dep.get('name', '?')}. An upstream's address comes from the "
+                    f"servicediscovery registry (RFC-0007 §5), never from a contract "
+                    f"({ws._rel(path)})")
+        obs_metrics = (doc.get("observability") or {}).get("metrics")
+        if isinstance(obs_metrics, dict) and "port" in obs_metrics:
+            violations.append(
+                f"{service}: observability.metrics.port={obs_metrics['port']} is a second "
+                f"answer to a port this file already states under `ports:`. Declare ports "
+                f"once, in `ports:` ({ws._rel(path)})")
+    if violations:
+        return Finding(len(violations),
+                       f"{len(violations)} contract(s) declaring a port that is not theirs to "
+                       f"declare", capped(violations))
+    return Finding(evidence="no service contract declares an upstream's port or a second copy "
+                            "of its own")
+
+
+# Routing config maps a URL path to a service NAME. The moment it also carries that service's
+# port it is a service registry, competing with the one in platform-shared-go and losing --
+# it cannot see an environment, so it cannot be right in more than one.
+ROUTING_PORT_KEYS = ("port", "grpc_port", "metrics_port", "http_port")
+
+
+def routing_config_holds_no_ports(ws: Workspace) -> Finding:
+    violations = []
+    for gateway in sorted((ws.root / "gateways").glob("*")):
+        if not gateway.is_dir():
+            continue
+        for path in sorted(gateway.rglob("service-registry.yaml")):
+            try:
+                doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+            registry = doc.get("service_registry") if isinstance(doc, dict) else None
+            if not isinstance(registry, dict):
+                continue
+            for group, entries in sorted(registry.items()):
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    for key in ROUTING_PORT_KEYS:
+                        if key in entry:
+                            violations.append(
+                                f"{gateway.name}: {group}/{entry.get('name', '?')} carries "
+                                f"{key}: {entry[key]}. This file maps resources to service "
+                                f"NAMES; the address is the registry's answer, per environment "
+                                f"({ws._rel(path)})")
+    if violations:
+        return Finding(len(violations),
+                       f"{len(violations)} routing-config entr(ies) carrying a port",
+                       capped(violations))
+    return Finding(evidence="no gateway routing config carries a per-service port")
+
+
+# A gateway's own bind port, as written in its committed config, per environment.
+def gateway_bind_port_is_right_for_its_environment(ws: Workspace) -> Finding:
+    violations, checked = [], 0
+    for gateway in sorted((ws.root / "gateways").glob("*")):
+        env_dir = gateway / "config" / "environments"
+        if not env_dir.is_dir():
+            continue
+        service = ws._service_name_of(gateway) or gateway.name.replace("inboxxhq-", "")
+        for path in sorted(env_dir.glob("*.yaml")):
+            env = path.stem
+            try:
+                doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+            port = (doc.get("server") or {}).get("port") if isinstance(doc, dict) else None
+            if not isinstance(port, int):
+                continue
+            checked += 1
+            if env == "local":
+                want = (ws.alloc.get(service) or {}).get("http")
+                if want and port != want:
+                    violations.append(
+                        f"{service}/local: binds {port}, but the §4.2 local allocation says "
+                        f"{want} ({ws._rel(path)})")
+            elif env in K8S_ENVIRONMENTS:
+                if port in RESERVED_PORTS:
+                    violations.append(
+                        f"{service}/{env}: binds {port}, a §3 RESERVED infrastructure port. It "
+                        f"is currently harmless only because the deployment sets PORT over it; "
+                        f"the day something reads this file it is an outage ({ws._rel(path)})")
+                elif port != CONSTANTS["http"]:
+                    violations.append(
+                        f"{service}/{env}: binds {port}, but a Kubernetes environment is "
+                        f"{CONSTANTS['http']} (RFC-0007 §4.1) ({ws._rel(path)})")
+    if violations:
+        return Finding(len(violations),
+                       f"{len(violations)} gateway bind port(s) wrong for their environment",
+                       capped(violations))
+    return Finding(evidence=f"all {checked} gateway environment config(s) bind the right port "
+                            f"for their environment")
+
+
+def one_repository_per_service(ws: Workspace) -> Finding:
+    violations = []
+    for service, paths in sorted(ws.repo_service_names.items()):
+        if len(paths) > 1:
+            names = ", ".join(ws._rel(p) for p in paths)
+            violations.append(
+                f"{service}: claimed by {len(paths)} directories ({names}). Only the first is "
+                f"checked, so the others' Dockerfile, contract and env.example are exempt from "
+                f"every control here -- a stale checkout is invisible precisely because it is "
+                f"stale. Delete the copy or give it its own service name")
+    if violations:
+        return Finding(len(violations),
+                       f"{len(violations)} service name(s) claimed by more than one directory",
+                       capped(violations))
+    return Finding(evidence=f"each of {len(ws.repo_service_names)} service names is claimed by "
+                            f"exactly one directory")
+
+
+def service_repos_hold_no_manifests(ws: Workspace) -> Finding:
+    violations = []
+    for service, repo in sorted(ws.repos_by_service.items()):
+        for k8s in (repo / "k8s", repo / "kubernetes", repo / "deploy" / "k8s"):
+            if not k8s.is_dir():
+                continue
+            ports = set()
+            for path in sorted(k8s.rglob("*.yaml")):
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                ports.update(int(m) for m in re.findall(
+                    r"^\s*(?:-\s*)?(?:containerPort|targetPort|port):\s*(\d+)\s*$",
+                    text, re.M))
+            stale = sorted(p for p in ports if p not in CONSTANTS.values())
+            detail = (f" declaring {stale}, which no environment deploys" if stale
+                      else "")
+            violations.append(
+                f"{service}: carries its own Kubernetes manifests at {ws._rel(k8s)}{detail}. "
+                f"The deployed manifests live in inboxxhq-infra services/{service}/; a second "
+                f"set in the service repo is deployed by nothing and answers the port question "
+                f"for anyone who opens it")
+    if violations:
+        return Finding(len(violations),
+                       f"{len(violations)} service repo(s) carrying their own manifests",
+                       capped(violations))
+    return Finding(evidence=f"no service repository carries a competing manifest set; all "
+                            f"{len(ws.services)} are deployed from inboxxhq-infra only")
+
+
 DETECTORS = {
     "k8s_ports_internally_consistent": k8s_ports_internally_consistent,
     "port_env_has_one_name": port_env_has_one_name,
@@ -1065,6 +1382,14 @@ DETECTORS = {
     "local_allocation_is_per_service": local_allocation_is_per_service,
     "metrics_are_scraped_by_port_name": metrics_are_scraped_by_port_name,
     "resolvers_pin_a_constants_registry": resolvers_pin_a_constants_registry,
+    "local_allocation_source_is_valid": local_allocation_source_is_valid,
+    "env_example_matches_local_allocation": env_example_matches_local_allocation,
+    "contracts_hold_no_foreign_ports": contracts_hold_no_foreign_ports,
+    "routing_config_holds_no_ports": routing_config_holds_no_ports,
+    "gateway_bind_port_is_right_for_its_environment":
+        gateway_bind_port_is_right_for_its_environment,
+    "one_repository_per_service": one_repository_per_service,
+    "service_repos_hold_no_manifests": service_repos_hold_no_manifests,
 }
 
 
