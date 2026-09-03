@@ -547,6 +547,28 @@ jobs:
           }
           python3 "${checker}"
 
+      # The whole requirement chain in one read: capability -> PRD -> journey -> client
+      # workflow -> WF-* -> operations, gRPC references, events -> invariants -> suites ->
+      # coverage.go cases -> test functions, plus every accepted decision's declared
+      # enforcement. The Python gates above each hold one hop; this is the reader of all of
+      # them, and it fails on any declared link that does not resolve. It never runs a suite:
+      # run evidence is recorded by `ihq cuj verify` and `ihq audit run`, and its absence is
+      # reported by the audit as information, not failure.
+      - name: Every link of the requirement chain resolves (ihq audit)
+        shell: bash
+        env:
+          CLI_PATH: ${{ inputs.cli_path }}
+        run: |
+          set -euo pipefail
+          [ -d "${CLI_PATH}" ] || {
+            echo "::error::the CLI checkout is not at ${CLI_PATH}, so the requirement chain" \
+                 "cannot be read. It is a required gate, so its absence fails here rather" \
+                 "than passing quietly."
+            exit 1
+          }
+          (cd "${CLI_PATH}" && go build -o "${RUNNER_TEMP}/ihq" ./cmd/ihq)
+          "${RUNNER_TEMP}/ihq" --workspace "$(pwd)" audit --fail-on error --min-severity warning --no-color --links none
+
   # ── API contracts ─────────────────────────────────────────────────────────────────────────
   # Closes the hole G3 left: it globbed contracts/ for a *.json and passed if one existed, so a
   # 56-byte stub with "paths": {} counted as a published contract and six live services were in
