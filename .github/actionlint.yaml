@@ -1,0 +1,12 @@
+# actionlint configuration for this repository.
+#
+# Self-hosted labels actionlint should accept in `runs-on:`. These are the
+# runner pools in the InboxxHQ-CoderAxis org (inboxxhq-infra:
+# ci-workflows-runner/runner-deployment.yaml today, modules/arc-runners scale
+# sets next). The reusable workflow_call files here run in the org repositories
+# that call them, so they target these pools by the single label; this
+# repository's own workflows (ci.yaml, release.yaml) stay on ubuntu-latest.
+self-hosted-runner:
+  labels:
+    - inboxxhq-ci
+    - inboxxhq-deploy
