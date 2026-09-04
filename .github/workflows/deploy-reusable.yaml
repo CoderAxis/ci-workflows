@@ -186,7 +186,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: inboxxhq-ci
+    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       service: ${{ steps.id.outputs.service }}
@@ -970,7 +970,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: inboxxhq-ci
+    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Name the stage that failed
