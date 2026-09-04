@@ -74,7 +74,7 @@ on:
         description: "runs-on label for the job."
         required: false
         type: string
-        default: ubuntu-latest
+        default: inboxxhq-ci
     # No secrets. This workflow mints its own module-read token from the job's OIDC identity
     # through ci-app-token, which takes no app-id or private-key input at all, so the failure
     # this previously guarded against ("Input required and not supplied: app-id") cannot occur.

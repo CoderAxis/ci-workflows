@@ -50,7 +50,7 @@ permissions:
 jobs:
   ci-identity:
     name: OIDC sub patterns
-    runs-on: ubuntu-latest
+    runs-on: inboxxhq-ci
     timeout-minutes: 10
     steps:
       - name: Checkout caller

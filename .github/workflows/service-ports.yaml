@@ -116,7 +116,7 @@ permissions:
 jobs:
   service-ports:
     name: Service ports agree across manifests, images and the registry
-    runs-on: ubuntu-latest
+    runs-on: inboxxhq-ci
     timeout-minutes: 20
     permissions:
       contents: read

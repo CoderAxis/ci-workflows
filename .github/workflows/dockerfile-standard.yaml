@@ -35,7 +35,7 @@ on:
 jobs:
   dockerfile-standard:
     name: Dockerfile standard invariants
-    runs-on: ubuntu-latest
+    runs-on: inboxxhq-ci
     timeout-minutes: 10
     permissions:
       contents: read
