@@ -120,7 +120,7 @@ on:
         description: "runs-on labels as a JSON array string."
         required: false
         type: string
-        default: '["self-hosted", "linux", "x64", "inboxxhq-deploy"]'
+        default: '["inboxxhq-deploy"]'
       build_inputs_manifest:
         description: >-
           Path, relative to the calling repo, of the declared build-inputs manifest. When the file
@@ -186,7 +186,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ubuntu-latest
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     outputs:
       service: ${{ steps.id.outputs.service }}
@@ -970,7 +970,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ubuntu-latest
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     steps:
       - name: Name the stage that failed

@@ -80,7 +80,7 @@ permissions:
 jobs:
   docs-governance:
     name: Documentation governance
-    runs-on: ubuntu-latest
+    runs-on: inboxxhq-ci
     timeout-minutes: 10
     steps:
       - name: Checkout docs repo (caller)

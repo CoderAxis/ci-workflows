@@ -44,7 +44,7 @@ permissions:
 jobs:
   release:
     name: Cut the next version and move v1
-    runs-on: ubuntu-latest
+    runs-on: inboxxhq-ci
     # Generous because most of it is spent waiting on this repository's own CI lane rather than
     # doing work. Running out of time refuses the release; it never publishes on a timeout.
     timeout-minutes: 60

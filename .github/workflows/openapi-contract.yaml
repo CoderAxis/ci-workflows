@@ -67,7 +67,7 @@ on:
         description: JSON-encoded runs-on value.
         required: false
         type: string
-        default: '["ubuntu-latest"]'
+        default: '["inboxxhq-ci"]'
       service-name:
         description: >-
           The service's directory in the contract registry. Supply the catalog-derived name

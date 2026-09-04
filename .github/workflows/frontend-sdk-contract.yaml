@@ -41,7 +41,7 @@ permissions:
 jobs:
   sdk-contract:
     name: Frontend SDK contract
-    runs-on: ubuntu-latest
+    runs-on: inboxxhq-ci
     timeout-minutes: 10
     permissions:
       contents: read
