@@ -35,7 +35,7 @@ on:
 jobs:
   dockerfile-standard:
     name: Dockerfile standard invariants
-    runs-on: inboxxhq-ci
+    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read

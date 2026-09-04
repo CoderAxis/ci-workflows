@@ -37,7 +37,7 @@ permissions:
 jobs:
   seed-contract:
     name: Seed contract
-    runs-on: inboxxhq-ci
+    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout service (caller)

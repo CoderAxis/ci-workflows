@@ -73,7 +73,7 @@ permissions:
 jobs:
   platform-governance:
     name: Platform governance (assembled workspace)
-    runs-on: inboxxhq-ci
+    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:
       contents: read
