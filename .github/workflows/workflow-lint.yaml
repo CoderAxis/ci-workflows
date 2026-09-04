@@ -29,7 +29,7 @@ on:
 jobs:
   workflow-lint:
     name: Workflow definitions lint clean
-    runs-on: ubuntu-latest
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     permissions:
       contents: read
@@ -68,6 +68,31 @@ jobs:
       # glob, actionlint discovers `.github/workflows` itself and covers both spellings, which
       # makes that failure structurally impossible rather than corrected after the fact.
       - name: Lint workflow definitions
-        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
-        with:
-          args: -color
+        # Binary release, not the docker:// container action: the self-hosted pool
+        # has no Docker daemon. Same actionlint 1.7.12 + shellcheck 0.11.0 the pinned
+        # image carried, pinned by version + sha256 of each release tarball, per arch.
+        shell: bash
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256_AMD64: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          ACTIONLINT_SHA256_ARM64: "325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6"
+          SHELLCHECK_VERSION: "0.11.0"
+          SHELLCHECK_SHA256_X86_64: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+          SHELLCHECK_SHA256_AARCH64: "12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588"
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64)  al_arch=amd64; al_sha="${ACTIONLINT_SHA256_AMD64}"; sc_arch=x86_64;  sc_sha="${SHELLCHECK_SHA256_X86_64}" ;;
+            aarch64) al_arch=arm64; al_sha="${ACTIONLINT_SHA256_ARM64}"; sc_arch=aarch64; sc_sha="${SHELLCHECK_SHA256_AARCH64}" ;;
+            *) echo "::error::unsupported runner architecture $(uname -m)"; exit 1 ;;
+          esac
+          bin="${RUNNER_TEMP}/lint-bin"; mkdir -p "${bin}"
+          al="actionlint_${ACTIONLINT_VERSION}_linux_${al_arch}.tar.gz"
+          curl -sSfL -o "${RUNNER_TEMP}/${al}" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${al}"
+          echo "${al_sha}  ${RUNNER_TEMP}/${al}" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/${al}" -C "${bin}" actionlint
+          sc="shellcheck-v${SHELLCHECK_VERSION}.linux.${sc_arch}.tar.xz"
+          curl -sSfL -o "${RUNNER_TEMP}/${sc}" "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/${sc}"
+          echo "${sc_sha}  ${RUNNER_TEMP}/${sc}" | sha256sum -c -
+          tar -xJf "${RUNNER_TEMP}/${sc}" -C "${bin}" --strip-components=1 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          PATH="${bin}:${PATH}" "${bin}/actionlint" -color

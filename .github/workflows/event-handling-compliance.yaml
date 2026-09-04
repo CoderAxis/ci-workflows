@@ -53,7 +53,7 @@ on:
         description: "runs-on label for the job."
         required: false
         type: string
-        default: ubuntu-latest
+        default: inboxxhq-ci
 
 permissions:
   contents: read
