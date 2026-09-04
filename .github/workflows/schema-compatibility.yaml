@@ -71,10 +71,13 @@ on:
         type: string
         default: v1
       runs_on:
-        description: "runs-on label for the job."
+        description: >-
+          runs-on label for the job. Defaults to a hosted runner because the job declares
+          `services:` (Postgres), which the runner starts through Docker, and the org's scale sets
+          run without a container mode; on the pool it fails before applying a single migration.
         required: false
         type: string
-        default: inboxxhq-ci
+        default: ubuntu-latest
     # No secrets. This workflow mints its own module-read token from the job's OIDC identity
     # through ci-app-token, which takes no app-id or private-key input at all, so the failure
     # this previously guarded against ("Input required and not supplied: app-id") cannot occur.
