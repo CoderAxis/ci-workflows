@@ -163,7 +163,7 @@ jobs:
   # same trees. They are separate STEPS, so the log names which gate failed.
   fleet-source-gates:
     name: Fleet source (events, gRPC grants, journey entry points, journey contracts)
-    runs-on: ubuntu-latest
+    runs-on: inboxxhq-ci
     timeout-minutes: 30
     permissions:
       contents: read
@@ -595,7 +595,7 @@ jobs:
   # is the step that makes the "publication fidelity" in this job's name true of the job.
   api-contracts:
     name: API contracts (OpenAPI quality + publication fidelity)
-    runs-on: ubuntu-latest
+    runs-on: inboxxhq-ci
     timeout-minutes: 20
     permissions:
       contents: read
@@ -925,7 +925,7 @@ jobs:
   # `if [ -d ... ]` that is never true.
   journey-surfaces:
     name: Journey surfaces exist in the frontends
-    runs-on: ubuntu-latest
+    runs-on: inboxxhq-ci
     timeout-minutes: 15
     permissions:
       contents: read
