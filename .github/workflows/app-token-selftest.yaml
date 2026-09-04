@@ -84,7 +84,7 @@ jobs:
   # ── positive case ───────────────────────────────────────────────────────────────────────────────
   admits-central:
     name: App token - admits a job defined in a central workflow
-    runs-on: inboxxhq-ci
+    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
     # Skip (not fail) on a caller shape the read role's trust policy was never asked to admit. See
     # the file-level comment above for the exact `sub` patterns this mirrors
     # (`ci_caller_subs` in inboxxhq-infra): a `pull_request` run, a push that lands on `main`, and a
@@ -153,7 +153,7 @@ jobs:
   # and inherit publish rights unreviewed. AWS must refuse this.
   refuses-unlisted-workflow:
     name: App token - refuses publish scope from a non-publishing workflow
-    runs-on: inboxxhq-ci
+    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
     permissions:
       contents: read
       id-token: write

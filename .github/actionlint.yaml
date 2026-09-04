@@ -6,6 +6,12 @@
 # sets next). The reusable workflow_call files here run in the org repositories
 # that call them, so they target these pools by the single label; this
 # repository's own workflows (ci.yaml, release.yaml) stay on ubuntu-latest.
+#
+# The reusable workflows pick the label by the CALLER's owner: repositories in
+# InboxxHQ-CoderAxis get the pool, every other owner (the CoderAxis org, where
+# the cores live and no scale set is registered yet) falls back to
+# ubuntu-latest rather than queueing forever. Once a scale set is registered
+# in CoderAxis under the same names, the expression collapses to the label.
 self-hosted-runner:
   labels:
     - inboxxhq-ci
