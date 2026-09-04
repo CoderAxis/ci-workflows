@@ -569,6 +569,14 @@ jobs:
           (cd "${CLI_PATH}" && go build -o "${RUNNER_TEMP}/ihq" ./cmd/ihq)
           "${RUNNER_TEMP}/ihq" --workspace "$(pwd)" audit --fail-on error --min-severity warning --no-color --links none
 
+      # The committed projection the docs site renders must be the one this fleet produces.
+      # A stale artifact is a page telling readers something the workspace no longer says.
+      - name: The committed requirement-chain artifact matches the fleet
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${RUNNER_TEMP}/ihq" --workspace "$(pwd)" audit --check-report --no-color --links none
+
   # ── API contracts ─────────────────────────────────────────────────────────────────────────
   # Closes the hole G3 left: it globbed contracts/ for a *.json and passed if one existed, so a
   # 56-byte stub with "paths": {} counted as a published contract and six live services were in
