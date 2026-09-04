@@ -53,7 +53,7 @@ jobs:
   # This job covers the rest, and new central checkers should arrive with a self-test here.
   central-scripts-uuid-policy:
     name: Central scripts - UUID version policy precision and recall
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -113,7 +113,7 @@ jobs:
 
   central-scripts-raw-sql:
     name: Central scripts - raw-SQL guard precision and recall
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -161,7 +161,7 @@ jobs:
   # result.
   docs-only-fast-path:
     name: Documentation-only fast path - classifier and wiring self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -201,7 +201,7 @@ jobs:
   # re-flags prose would put an error on 92 repositories for the name of a markdown file.
   org-vocabulary:
     name: Org vocabulary - stage behaviour, exception precision, identifier scope
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -278,7 +278,7 @@ jobs:
   # dropping the backoff cap all reddened a specific, named case above, not just "some test".
   http-retry:
     name: HTTP retry helper - transient vs deterministic failure self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -349,7 +349,7 @@ jobs:
   # remains a human obligation on any change to that file.
   app-token-gate:
     name: App token gate - the event gate matches the admitted sub shapes
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -385,7 +385,7 @@ jobs:
   # policy that used to live only in workflow comments is now machine-verified on this repo itself.
   delivery-model:
     name: Delivery model invariants
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -424,7 +424,7 @@ jobs:
   # Policy SSOT: ADR-0072 (Enterprise Dockerfile Standard).
   dockerfile-standard:
     name: Dockerfile standard - catalog + template self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -621,7 +621,7 @@ jobs:
   # Policy SSOT: ADR-0081.
   docs-governance:
     name: Docs governance - catalog + checker self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -665,7 +665,7 @@ jobs:
   # Policy SSOT: SHARED_CORE_RELEASE_AND_PROMOTION.md, ADR-0081.
   release-cascade:
     name: Release cascade - DAG derivation + pin policy self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -742,7 +742,7 @@ jobs:
   # Policy SSOT: ADR-0081, ADR-0051.
   workflow-centralization:
     name: Workflow centralization - catalog + checker self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -850,7 +850,7 @@ jobs:
   # Policy SSOT: ADR-0051, ADR-0110.
   ci-identity:
     name: CI identity - catalog + checker self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -989,7 +989,7 @@ jobs:
   # Policy SSOT: ADR-0048, ADR-0067, RFC-0001.
   api-contract:
     name: API contract - catalog + reference artifact self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1180,7 +1180,7 @@ jobs:
   # must produce zero findings, and a dirty tree must still fire FE-SDK-0001..0004.
   frontend-sdk-contract:
     name: Frontend SDK contract - catalog + detector self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1216,7 +1216,7 @@ jobs:
   # Policy SSOT: ADR-0095, ADR-0096, RFC-0039.
   gateway-baseline:
     name: Gateway baseline - catalog + detector self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1306,7 +1306,7 @@ jobs:
   # `--repo-root .` against a repository layout the script has to be told about.
   log-record-kinds:
     name: Log record kinds - catalogue detector self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1410,7 +1410,7 @@ jobs:
   # repository's belief about its shape.
   run-triage:
     name: Run triage - refusal against gate verdict self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Check out ci-workflows
@@ -1628,7 +1628,7 @@ jobs:
   # resolve it at all.
   service-ports-controls:
     name: Service ports - control catalog and detector self-check
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1684,7 +1684,7 @@ jobs:
 
   release-drift:
     name: Release drift - the v1 tag matches main
-    runs-on: inboxxhq-ci
+    runs-on: ubuntu-latest
     # No longer on push. release.yaml now cuts a release for every commit that lands on main, so on
     # push this job asserts something that is false by construction until that release runs - and
     # gating the release on CI while CI contains this job deadlocks: CI cannot pass until the
