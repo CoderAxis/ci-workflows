@@ -29,7 +29,7 @@ on:
 jobs:
   workflow-lint:
     name: Workflow definitions lint clean
-    runs-on: inboxxhq-ci
+    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       contents: read
