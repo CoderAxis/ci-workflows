@@ -47,7 +47,7 @@ env:
 jobs:
   sdk-contract:
     name: Frontend SDK contract
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 10
     permissions:
       contents: read

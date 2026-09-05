@@ -127,7 +127,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     outputs:
       service: ${{ steps.id.outputs.service }}
@@ -200,7 +200,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     # This job holds a billed runner for as long as it waits, so the ceiling is a spending limit
     # first and a correctness limit second. The timeout is a refusal, not a pass: running out of
     # time fails the gate.
@@ -335,7 +335,7 @@ jobs:
   release:
     name: Verify, tag, and publish
     needs: [resolve, ci-gate]
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 30
     permissions:
       contents: write # push the tag, create the release
@@ -800,7 +800,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 30
     strategy:
       # One unreachable consumer must not suppress the others; a partial fan-out is recoverable
@@ -869,7 +869,7 @@ jobs:
     name: Report fan-out result
     needs: [resolve, release, bump-consumers]
     if: always() && needs.release.outputs.releasable == 'true'
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     steps:
       - name: Fail if any consumer was not bumped

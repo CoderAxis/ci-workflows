@@ -86,7 +86,7 @@ env:
 jobs:
   docs-governance:
     name: Documentation governance
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 10
     steps:
       - name: Checkout docs repo (caller)
