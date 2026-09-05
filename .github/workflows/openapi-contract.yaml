@@ -231,6 +231,11 @@ jobs:
         shell: bash
         env:
           CROSS_REPO_TOKEN: ${{ steps.modauth.outputs.token }}
+          # A CI runner is a pod, so KUBERNETES_SERVICE_HOST is set and platform-shared-go's
+          # envutil.IsDeployed() says "deployed"; a test that boots a router then refuses to
+          # start without SERVICE_TOKEN_SECRET (v1.56+). A test process is not a deployment:
+          # blank the variable for the test command only, which is also what a workstation sees.
+          KUBERNETES_SERVICE_HOST: ""
         run: ${{ inputs['contract-test-command'] }}
 
   # ── the registry stages ───────────────────────────────────────────────────────────────────

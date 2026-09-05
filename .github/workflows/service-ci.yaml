@@ -489,6 +489,11 @@ jobs:
       - name: Tests with coverage
         shell: bash
         env:
+          # A CI runner is a pod, so KUBERNETES_SERVICE_HOST is set and platform-shared-go's
+          # envutil.IsDeployed() says "deployed"; a test that boots a router then refuses to
+          # start without SERVICE_TOKEN_SECRET (v1.56+). A test process is not a deployment:
+          # blank the variable for the test command only, which is also what a workstation sees.
+          KUBERNETES_SERVICE_HOST: ""
           # Through env, not inline `${{ }}`: a run block interpolates before bash sees it, so a
           # caller's string would be shell, not an argument.
           GO_TAGS: ${{ inputs.go_build_tags }}
@@ -588,6 +593,10 @@ jobs:
 
       - name: Contract tests when present
         shell: bash
+        env:
+          # See "Tests with coverage": a runner pod is not a deployment, so the shared
+          # envutil.IsDeployed() must not see the pod's KUBERNETES_SERVICE_HOST here either.
+          KUBERNETES_SERVICE_HOST: ""
         run: |
           set -euo pipefail
           if [[ -d tests/contracts ]]; then GOWORK=off go test ./tests/contracts/... -count=1; \
@@ -1692,6 +1701,10 @@ jobs:
       - name: Run integration tests
         if: steps.selection.outputs.run == 'true'
         shell: bash
+        env:
+          # See "Tests with coverage": a runner pod is not a deployment, so the shared
+          # envutil.IsDeployed() must not see the pod's KUBERNETES_SERVICE_HOST here either.
+          KUBERNETES_SERVICE_HOST: ""
         run: |
           set -euo pipefail
           mapfile -t pkgs < <(GOWORK=off go list ./tests/integration/... 2>/dev/null)
