@@ -122,7 +122,7 @@ env:
 jobs:
   service-ports:
     name: Service ports agree across manifests, images and the registry
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 20
     permissions:
       contents: read

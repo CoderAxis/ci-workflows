@@ -109,7 +109,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     outputs:
       service: ${{ steps.id.outputs.service }}
@@ -164,7 +164,7 @@ jobs:
   # alongside `resolve` rather than after it and adds nothing to the critical path.
   docs-only:
     name: Documentation-only change
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     permissions:
       contents: read
@@ -230,7 +230,7 @@ jobs:
   # than a hole, and test_pin_only_diff.py asserts every line of it.
   pin-only:
     name: Dependency-pin-only change
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     permissions:
       contents: read
@@ -280,7 +280,7 @@ jobs:
   supported-language:
     name: Language is supported
     needs: resolve
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 2
     steps:
       - name: Refuse a language this pipeline cannot build
@@ -306,7 +306,7 @@ jobs:
     name: Repository standards
     needs: [resolve, pin-only]
     if: needs.pin-only.outputs.pin_only != 'true'
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 15
     steps:
       - name: Check out the service repo
@@ -787,7 +787,7 @@ jobs:
       # "No OIDC token available" and the gate never runs. Same omission, same failure mode, that
       # WFC-0004 already caught on the schema job.
       id-token: write
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -1008,7 +1008,7 @@ jobs:
   lanes:
     name: Required workflow lanes
     needs: resolve
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -1144,7 +1144,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 45
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
@@ -1251,7 +1251,7 @@ jobs:
     if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go' && needs.pin-only.outputs.pin_only != 'true'
     permissions:
       contents: read
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -1310,7 +1310,7 @@ jobs:
     if: needs.pin-only.outputs.pin_only != 'true'
     permissions:
       contents: read
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -1350,7 +1350,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 15
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
@@ -1426,7 +1426,7 @@ jobs:
     name: ADR and API contract validation
     needs: [resolve, pin-only]
     if: needs.pin-only.outputs.pin_only != 'true'
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 10
     permissions:
       contents: read
@@ -1779,7 +1779,7 @@ jobs:
     if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.repo_kind == 'deployable' && needs.pin-only.outputs.pin_only != 'true'
     permissions:
       contents: read
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     steps:
       - name: Check out the service repo
@@ -1839,7 +1839,7 @@ jobs:
     if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.repo_kind == 'deployable' && needs.pin-only.outputs.pin_only != 'true'
     permissions:
       contents: read
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     steps:
       - name: Check out the service repo
@@ -1956,7 +1956,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 25
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
@@ -2441,7 +2441,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -2493,7 +2493,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 15
     steps:
       # Checked out under the repository's real name, not a fixed "service" directory.
@@ -2544,7 +2544,7 @@ jobs:
     # cannot have moved a dependency, so the review would compare a set against itself.
     needs: [resolve, docs-only]
     if: github.event_name == 'pull_request' && needs.docs-only.outputs.docs_only != 'true'
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -2718,7 +2718,7 @@ jobs:
     # does not run once any needed job has been skipped - which is the normal shape here, so the
     # alert would have fired only on the subset of runs where every gate happened to be relevant.
     if: always() && contains(needs.*.result, 'failure')
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     permissions:
       contents: read
