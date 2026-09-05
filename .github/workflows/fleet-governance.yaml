@@ -578,13 +578,22 @@ jobs:
           BRAND_OWNER: ${{ inputs.brand_owner }}
           FLEET_OWNER: ${{ inputs.fleet_owner }}
           CLIENT_DOCS_REPO: ${{ inputs.client_docs_repo }}
+          FRONTEND_REPOS: ${{ inputs.frontend_repos }}
         run: |
           set -euo pipefail
           clone() { [ -d "$2/.git" ] || git clone --quiet --depth 1 --no-tags "https://github.com/$1.git" "$2"; }
           clone "${BRAND_OWNER}/${CLIENT_DOCS_REPO}" "docs/${CLIENT_DOCS_REPO}"
           clone "${FLEET_OWNER}/platform-contracts-go" contracts/platform-contracts-go
           clone "${FLEET_OWNER}/ci-workflows" ci-workflows
-          for d in "docs/${CLIENT_DOCS_REPO}" contracts/platform-contracts-go ci-workflows; do
+          # The browser and unit suites that prove the client-facing requirements live in the
+          # frontends; without them every invariant they bind reads as unproven and every P0
+          # behind one fails the gate for the wrong reason.
+          clone "${FLEET_OWNER}/frontend-core" frontend/frontend-core
+          while read -r slug; do
+            [ -n "${slug}" ] || continue
+            clone "${slug}" "frontend/${slug##*/}"
+          done <<< "${FRONTEND_REPOS}"
+          for d in "docs/${CLIENT_DOCS_REPO}" contracts/platform-contracts-go ci-workflows frontend/frontend-core; do
             [ -d "$d/.git" ] || { echo "::error::$d is absent, so the requirement chain cannot be read"; exit 1; }
           done
 
