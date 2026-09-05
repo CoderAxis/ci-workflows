@@ -104,6 +104,12 @@ concurrency:
   group: content-fanout-${{ github.repository }}
   cancel-in-progress: false
 
+# The pool's runner image ships Debian's python, which refuses `pip install` into the system
+# site-packages (PEP 668, "externally-managed-environment"). The lanes install small pure-python
+# tools per job on an ephemeral runner, which is exactly the case the flag exists for.
+env:
+  PIP_BREAK_SYSTEM_PACKAGES: "1"
+
 jobs:
   # ── consumers ─────────────────────────────────────────────────────────────────────────────
   resolve:

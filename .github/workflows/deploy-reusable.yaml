@@ -177,6 +177,12 @@ concurrency:
   # published and skips the rebuild entirely, so the second run is short rather than duplicated.
   cancel-in-progress: false
 
+# The pool's runner image ships Debian's python, which refuses `pip install` into the system
+# site-packages (PEP 668, "externally-managed-environment"). The lanes install small pure-python
+# tools per job on an ephemeral runner, which is exactly the case the flag exists for.
+env:
+  PIP_BREAK_SYSTEM_PACKAGES: "1"
+
 jobs:
   # Identity is derived here, not accepted. Inside a reusable workflow GITHUB_REPOSITORY_ID is
   # the ORIGINAL caller, so calling this workflow directly gains nothing: a repo always resolves

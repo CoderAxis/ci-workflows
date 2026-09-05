@@ -93,6 +93,12 @@ concurrency:
   group: service-ci-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The pool's runner image ships Debian's python, which refuses `pip install` into the system
+# site-packages (PEP 668, "externally-managed-environment"). The lanes install small pure-python
+# tools per job on an ephemeral runner, which is exactly the case the flag exists for.
+env:
+  PIP_BREAK_SYSTEM_PACKAGES: "1"
+
 jobs:
   # ── identity ────────────────────────────────────────────────────────────────────────────────
   # Everything downstream is conditioned on this job's outputs. It fails closed: a repository the
@@ -395,7 +401,11 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    # Hosted, not the pool: this job declares `services:` (Postgres, Redis), which the runner
+    # starts through Docker, and the scale sets run container_mode "none" (no daemon). On the
+    # pool it fails before a single test with "Value cannot be null (network)". It moves to the
+    # pool when the pool runs containerMode kubernetes (modules/arc-runners in inboxxhq-infra).
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     # Started for every Go repo, not only the ones that need it, because `services:` is resolved
     # before `needs` is available and so cannot be made conditional. The alternative — a second
