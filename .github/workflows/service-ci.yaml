@@ -1178,6 +1178,14 @@ jobs:
         shell: bash
         env:
           MOD_TOKEN: ${{ steps.modauth.outputs.token }}
+          # govulncheck builds SSA for the whole module graph and its heap grows at
+          # ~40 MiB/s on the larger services; on the inboxxhq-ci pool it ran past the
+          # runner container's cgroup limit, the kernel group-killed the container
+          # (exit 137), ARC recreated the pod under the same name and GitHub reported
+          # "the self-hosted runner lost communication with the server". A soft heap
+          # bound makes the collector work harder instead of letting the heap outrun
+          # the container. Hosted runners (16 GiB) are unaffected either way.
+          GOMEMLIMIT: 3GiB
         run: |
           set -euo pipefail
           git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
@@ -1193,6 +1201,7 @@ jobs:
         shell: bash
         env:
           MOD_TOKEN: ${{ steps.modauth.outputs.token }}
+          GOMEMLIMIT: 3GiB
         run: |
           set -euo pipefail
           git config --global url."https://x-access-token:${MOD_TOKEN}@github.com/".insteadOf "https://github.com/"
