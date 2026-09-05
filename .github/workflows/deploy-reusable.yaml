@@ -215,7 +215,7 @@ jobs:
   contract-gate:
     needs: resolve
     name: Contract Gate (breaking-change detection)
-    runs-on: ${{ fromJSON(inputs.runner) }}
+    runs-on: ${{ (contains(inputs.runner, 'inboxxhq-') && !(github.repository_owner == 'InboxxHQ-CoderAxis')) && 'ubuntu-latest' || fromJSON(inputs.runner) }}
     steps:
       - name: Checkout service repo
         uses: actions/checkout@v4
@@ -508,7 +508,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ fromJSON(inputs.runner) }}
+    runs-on: ${{ (contains(inputs.runner, 'inboxxhq-') && !(github.repository_owner == 'InboxxHQ-CoderAxis')) && 'ubuntu-latest' || fromJSON(inputs.runner) }}
     outputs:
       contract_version: ${{ steps.contract.outputs.version }}
       image_digest: ${{ steps.build.outputs.image_digest }}
