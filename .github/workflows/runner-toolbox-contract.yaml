@@ -1,0 +1,71 @@
+name: Runner toolbox contract
+
+# Checks the tool set of the runner pool the fleet's workflows actually run on.
+#
+# The reusable workflows in this repository were written against GitHub's ubuntu-latest and
+# assume its tools are simply there. The self-hosted pool (inboxxhq-infra modules/arc-runners,
+# image ci-workflows-runner/runner-image/Dockerfile.gha) starts from GitHub's minimal runner
+# image, so every one of those assumptions is a package somebody has to have added. Each one
+# missing so far was found by a lane failing hours after the image had rolled: python3
+# (nineteen lanes, 2026-09-04), gh and shellcheck (2026-09-04), envsubst (2026-09-05), and on
+# 2026-09-05 the C toolchain - module-release.yaml's `go test -race` needs cgo, Go disables cgo
+# when it finds no compiler, and every module release in the fleet died before tagging while
+# the fan-out reported the version as published.
+#
+# scripts/runner-toolbox-contract.sh is the executable list of those assumptions. The image
+# build runs the identical script inside the image before pushing (inboxxhq-infra
+# ci-workflows-runner/runner-image/build.sh); this workflow runs it on a LIVE runner, daily and
+# on demand, because the deployed image and the built one can differ, and because the fleet's
+# assumptions can grow after the image did. It installs Go the way the lanes do, so the cgo
+# probe asks Go itself instead of inferring from the presence of gcc.
+#
+# WHY THIS IS `workflow_call` ONLY, WITH NO SCHEDULE OF ITS OWN. This repository is public, and a
+# self-hosted runner group does not admit public repositories (see app-token-selftest.yaml): a
+# schedule or a dispatch here would queue forever and never touch a pool runner. A scale set also
+# registers with exactly one organization. So the check is run by thin callers in PRIVATE
+# repositories, one per organization: inboxxhq-infra's runner-toolbox-contract.yaml (schedule +
+# dispatch) covers the InboxxHQ-CoderAxis pool; the CoderAxis pool needs the same three-line
+# caller in a private CoderAxis repository, and until it has one it is checked only by the cgo
+# gate that every module release runs on it.
+#
+# Adding a tool to the image means adding its probe to the script in the same change.
+on:
+  workflow_call:
+    inputs:
+      actions_ref:
+        description: "Ref of coderaxis/ci-workflows to take the contract script from."
+        required: false
+        type: string
+        default: v1
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Runner toolbox contract (inboxxhq-ci)
+    runs-on: inboxxhq-ci
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # A thin caller in another repository runs this workflow, and a plain checkout there
+      # would fetch the caller, not the script. Check the contract out of this repository at
+      # the ref the caller pinned (the same pattern as docs-governance.yaml).
+      - name: Checkout the contract
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/ci-workflows
+          ref: ${{ inputs.actions_ref }}
+          path: .runner-toolbox-contract
+
+      # The lanes get Go from setup-go, so the cgo question must be asked of that Go, on this
+      # runner, not of a toolchain baked into the image (there is none).
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Run the runner toolbox contract
+        run: bash .runner-toolbox-contract/scripts/runner-toolbox-contract.sh

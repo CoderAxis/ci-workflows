@@ -569,6 +569,36 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # ── the runner must be able to run the race detector ──────────────────────────────────
+      # The Test step below runs `go test -race`, and the race detector needs cgo. Go does not
+      # fail when it finds no C compiler on PATH; it silently sets CGO_ENABLED=0 (a toolchain
+      # decision since Go 1.20), so on a runner image without gcc the symptom is
+      # `go: -race requires cgo` - after the tidy check and both cross-builds, minutes in, with a
+      # message that reads like a Go problem rather than the runner problem it is. On 2026-09-05
+      # the scale-set image (inboxxhq-infra ci-workflows-runner/runner-image/Dockerfile.gha)
+      # shipped without a compiler and every module release in the fleet died there:
+      # platform-contracts-go v0.61.0, order-core v0.16.0 and ledger-core v0.5.0 were computed
+      # and never tagged, and the fan-out reported them as published.
+      #
+      # So ask the question directly, first, and name the fix. This gate is never answered by
+      # dropping -race: the race detector is part of what "verified" means for a published
+      # module, and a release without it is a weaker release that looks identical to a full one.
+      - name: Gate - the runner can run the race detector
+        if: steps.ver.outputs.releasable == 'true'
+        run: |
+          set -euo pipefail
+          cgo="$(go env CGO_ENABLED)"
+          cc="$(go env CC)"
+          if [[ "${cgo}" != "1" ]]; then
+            if command -v "${cc}" >/dev/null 2>&1; then where="found on PATH"; else where="not on PATH"; fi
+            echo "::error::cgo is disabled on this runner (go env CGO_ENABLED=${cgo}, CC=${cc} ${where})," \
+                 "so 'go test -race' cannot run and this module cannot be verified. The runner image" \
+                 "must ship a C toolchain: inboxxhq-infra ci-workflows-runner/runner-image/Dockerfile.gha" \
+                 "(gcc + libc6-dev), checked by runner-toolbox-contract.yaml. Do not drop -race here."
+            exit 1
+          fi
+          echo "cgo enabled; ${cc} is $("${cc}" --version | head -1)"
+
       - name: Mint module-read token
         id: modauth
         if: steps.ver.outputs.releasable == 'true'
