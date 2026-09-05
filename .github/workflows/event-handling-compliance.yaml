@@ -61,7 +61,8 @@ permissions:
 jobs:
   event-handling-compliance:
     name: Event handling compliance
-    runs-on: ${{ inputs.runs_on }}
+    # A pool label only means something inside InboxxHQ-CoderAxis; any other owner is hosted.
+    runs-on: ${{ (startsWith(inputs.runs_on, 'inboxxhq-') && !(github.repository_owner == 'InboxxHQ-CoderAxis')) && 'ubuntu-latest' || inputs.runs_on }}
     timeout-minutes: 10
     steps:
       - name: Checkout service (caller)
