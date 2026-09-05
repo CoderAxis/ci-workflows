@@ -283,6 +283,10 @@ jobs:
                   short = name[: -len("-service")] if name.endswith("-service") else name
                   if repo["name"] == edge_repo:
                       dest = edge_path
+                  elif svc.get("workspace_dir"):
+                      # A service checked out beside its domain siblings (chat-sync under
+                      # services/chat/) says so in the catalog; the rule below is the default.
+                      dest = f"{svc['workspace_dir'].strip('/')}/{repo['name']}"
                   elif "gateway" in repo["name"] or repo["name"].endswith("-bff"):
                       dest = f"gateways/{repo['name']}"
                   else:
