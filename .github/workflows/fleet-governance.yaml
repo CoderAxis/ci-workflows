@@ -67,6 +67,14 @@ on:
         required: false
         type: string
         default: InboxxHQ-CoderAxis
+      client_docs_repo:
+        description: >-
+          The client documentation hub (PRDs, journeys, client workflows, capability registry)
+          under brand_owner. The requirement-chain audit reads it at docs/<name>; it is not in
+          the service catalog, so it is fetched by name.
+        required: false
+        type: string
+        default: inboxxhq-platform-docs
       edge_gateway_path:
         description: >-
           Where the edge gateway must land. Every other repository is placed by rule, but this
@@ -560,6 +568,26 @@ jobs:
       # them, and it fails on any declared link that does not resolve. It never runs a suite:
       # run evidence is recorded by `ihq cuj verify` and `ihq audit run`, and its absence is
       # reported by the audit as information, not failure.
+      # The audit reads three trees the service catalog does not name: the client docs hub
+      # (the PRDs and journeys the chain starts from), the Go contracts checkout (gRPC method
+      # names) and this repository's controls (the ids an ADR's enforced_by may cite). The
+      # fleet token already covers both accounts, so plain clones work.
+      - name: Assemble what the requirement chain reads beyond the fleet
+        shell: bash
+        env:
+          BRAND_OWNER: ${{ inputs.brand_owner }}
+          FLEET_OWNER: ${{ inputs.fleet_owner }}
+          CLIENT_DOCS_REPO: ${{ inputs.client_docs_repo }}
+        run: |
+          set -euo pipefail
+          clone() { [ -d "$2/.git" ] || git clone --quiet --depth 1 --no-tags "https://github.com/$1.git" "$2"; }
+          clone "${BRAND_OWNER}/${CLIENT_DOCS_REPO}" "docs/${CLIENT_DOCS_REPO}"
+          clone "${FLEET_OWNER}/platform-contracts-go" contracts/platform-contracts-go
+          clone "${FLEET_OWNER}/ci-workflows" ci-workflows
+          for d in "docs/${CLIENT_DOCS_REPO}" contracts/platform-contracts-go ci-workflows; do
+            [ -d "$d/.git" ] || { echo "::error::$d is absent, so the requirement chain cannot be read"; exit 1; }
+          done
+
       - name: Every link of the requirement chain resolves (ihq audit)
         shell: bash
         env:
