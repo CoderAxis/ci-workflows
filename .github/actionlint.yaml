@@ -7,11 +7,11 @@
 # that call them, so they target these pools by the single label; this
 # repository's own workflows (ci.yaml, release.yaml) stay on ubuntu-latest.
 #
-# The reusable workflows pick the label by the CALLER's owner: repositories in
-# InboxxHQ-CoderAxis get the pool, every other owner (the CoderAxis org, where
-# the cores live and no scale set is registered yet) falls back to
-# ubuntu-latest rather than queueing forever. Once a scale set is registered
-# in CoderAxis under the same names, the expression collapses to the label.
+# Both organizations run scale sets under these names (inboxxhq-infra
+# modules/arc-runners: InboxxHQ-CoderAxis in arc-runners, CoderAxis in
+# arc-runners-coderaxis), so a reusable workflow names the label plainly
+# whichever owner calls it. The lanes that declare `services:` stay on
+# ubuntu-latest until the pools run a container mode.
 self-hosted-runner:
   labels:
     - inboxxhq-ci
