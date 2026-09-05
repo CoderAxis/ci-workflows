@@ -274,7 +274,19 @@ jobs:
                       continue
                   if not (repo.get("organization") and repo.get("name")):
                       continue
-                  dest = edge_path if repo["name"] == edge_repo else f"services/{name}/{repo['name']}"
+                  # The workspace convention every catalog path assumes: a service's three
+                  # repositories sit together under services/<name minus "-service">/ (org-core,
+                  # org-core-postgres and inboxxhq-org-service under services/org/), and every
+                  # gateway or BFF under gateways/. Suite runner paths, coverage.go module paths
+                  # and ADR enforcement paths are written against that layout, so a fleet
+                  # assembled any other way reads as unproven for a reason of its own making.
+                  short = name[: -len("-service")] if name.endswith("-service") else name
+                  if repo["name"] == edge_repo:
+                      dest = edge_path
+                  elif "gateway" in repo["name"] or repo["name"].endswith("-bff"):
+                      dest = f"gateways/{repo['name']}"
+                  else:
+                      dest = f"services/{short}/{repo['name']}"
                   rows.add(f"{repo['organization']}/{repo['name']}\t{dest}")
 
           if not rows:
