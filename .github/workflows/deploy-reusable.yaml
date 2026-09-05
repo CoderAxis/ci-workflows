@@ -69,9 +69,11 @@ on:
       api_contract_version:
         description: >-
           Registry version of the API contract this build serves, recorded in the release
-          catalogue so an environment can say which contract it is running. Empty means the
-          caller did not publish one; the field is then omitted rather than guessed, because a
-          wrong pointer here is worse than an absent one - it would be followed.
+          catalogue so an environment can say which contract it is running: the version the
+          caller published this run, or the one its unchanged spec already is byte for byte.
+          Empty means the caller could not verify one; the field is then omitted rather than
+          guessed, because a wrong pointer here is worse than an absent one - it would be
+          followed.
         required: false
         type: string
         default: ""
@@ -388,7 +390,7 @@ jobs:
             dangling=false
           else
             echo "compare=false" >> "${GITHUB_OUTPUT}"
-            echo "::notice::${SERVICE} has no contract recorded for dev, and this run published ${PUBLISHED_THIS_RUN}, so latest.json is this same document. The breaking-change comparison is SKIPPED, not passed; it starts working once dev has one recorded deploy."
+            echo "::notice::${SERVICE} has no contract recorded for dev, and this spec is ${PUBLISHED_THIS_RUN} in the registry (published this run or already there), so latest.json is this same document. The breaking-change comparison is SKIPPED, not passed; it starts working once dev has one recorded deploy."
             exit 0
           fi
 
@@ -436,9 +438,9 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       # What contract this deploy carries, so the step below can tell a break that was
-      # declared from one that was not. api_contract_version is set only when THIS run
-      # published, and a run publishes only when the spec changed; when it did not, the
-      # version on file in the registry is still the one being deployed.
+      # declared from one that was not. api_contract_version names the version this spec is
+      # in the registry (published this run, or already there byte for byte); when the caller
+      # could not verify one, the version on file in the registry is still the best answer.
       - name: Resolve the contract version being deployed
         id: deploying
         if: steps.baseline.outputs.compare == 'true'

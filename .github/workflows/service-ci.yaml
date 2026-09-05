@@ -2679,10 +2679,14 @@ jobs:
       # Previously each repo passed this literal in its own deploy.yaml, so a one-line edit to
       # `service_name:` was enough to publish one service's code under another's identity.
       service_name: ${{ needs.resolve.outputs.service }}
-      # What this deploy will make the environment serve. Empty whenever nothing was published -
-      # publication is opt-in, and a spec that did not change publishes nothing - so the release
-      # record omits the field rather than asserting a version it did not verify.
-      api_contract_version: ${{ needs.contract.outputs.published-version }}
+      # What this deploy will make the environment serve: the version this run published, or
+      # the one the unchanged spec already is in the registry, byte for byte. Empty when
+      # publication is off for this service, so the release record omits the field rather than
+      # asserting a version nothing verified. It used to carry only the version published THIS
+      # run, which left every non-spec commit's record naming nothing; the portal then fell
+      # back to the newest record that did name one, and that was v6.3.0 for an org-bff serving
+      # v6.4.0 (2026-09-05) because a hand deploy had raced the publish.
+      api_contract_version: ${{ needs.contract.outputs.contract-version }}
       # Same switch the contract job is gated on above. When it is off the registry job is
       # skipped, so no run can move latest.json and the breaking-change gate would be judging
       # every future spec against a baseline frozen at whatever was last written there by hand.

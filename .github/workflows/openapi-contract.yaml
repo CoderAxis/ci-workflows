@@ -91,6 +91,13 @@ on:
           The registry version this run allocated, or empty if nothing was published. Empty
           means "unknown", not "unchanged": publication is opt-in, so most callers get empty.
         value: ${{ jobs.registry.outputs.published-version }}
+      contract-version:
+        description: >-
+          The registry version whose bytes this spec IS: the one this run allocated, or the one
+          already published when the spec was byte-identical to its snapshot. This is what a
+          deploy should record. Empty when publication is off for the caller or the spec matched
+          nothing, so a record never names a version that was not verified byte-for-byte.
+        value: ${{ jobs.registry.outputs.contract-version }}
 
 permissions:
   contents: read
@@ -238,6 +245,13 @@ jobs:
       # about to serve. Empty when nothing was published, which callers must treat as "unknown"
       # rather than "unchanged": publication is opt-in, so empty is the common case.
       published-version: ${{ steps.publish.outputs.published_version }}
+      # Either the version just allocated or, for an unchanged spec, the one its bytes already
+      # carry in the registry. A deploy that records only published-version leaves every
+      # non-spec commit with a record naming nothing, and the mirror then falls back to the last
+      # record that did name one -- which is wrong the moment a publish happened out of band or
+      # a deploy raced the publish (org-bff v6.4.0, 2026-09-05: published 03:04Z, dev record
+      # written 02:23Z, portal pinned to v6.3.0).
+      contract-version: ${{ steps.publish.outputs.contract_version }}
     permissions:
       contents: read
       id-token: write
@@ -368,6 +382,18 @@ jobs:
             # cannot consume a version number for an identical document.
             if [ -f "${svc_dir}/latest.json" ] && cmp -s "${spec}" "${svc_dir}/latest.json"; then
               echo "${SERVICE} baseline already matches this spec; nothing to publish."
+              # Name the version these bytes are, so the deploy can record it. Only when the
+              # snapshot VERSION points at is byte-identical too: latest.json alone could have
+              # been moved by hand without its snapshot, and a record must not name a snapshot
+              # that says something else.
+              existing=""
+              [ -f "${svc_dir}/VERSION" ] && existing="$(tr -d '[:space:]' < "${svc_dir}/VERSION")"
+              if [ -n "${existing}" ] && cmp -s "${spec}" "${svc_dir}/${existing}.json"; then
+                echo "contract_version=${existing}" >> "${GITHUB_OUTPUT}"
+                echo "This spec is ${SERVICE} ${existing}, byte for byte; the deploy records it."
+              else
+                echo "::warning::${SERVICE}/latest.json matches this spec but no snapshot named by VERSION does, so no version is recorded for this deploy."
+              fi
               pushed="noop"; break
             fi
 
@@ -467,6 +493,7 @@ jobs:
             if git push --quiet origin HEAD:main 2>/dev/null; then
               echo "Published ${SERVICE}/latest.json and ${svc_dir}/${snap} (attempt ${attempt})."
               echo "published_version=${version}" >> "${GITHUB_OUTPUT}"
+              echo "contract_version=${version}" >> "${GITHUB_OUTPUT}"
               pushed="yes"; break
             fi
             echo "push race lost (attempt ${attempt}); rebasing on latest main"
