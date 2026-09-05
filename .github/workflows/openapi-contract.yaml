@@ -109,7 +109,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ (contains(inputs.runner, 'inboxxhq-') && !(github.repository_owner == 'InboxxHQ-CoderAxis')) && 'ubuntu-latest' || fromJson(inputs.runner) }}
+    runs-on: ${{ fromJson(inputs.runner) }}
     timeout-minutes: 20
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
@@ -241,7 +241,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ (contains(inputs.runner, 'inboxxhq-') && !(github.repository_owner == 'InboxxHQ-CoderAxis')) && 'ubuntu-latest' || fromJson(inputs.runner) }}
+    runs-on: ${{ fromJson(inputs.runner) }}
     timeout-minutes: 15
     env:
       REGISTRY_REPO: InboxxHQ-CoderAxis/inboxxhq-api-contracts

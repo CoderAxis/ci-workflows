@@ -117,7 +117,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 10
     outputs:
       artifact: ${{ steps.consumers.outputs.artifact }}
@@ -332,7 +332,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     # Generous, because it is waiting for the repository's full CI lane rather than doing work. The
     # timeout is a refusal, not a pass: running out of time fails the gate.
     timeout-minutes: 45
@@ -447,7 +447,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 10
     strategy:
       # One unreachable consumer must not suppress the others; a partial fan-out is recoverable by
@@ -636,7 +636,7 @@ jobs:
     # is already red for a reason those jobs stated precisely, and repeating it here would put a
     # second, vaguer error on the same fault.
     if: always() && needs.resolve.result == 'success' && needs.ci-gate.result == 'success'
-    runs-on: ${{ github.repository_owner == 'InboxxHQ-CoderAxis' && 'inboxxhq-ci' || 'ubuntu-latest' }}
+    runs-on: inboxxhq-ci
     timeout-minutes: 5
     steps:
       - name: Fail if any consumer was not notified
