@@ -19,15 +19,17 @@ name: Runner toolbox contract
 # assumptions can grow after the image did. It installs Go the way the lanes do, so the cgo
 # probe asks Go itself instead of inferring from the presence of gcc.
 #
-# A scale set registers with exactly one organization, so the schedule here reaches only the
-# CoderAxis pool. inboxxhq-infra carries a thin caller (this workflow is `workflow_call`) for
-# the InboxxHQ-CoderAxis pool. Same image, checked from both sides.
+# WHY THIS IS `workflow_call` ONLY, WITH NO SCHEDULE OF ITS OWN. This repository is public, and a
+# self-hosted runner group does not admit public repositories (see app-token-selftest.yaml): a
+# schedule or a dispatch here would queue forever and never touch a pool runner. A scale set also
+# registers with exactly one organization. So the check is run by thin callers in PRIVATE
+# repositories, one per organization: inboxxhq-infra's runner-toolbox-contract.yaml (schedule +
+# dispatch) covers the InboxxHQ-CoderAxis pool; the CoderAxis pool needs the same three-line
+# caller in a private CoderAxis repository, and until it has one it is checked only by the cgo
+# gate that every module release runs on it.
 #
 # Adding a tool to the image means adding its probe to the script in the same change.
 on:
-  schedule:
-    - cron: "17 5 * * *"
-  workflow_dispatch:
   workflow_call:
     inputs:
       actions_ref:
@@ -49,14 +51,12 @@ jobs:
     steps:
       # A thin caller in another repository runs this workflow, and a plain checkout there
       # would fetch the caller, not the script. Check the contract out of this repository at
-      # the ref the caller pinned (the same pattern as docs-governance.yaml). `inputs` is only
-      # populated when called - the schedule and the dispatch here declare none - so an empty
-      # value means a run in this repository, whose own commit is the ref to use.
+      # the ref the caller pinned (the same pattern as docs-governance.yaml).
       - name: Checkout the contract
         uses: actions/checkout@v4
         with:
           repository: coderaxis/ci-workflows
-          ref: ${{ inputs.actions_ref || github.sha }}
+          ref: ${{ inputs.actions_ref }}
           path: .runner-toolbox-contract
 
       # The lanes get Go from setup-go, so the cgo question must be asked of that Go, on this
