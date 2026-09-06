@@ -163,6 +163,13 @@ runs:
       working-directory: ${{ inputs.target-path }}
       env:
         GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+        # A CI runner is a pod, so KUBERNETES_SERVICE_HOST is set and platform-shared-go's
+        # envutil.IsDeployed() says "deployed"; a consumer's route tests then refuse to start
+        # without SERVICE_TOKEN_SECRET (v1.56+). A test process is not a deployment: blank the
+        # variable for the test command only, as service-ci.yaml does (95c5ea4). The first
+        # fan-out from the pool (platform-contracts-go v0.61.0, 2026-09-06) failed every
+        # consumer with a router test on exactly this.
+        KUBERNETES_SERVICE_HOST: ""
       run: |
         set -euo pipefail
         # Contract and integration suites are excluded here and run as their own gates: they need
