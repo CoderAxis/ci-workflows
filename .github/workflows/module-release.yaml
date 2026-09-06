@@ -698,6 +698,14 @@ jobs:
 
       - name: Test
         if: steps.ver.outputs.releasable == 'true'
+        env:
+          # A CI runner is a pod, so KUBERNETES_SERVICE_HOST is set and platform-shared-go's
+          # envutil.IsDeployed() says "deployed"; a test that boots a router then refuses to
+          # start without SERVICE_TOKEN_SECRET (v1.56+). A test process is not a deployment:
+          # blank the variable for the test command only, which is also what a workstation
+          # sees. The same line service-ci.yaml carries (95c5ea4); the first release verified
+          # on the pool (ledger-core v0.5.0, 2026-09-06) failed three route tests without it.
+          KUBERNETES_SERVICE_HOST: ""
         run: GOWORK=off go test -race -count=1 ./...
 
       - name: Create tag
