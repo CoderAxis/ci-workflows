@@ -82,11 +82,17 @@
 # waited for CI, timed out, and v1 stopped moving while main kept growing (#26, #27). Nothing in
 # the logs says why; a queued job with no runner group is the only symptom.
 #
-# The rule below is the general one, not a special case for this file: a public caller runs on
-# GitHub's hosted runners, a private caller on the pool. `github.event.repository.private` is the
+# The rule below is the general one, not a special case for this file: a private caller runs on
+# the pool, everyone else on GitHub's hosted runners. `github.event.repository.private` is the
 # CALLER's repository in a called workflow, which is exactly the repository whose visibility
-# decides admission; when the payload carries no repository the expression falls to the pool,
-# which is the right default for the private fleet.
+# decides admission.
+#
+# The UNKNOWN case resolves to hosted, and that direction matters. Written the other way round
+# -- `private == false && 'ubuntu-latest' || 'inboxxhq-ci'` -- both jobs here asked for the pool
+# on every run after that fix landed, on push and on schedule alike, in a repository the API
+# reports as PUBLIC. Whatever the expression saw, it was not `false`. A wrong guess towards
+# hosted costs a job on a shared runner; a wrong guess towards the pool queues forever with no
+# error, which is how #26 and #27 sat for fourteen hours and stopped v1 moving.
 name: App token self-check
 
 on:
@@ -99,7 +105,7 @@ jobs:
   # ── positive case ───────────────────────────────────────────────────────────────────────────────
   admits-central:
     name: App token - admits a job defined in a central workflow
-    runs-on: ${{ github.event.repository.private == false && 'ubuntu-latest' || 'inboxxhq-ci' }}
+    runs-on: ${{ github.event.repository.private && 'inboxxhq-ci' || 'ubuntu-latest' }}
     # Skip (not fail) on a caller shape the read role's trust policy was never asked to admit. See
     # the file-level comment above for the exact `sub` patterns this mirrors
     # (`ci_caller_subs` in inboxxhq-infra): a `pull_request` run, a push that lands on `main`, and a
@@ -168,7 +174,7 @@ jobs:
   # and inherit publish rights unreviewed. AWS must refuse this.
   refuses-unlisted-workflow:
     name: App token - refuses publish scope from a non-publishing workflow
-    runs-on: ${{ github.event.repository.private == false && 'ubuntu-latest' || 'inboxxhq-ci' }}
+    runs-on: ${{ github.event.repository.private && 'inboxxhq-ci' || 'ubuntu-latest' }}
     permissions:
       contents: read
       id-token: write
