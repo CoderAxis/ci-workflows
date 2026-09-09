@@ -371,11 +371,17 @@ expect(m.dockerfile_ports_are_own(ws).count >= 1,
 # The identity rule that makes SP-0004 usable: a repository directory name is not a service
 # name. inboxxhq-notification-service-ctx holds notification-service, and reading the
 # directory instead of the contract turns a correct repository into a false finding.
+#
+# This fixture used to state 4002, a port alpha-service does not publish, and still expected
+# no finding -- it passed because the second claimant of a service name was never read at
+# all, so the assertion held for a reason unrelated to what it claims to test. Now that every
+# claimant is read, the fixture has to be a genuinely correct repository for the expectation
+# to mean anything.
 ws = run({"services/alpha/inboxxhq-alpha-service-ctx/service.contract.yaml":
-          "service:\n  name: alpha-service\n  ports:\n    http: 4002\n",
+          "service:\n  name: alpha-service\n  ports:\n    http: 8080\n",
           "services/alpha/inboxxhq-alpha-service-ctx/Dockerfile":
-          "FROM alpine:3.24\nEXPOSE 4002\n"
-          "HEALTHCHECK CMD wget -q http://localhost:4002/health/live\nCMD [\"/app/a\"]\n"})
+          "FROM alpine:3.24\nEXPOSE 8080 50051 9464\n"
+          "HEALTHCHECK CMD wget -q http://localhost:8080/health/live\nCMD [\"/app/a\"]\n"})
 expect(m.dockerfile_ports_are_own(ws).count == 0,
        "SP-0004: a variant repo declaring its real service name must not be a finding")
 
@@ -647,18 +653,45 @@ ws = run({"gateways/inboxxhq-gamma-gateway/config/environments/local.yaml":
 expect(m.gateway_bind_port_is_right_for_its_environment(ws).count == 1,
        "SP-0017: local.yaml disagreeing with the allocation must still be caught")
 
-# SP-0018: a stale second checkout claiming the same service name takes its own Dockerfile
-# out of SP-0004 -- exempt from the check precisely because it is stale.
-ws = run({"services/alpha/inboxxhq-alpha-service-ctx/service.contract.yaml":
-          "service:\n  name: alpha-service\n  ports:\n    http: 8080\n",
-          "services/alpha/inboxxhq-alpha-service-ctx/Dockerfile":
-          "FROM alpine:3.24\nEXPOSE 4009\n"})
-expect(m.dockerfile_ports_are_own(ws).count == 0,
-       "SP-0018 premise: the stale copy's Dockerfile is invisible to SP-0004, which is why "
-       "SP-0018 has to exist")
+# SP-0018 and SP-0004: a second directory claiming one service name.
+#
+# The incident SP-0018 records was an abandoned linked worktree whose Dockerfile stated a
+# withdrawn port, invisible because only the first claimant of a service name was checked.
+# That gap is closed at the source: every claimant directory is read now, so a second
+# checkout's Dockerfile is caught on its own merits rather than by counting directories.
+COPY_TREE = {"services/alpha/inboxxhq-alpha-service-ctx/service.contract.yaml":
+             "service:\n  name: alpha-service\n  ports:\n    http: 8080\n",
+             "services/alpha/inboxxhq-alpha-service-ctx/Dockerfile":
+             "FROM alpine:3.24\nEXPOSE 4009\n"}
+
+ws = run(dict(COPY_TREE))
+expect(m.dockerfile_ports_are_own(ws).count == 1,
+       "SP-0004 must read every claimant's Dockerfile: the second copy's EXPOSE 4009 is the "
+       "port the original incident hid, and hiding it is what SP-0018 had to compensate for")
 finding = m.one_repository_per_service(ws)
 expect(finding.count == 1 and "alpha-service" in " ".join(finding.details),
-       f"SP-0018: two directories claiming one service name must be caught; got {finding.details}")
+       f"SP-0018: two unrelated directories claiming one service name must be caught; "
+       f"got {finding.details}")
+
+# The same tree, with the copy registered as a linked git worktree of the original. A
+# worktree is the same repository on another branch -- the pattern two sessions use to work
+# on one service without trampling each other -- so SP-0018 must not call it a duplicate.
+# Its files stay under every other control, which is the half that actually mattered.
+ws = run(dict(COPY_TREE, **{"services/alpha/inboxxhq-alpha-service-ctx/.git": "placeholder\n"}))
+worktree_marker = ws.root / "services/alpha/inboxxhq-alpha-service-ctx" / ".git"
+main_checkout = ws.root / "services/alpha/inboxxhq-alpha-service"
+# Real git writes an absolute gitdir, so the test writes one too rather than exercising a
+# path shape git does not produce.
+worktree_marker.write_text(f"gitdir: {main_checkout}/.git/worktrees/ctx\n", encoding="utf-8")
+
+expect(m._worktree_of(ws.root / "services/alpha/inboxxhq-alpha-service-ctx") == main_checkout,
+       "a .git FILE pointing into <main>/.git/worktrees/ must resolve to the main checkout")
+expect(m._worktree_of(main_checkout) is None,
+       "an ordinary checkout, whose .git is a directory, is not a worktree of anything")
+expect(m.one_repository_per_service(ws).count == 0,
+       "SP-0018 must not fail a linked git worktree of a repository already in the workspace")
+expect(m.dockerfile_ports_are_own(ws).count == 1,
+       "a worktree is exempt from SP-0018, never from SP-0004: its Dockerfile is still read")
 
 # SP-0019: observability-service carried its own manifests, on pre-migration ports.
 ws = run({"services/alpha/inboxxhq-alpha-service/k8s/base/service.yaml":
