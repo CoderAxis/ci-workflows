@@ -496,14 +496,15 @@ controls:
     refs: [RFC-0007]
 
   - id: SP-0018
-    title: One directory per service name
+    title: One repository per service name
     owner: platform-infrastructure
     scope: workspace
     status: active
     severity: major
     policy: >-
       No two directories under `services/*/*` or `gateways/*` may resolve to the same service
-      name.
+      name, unless one is a linked git worktree of the other. Every claimant directory is
+      read by the controls here, worktrees included.
     rationale: >-
       inboxxhq-notification-service-ctx was an abandoned linked git WORKTREE of
       inboxxhq-notification-service -- not a clone, so it shared the object store and could
@@ -519,8 +520,26 @@ controls:
       was outside SP-0004 entirely. The fleet reported 42 repositories compliant while a 43rd
       sat beside them, unexamined, stating a withdrawn port. A control that can be escaped by
       duplicating a directory is not a control.
+
+      Amended 2026-09-09. The rule above was written as "one directory per service name"
+      because the loader dropped every claimant after the first, and failing the duplicate
+      was the only way to stop it escaping SP-0004. That is now fixed where it was broken:
+      the controls iterate every claimant directory, so a second checkout's Dockerfile,
+      contract and env.example are read on their own merits. The abandoned worktree that
+      prompted this control would today fail SP-0004 by name, for its actual port, rather
+      than be inferred from a directory count.
+      Which leaves the blunt half doing harm. This workspace runs several sessions at once
+      and git worktrees are how they share a service repository without trampling each
+      other; a worktree is the same repository on another branch, not a copy that can drift
+      unnoticed. Failing them made every infra push wait on unrelated work in progress, and
+      the remediation it printed -- delete the checkout -- would have destroyed it. A linked
+      worktree is now recognised by its `.git` FILE pointing into the main checkout's
+      `.git/worktrees/`, and counted as the repository it belongs to. Two genuinely
+      unrelated checkouts are still a finding.
     remediation: >-
-      Delete the stale checkout, or give it a distinct service name in its contract.
+      Make the copy a git worktree of the original, delete it, or give it a distinct service
+      name in its contract. A linked worktree is not a finding; its files are checked in
+      place.
     detector: one_repository_per_service
     refs: [RFC-0007]
 

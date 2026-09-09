@@ -352,6 +352,19 @@ class Workspace:
         except ValueError:
             return str(path)
 
+    def repo_dirs(self) -> list[tuple[str, Path]]:
+        """Every (service name, directory) pair, not only the resolved primary.
+
+        `repos_by_service` keeps the first claimant, which is what resolution wants:
+        one directory per service. Enforcement wants the opposite. A second checkout
+        holds a different branch, so its Dockerfile, contract and env.example can say
+        something the primary's does not, and iterating the resolution map is exactly
+        how those files came to sit outside every control here.
+        """
+        return [(name, path)
+                for name, paths in sorted(self.repo_service_names.items())
+                for path in paths]
+
     # A repository's directory name is not its service name: inboxxhq-notification-service-ctx
     # holds notification-service. service.contract.yaml declares the real one, so it is read
     # first and the directory name is only a fallback. Getting this backwards turns a working
@@ -364,12 +377,15 @@ class Workspace:
                 name = self._service_name_of(path)
                 if not name:
                     continue
-                # Record EVERY claimant, not just the winner. The `not in` guard below keeps
-                # the first and drops the rest, which is correct for resolution and silently
-                # wrong for enforcement: a second checkout declaring the same service name
-                # takes its Dockerfile and contract out of SP-0004/SP-0005 entirely, so a
-                # stale copy is exempt from the controls precisely because it is stale.
-                # SP-0018 reads this map and fails the duplicate.
+                # Two maps on purpose. `repos_by_service` keeps the first claimant, which is
+                # what RESOLUTION wants -- one directory to answer "where does this service
+                # live". `repo_service_names` keeps them all, which is what ENFORCEMENT wants:
+                # a second checkout declaring the same service name has its own Dockerfile,
+                # contract and env.example, and reading only the winner is what put an
+                # abandoned copy's EXPOSE 4009 outside SP-0004 for four months. Controls that
+                # read files out of a repository iterate `repo_dirs()`, never this map, so a
+                # duplicate directory can no longer escape one. SP-0018 then only has to
+                # separate a deliberate git worktree from an unrelated second checkout.
                 self.repo_service_names.setdefault(name, []).append(path)
                 if name not in self.repos_by_service:
                     self.repos_by_service[name] = path
@@ -641,10 +657,12 @@ def dockerfile_ports_are_own(ws: Workspace) -> Finding:
             owner.setdefault(port, set()).add(service.name)
 
     violations, unchecked = [], []
-    for name, repo in sorted(ws.repos_by_service.items()):
+    dockerfiles = 0
+    for name, repo in ws.repo_dirs():
         dockerfile = repo / "Dockerfile"
         if not dockerfile.is_file():
             continue
+        dockerfiles += 1
         service = ws.services.get(name)
         if service is None or not service.published:
             unchecked.append(f"{repo.name}: no Kubernetes Service found for {name!r}, so its "
@@ -673,7 +691,7 @@ def dockerfile_ports_are_own(ws: Workspace) -> Finding:
         return Finding(len(violations), f"{len(violations)} Dockerfile port(s) not owned by "
                                         "their service", capped(sorted(set(violations))))
     return Finding(evidence=f"every EXPOSE and HEALTHCHECK port across "
-                            f"{len(ws.repos_by_service)} repositories belongs to its own "
+                            f"{dockerfiles} Dockerfile(s) belongs to its own "
                             "service", details=capped(unchecked))
 
 
@@ -740,7 +758,7 @@ def contract_ports_match_service(ws: Workspace) -> Finding:
         if port != service.published["http"]:
             violations.append(f"catalog/services/{name}.yaml: canonical_port={port} but "
                               f"base/service.yaml publishes http={service.published['http']}")
-    for name, repo in sorted(ws.repos_by_service.items()):
+    for name, repo in ws.repo_dirs():
         declared, error = _contract_ports(repo)
         if error:
             errors.append(f"{repo.name}: {error}")
@@ -1032,7 +1050,7 @@ def resolvers_pin_a_constants_registry(ws: Workspace) -> Finding:
                        indeterminate=True)
     minimum = "v" + ".".join(map(str, CONSTANTS_REGISTRY_MIN))
     violations, resolvers = [], 0
-    for name, repo in sorted(ws.repos_by_service.items()):
+    for name, repo in ws.repo_dirs():
         gomod = repo / "go.mod"
         if not gomod.is_file() or not _resolves_by_name(repo):
             continue
@@ -1169,7 +1187,7 @@ def env_example_matches_local_allocation(ws: Workspace) -> Finding:
     if ws.alloc_error:
         return Finding(indeterminate=True, evidence=ws.alloc_error)
     violations, checked = [], 0
-    for service, repo in sorted(ws.repos_by_service.items()):
+    for service, repo in ws.repo_dirs():
         path = repo / "env.example"
         if not path.is_file():
             continue
@@ -1208,7 +1226,7 @@ def env_example_matches_local_allocation(ws: Workspace) -> Finding:
 
 def contracts_hold_no_foreign_ports(ws: Workspace) -> Finding:
     violations = []
-    for service, repo in sorted(ws.repos_by_service.items()):
+    for service, repo in ws.repo_dirs():
         path = repo / "service.contract.yaml"
         if not path.is_file():
             continue
@@ -1320,27 +1338,79 @@ def gateway_bind_port_is_right_for_its_environment(ws: Workspace) -> Finding:
                             f"for their environment")
 
 
+# A linked git worktree's `.git` is a FILE holding `gitdir: <main>/.git/worktrees/<id>`,
+# where an ordinary checkout's `.git` is a directory. That one difference is what tells a
+# second branch of one repository apart from an abandoned copy of it, and it is pure path
+# arithmetic -- no subprocess, so this stays usable on a workspace whose git is not on PATH.
+def _worktree_of(path: Path) -> Path | None:
+    """The main checkout this directory is a linked worktree of, or None."""
+    marker = path / ".git"
+    if not marker.is_file():
+        return None
+    try:
+        text = marker.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"^\s*gitdir:\s*(.+?)\s*$", text, re.M)
+    if not match:
+        return None
+    gitdir = Path(match.group(1))
+    if not gitdir.is_absolute():
+        gitdir = path / gitdir
+    try:
+        gitdir = gitdir.resolve()
+    except OSError:
+        return None
+    # <main>/.git/worktrees/<id>  ->  <main>
+    if gitdir.parent.name != "worktrees" or gitdir.parent.parent.name != ".git":
+        return None
+    return gitdir.parent.parent.parent
+
+
 def one_repository_per_service(ws: Workspace) -> Finding:
     violations = []
+    worktrees = 0
     for service, paths in sorted(ws.repo_service_names.items()):
-        if len(paths) > 1:
-            names = ", ".join(ws._rel(p) for p in paths)
+        if len(paths) < 2:
+            continue
+        resolved = set()
+        for path in paths:
+            try:
+                resolved.add(path.resolve())
+            except OSError:
+                resolved.add(path)
+        copies = []
+        for path in paths:
+            main = _worktree_of(path)
+            if main is not None and main in resolved:
+                # A linked worktree of a repository that is itself in this workspace. It is
+                # the same repository on another branch, which is how two sessions work on
+                # one service without trampling each other, and every control here now reads
+                # it as its own directory -- so it is neither stale nor unchecked.
+                worktrees += 1
+                continue
+            copies.append(path)
+        if len(copies) > 1:
+            names = ", ".join(ws._rel(p) for p in copies)
             violations.append(
-                f"{service}: claimed by {len(paths)} directories ({names}). Only the first is "
-                f"checked, so the others' Dockerfile, contract and env.example are exempt from "
-                f"every control here -- a stale checkout is invisible precisely because it is "
-                f"stale. Delete the copy or give it its own service name")
+                f"{service}: claimed by {len(copies)} unrelated directories ({names}). These "
+                f"are separate checkouts rather than worktrees of one repository, so they can "
+                f"drift apart with nothing reconciling them. Delete the copy, make it a git "
+                f"worktree of the original, or give it its own service name")
     if violations:
         return Finding(len(violations),
-                       f"{len(violations)} service name(s) claimed by more than one directory",
+                       f"{len(violations)} service name(s) claimed by more than one repository",
                        capped(violations))
-    return Finding(evidence=f"each of {len(ws.repo_service_names)} service names is claimed by "
-                            f"exactly one directory")
+    evidence = (f"each of {len(ws.repo_service_names)} service names is claimed by exactly one "
+                f"repository")
+    if worktrees:
+        evidence += f", counting {worktrees} linked git worktree(s) as the repository they belong to"
+    return Finding(evidence=evidence)
 
 
 def service_repos_hold_no_manifests(ws: Workspace) -> Finding:
     violations = []
-    for service, repo in sorted(ws.repos_by_service.items()):
+    for service, repo in ws.repo_dirs():
         for k8s in (repo / "k8s", repo / "kubernetes", repo / "deploy" / "k8s"):
             if not k8s.is_dir():
                 continue
