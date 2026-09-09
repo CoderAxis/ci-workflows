@@ -721,7 +721,7 @@ _Generated from `controls/service-ports.yaml` by `scripts/check-service-ports.py
 | SP-0015 | `service.contract.yaml` MUST NOT carry a `port` under `dependencies.services[]`, nor an `observability.metrics.port`. A contract's ports belong in its `ports:` block. | major | platform-architecture | active |
 | SP-0016 | A gateway's `service-registry.yaml` MUST NOT carry `port`, `grpc_port`, `metrics_port` or `http_port` on any entry. | critical | platform-architecture | active |
 | SP-0017 | In `config/environments/`, a Kubernetes environment's `server.port` MUST be 8080 and MUST NOT be a §3 reserved port; `local.yaml` MUST be that gateway's §4.2 local port. | critical | platform-infrastructure | active |
-| SP-0018 | No two directories under `services/*/*` or `gateways/*` may resolve to the same service name. | major | platform-infrastructure | active |
+| SP-0018 | No two directories under `services/*/*` or `gateways/*` may resolve to the same service name, unless one is a linked git worktree of the other. Every claimant directory is read by the controls here, worktrees included. | major | platform-infrastructure | active |
 | SP-0019 | No service repository may carry its own `k8s/`, `kubernetes/` or `deploy/k8s/` manifests. The deployed set is `inboxxhq-infra services/<service>/`. | major | platform-infrastructure | active |
 
 <!-- END service-ports-controls -->
