@@ -77,6 +77,17 @@ on:
         required: false
         type: string
         default: ""
+      stamp_build_revision:
+        description: >-
+          Pass the source commit into the image build as the IMAGE_REVISION build arg, so a
+          build can bake in which commit it came from. Opt-in per service, and deliberately
+          not the default: EXTRA_BUILD_ARGS is a cache-key contributor (see the buildspec in
+          inboxxhq-infra modules/canonical_build_codebuild), so switching it on fleet-wide
+          would change every service's derived tag at once and set off a rebuild wave.
+          A Dockerfile that does not declare `ARG IMAGE_REVISION` ignores it.
+        required: false
+        type: boolean
+        default: false
       contract_publication_enabled:
         description: >-
           Whether this service's pipeline is permitted to publish to the contract registry.
@@ -767,6 +778,7 @@ jobs:
           BUILD_PROJECT: ${{ inputs.build_project }}
           SERVICE_NAME: ${{ needs.resolve.outputs.service }}
           GITHUB_TOKEN: ${{ steps.module_token.outputs.token }}
+          STAMP_BUILD_REVISION: ${{ inputs.stamp_build_revision }}
           # Enough to carry a Docker build's failing step and its output, which is what the tail
           # usually has to show; small enough that the step log stays readable.
           BUILD_LOG_TAIL_LINES: "120"
@@ -779,10 +791,16 @@ jobs:
           # only component that knows the other things the key must cover (its own BUILDER_VERSION
           # and the build args it passes). Splitting it any other way would mean two components
           # having to agree on a formula, which is exactly how a cache key silently goes wrong.
+          # Opt-in only; see the stamp_build_revision input for why it is not fleet-wide.
+          EXTRA_BUILD_ARGS=""
+          if [[ "${STAMP_BUILD_REVISION}" == "true" ]]; then
+            EXTRA_BUILD_ARGS="--build-arg IMAGE_REVISION=${GITHUB_SHA}"
+          fi
           BUILD_ID="$(aws codebuild start-build \
             --region "${AWS_REGION}" \
             --project-name "${BUILD_PROJECT}" \
             --environment-variables-override \
+              "name=EXTRA_BUILD_ARGS,value=${EXTRA_BUILD_ARGS},type=PLAINTEXT" \
               "name=SERVICE_NAME,value=${SERVICE_NAME},type=PLAINTEXT" \
               "name=SERVICE_DIR,value=${SERVICE_DIR},type=PLAINTEXT" \
               "name=SOURCE_TARBALL_S3_URI,value=${{ steps.source.outputs.source_uri }},type=PLAINTEXT" \
