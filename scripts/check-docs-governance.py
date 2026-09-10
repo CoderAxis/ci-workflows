@@ -971,6 +971,24 @@ def _logging_rule_in(sentence: str):
     return None
 
 
+def _is_logging_home(path: Path, rel: Path, homes: list[str]) -> bool:
+    """A document is a declared home when its path matches a `normative_homes` entry.
+
+    The entries are written from the monorepo root (`docs/core-docs/standards/...`), but the
+    docs repos are also checked out standalone - in CI at `<work>/core-docs/`, locally in a
+    worktree with any directory name. There the absolute path never ends with the monorepo
+    prefix, so the home documents themselves were reported as restating the rules they own,
+    and the control failed on every push of core-docs. Match on either the absolute path or the
+    repo-relative one, so the same declaration holds in both layouts.
+    """
+    posix = path.resolve().as_posix()
+    relposix = rel.as_posix()
+    for home in homes:
+        if posix.endswith(home) or home == relposix or home.endswith("/" + relposix):
+            return True
+    return False
+
+
 def logging_rule_restatement(repo: DocsRepo) -> Finding:
     homes = repo.log_schema_homes
     if homes is None:
@@ -985,8 +1003,7 @@ def logging_rule_restatement(repo: DocsRepo) -> Finding:
     scanned = 0
     for path in repo.all_md:
         rel = path.relative_to(repo.root)
-        posix = path.resolve().as_posix()
-        if any(posix.endswith(home) for home in homes) or is_template_doc(rel):
+        if _is_logging_home(path, rel, homes) or is_template_doc(rel):
             continue
         scanned += 1
         for lineno, block in _prose_blocks(path.read_text(encoding="utf-8", errors="ignore")):
