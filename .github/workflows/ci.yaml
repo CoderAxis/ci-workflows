@@ -144,6 +144,27 @@ jobs:
           fi
           echo "checker fails the dirty fixture as expected (exit $rc)"
 
+      # Both directions again, for the base-image guard. The permissive failure is the
+      # dangerous one here: a checker that stopped matching would let a bare Docker Hub
+      # reference through, and the cost lands hours later in CodeBuild on an unrelated
+      # commit. The clean fixture pins the three shapes that must NOT be flagged -- a
+      # stage built on an earlier stage, an ARG-driven reference, and an already-qualified
+      # registry -- because the quickest way to stop a false positive is to stop matching.
+      - name: Base-image guard passes a clean tree
+        run: python3 scripts/check-base-image-registry.py --root scripts/testdata/base-image-registry/clean
+
+      - name: Mutation test - the base-image guard still fails a dirty tree
+        run: |
+          set +e
+          python3 scripts/check-base-image-registry.py --root scripts/testdata/base-image-registry/dirty
+          rc=$?
+          set -e
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::the base-image fixture pulls node/nginx from Docker Hub but the checker exited ${rc}, not 1"
+            exit 1
+          fi
+          echo "checker fails the dirty fixture as expected (exit $rc)"
+
   # ── documentation-only fast path ───────────────────────────────────────────────────────────
   # service-ci.yaml now skips its expensive jobs when a push or pull request changed
   # documentation and nothing else. That decision is made once, by scripts/docs-only-diff.py, and

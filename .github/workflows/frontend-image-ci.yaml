@@ -50,6 +50,11 @@ on:
         required: false
         type: string
         default: frontend-core
+      actions_ref:
+        description: "Ref of coderaxis/ci-workflows providing the checker (defaults to the moving major tag)."
+        required: false
+        type: string
+        default: v1
       runs_on:
         description: >-
           A GitHub-hosted runner by default, NOT the self-hosted inboxxhq-deploy
@@ -98,6 +103,23 @@ jobs:
           scope: read
           owner: ${{ inputs.core_owner }}
           repositories: ${{ inputs.core_repository }}
+
+      # Before the build, because this costs seconds and the failure it prevents
+      # costs a whole canonical build in CodeBuild -- and surfaces there as an
+      # unattributed "canonical build FAILED" rather than as a base image.
+      - name: Fetch the checkers
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/ci-workflows
+          ref: ${{ inputs.actions_ref }}
+          path: .coderaxis-ci
+
+      # A bare `node:20-alpine` resolves to Docker Hub, whose anonymous pull quota is
+      # per NAT address and shared by every CodeBuild instance. THIS job would not
+      # notice: GitHub's runners pull Docker Hub through GitHub's own authenticated
+      # account. The deploy lane is what breaks, hours later, on someone else's commit.
+      - name: Base images must name a registry
+        run: python3 .coderaxis-ci/scripts/check-base-image-registry.py --root .
 
       # Needed for the Dockerfile's secret mount (RUN --mount=type=secret,id=gh_token),
       # which is how the private dependencies are cloned without baking a token
