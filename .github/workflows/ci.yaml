@@ -165,6 +165,14 @@ jobs:
           fi
           echo "checker fails the dirty fixture as expected (exit $rc)"
 
+      # frontend-image-ci.yaml checks this repository out INTO the repository under test as
+      # .coderaxis-ci, so a naive walk of the caller's tree finds THIS checker's dirty
+      # fixture and fails every repository the gate is added to, blaming the caller for the
+      # guard's own testdata. That is not hypothetical: it happened on inboxxhq-web-app the
+      # first time the gate ran, on a branch whose Dockerfile was already correct.
+      - name: A vendored checker checkout must not be mistaken for the caller's image
+        run: python3 scripts/check-base-image-registry.py --root scripts/testdata/base-image-registry/vendored
+
   # ── documentation-only fast path ───────────────────────────────────────────────────────────
   # service-ci.yaml now skips its expensive jobs when a push or pull request changed
   # documentation and nothing else. That decision is made once, by scripts/docs-only-diff.py, and
