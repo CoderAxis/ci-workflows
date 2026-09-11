@@ -61,6 +61,27 @@ def stage_names(lines: list[str]) -> set[str]:
     return names
 
 
+SKIP_DIRS = {"node_modules", "vendor"}
+
+
+def skipped(path: Path, root: Path) -> bool:
+    """True for a Dockerfile that is not part of the image this repository ships.
+
+    DOT-DIRECTORIES ARE LOAD-BEARING HERE, not tidiness. frontend-image-ci.yaml checks
+    ci-workflows out INTO the repository under test as `.coderaxis-ci`, so an rglob of the
+    caller's tree also walks THIS checker's own tree -- including
+    scripts/testdata/base-image-registry/dirty/, which exists to contain exactly what the
+    guard rejects. Without this the gate fails every repository it is added to, blaming the
+    caller for the checker's own fixture. The sibling guard check_no_raw_sql.py skips
+    dot-directories for the same reason and says so.
+
+    Excluding them cannot weaken the control: a Dockerfile under a dot-directory is local
+    tooling, and the canonical build only ever builds the one this repository publishes.
+    """
+    rel = path.relative_to(root) if path.is_absolute() == root.is_absolute() else path
+    return any(part.startswith(".") or part in SKIP_DIRS for part in rel.parts[:-1])
+
+
 def suggestion(img: str) -> str:
     """What to replace a bare Docker Hub reference with.
 
@@ -117,10 +138,7 @@ def main() -> int:
         if not root.is_dir():
             print(f"::error::--root {root} is not a directory", file=sys.stderr)
             return 2
-        targets = sorted(
-            p for p in root.rglob("Dockerfile*")
-            if p.is_file() and "node_modules" not in p.parts and ".git" not in p.parts
-        )
+        targets = sorted(p for p in root.rglob("Dockerfile*") if p.is_file() and not skipped(p, root))
 
     missing = [p for p in targets if not p.is_file()]
     if missing:
