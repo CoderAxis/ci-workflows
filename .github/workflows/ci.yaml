@@ -1013,7 +1013,8 @@ jobs:
   # is raised and the artifact is not regenerated, the two disagree about which proto vintage is
   # canonical - and every service would then be measured against a version nothing is required
   # to pin. That pair is asserted here because it is the one inconsistency no service-side run
-  # could ever surface.
+  # could ever surface. The artifact may accept a second vintage while the projection moves
+  # (`next`, then `previous`); the floor must then name one of the two, never `next`.
   #
   # Policy SSOT: ADR-0048, ADR-0067, RFC-0001.
   api-contract:
@@ -1110,23 +1111,19 @@ jobs:
           done
           echo "all eight RFC-0038 controls fired as expected (exit $rc)"
 
-      - name: The module floor and the reference artifact name the same proto vintage
-        run: |
-          python3 - <<'PY'
-          import json, pathlib, sys, yaml
-          module = "github.com/coderaxis/platform-contracts-go"
-          floors = yaml.safe_load(pathlib.Path("controls/module-floors.yaml").read_text())["floors"]
-          floor = str(floors[module]["min"])
-          ref = json.loads(pathlib.Path("controls/common-v1-components.json").read_text())
-          got = ref["source"]["version"]
-          if got != floor:
-              print(f"::error::controls/module-floors.yaml requires {module} {floor}, but "
-                    f"controls/common-v1-components.json was projected from {got}. Regenerate the "
-                    "artifact from platform-shared-go with `go run "
-                    "./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.")
-              sys.exit(1)
-          print(f"floor and reference artifact agree on {floor}")
-          PY
+      # With one accepted set this is floor == source.version, as it always was. While a window is
+      # open (README, "Moving the reference") the floor must name one of the two accepted sets and
+      # never `next`. The rule lives in check-api-contract.py rather than inline here so the suite
+      # below can hold it against fixtures.
+      - name: The module floor names a proto vintage the reference artifact accepts
+        run: python3 scripts/check-api-contract.py --verify-floor controls/module-floors.yaml
+
+      # The accepted-set rules: one whole set passes and a per-component mix fails naming both,
+      # a single-set artifact reads exactly as before, the artifact is validated before any
+      # service is judged, and a window opened, promoted and closed by the checker's own flags
+      # ends on the emitter's bytes.
+      - name: API-0007 accepted sets, floor rule and window tooling
+        run: python3 scripts/test_api_contract_canonical_components.py
 
       - name: Mutation test - API-0007 must fail a spec on a stale proto vintage
         run: |

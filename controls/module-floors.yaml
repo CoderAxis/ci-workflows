@@ -54,7 +54,9 @@
 #
 # API-0007 in controls/api-contract.yaml is the paired control: this file makes a service
 # depend on a current contract module, API-0007 makes it actually publish the current
-# components.
+# components. While controls/common-v1-components.json accepts two vintages (README, "Moving
+# the reference"), the platform-contracts-go floor must name one of them and never `next`;
+# `check-api-contract.py --verify-floor` enforces that in this repository's CI.
 
 version: 1
 domain: module-floors
@@ -66,7 +68,8 @@ floors:
       Carries the common.v1 envelope, Meta, PaginationMeta, ProblemDetails and the ErrorCode
       enum that every service's OpenAPI components are projected from. v0.7.0 is the vintage
       controls/common-v1-components.json is generated from, so a pin below it cannot produce
-      components matching the reference and will fail API-0007.
+      components matching the reference and will fail API-0007. Raise it only to a version
+      that artifact accepts, and not to its `next` set before that set is promoted.
 
   github.com/coderaxis/platform-shared-go:
     min: v1.22.0

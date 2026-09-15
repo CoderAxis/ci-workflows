@@ -545,8 +545,76 @@ go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components \
 ```
 
 The floor makes a service *depend on* a current contract module; API-0007 makes it actually *publish*
-current components. API-0007 exits 2 rather than passing if the reference artifact is missing, since
-a version gate that reports success because it could not find its reference is worse than no gate.
+current components. API-0007 exits 2 rather than passing if the reference artifact is missing or
+malformed, since a version gate that reports success because it could not find its reference is worse
+than no gate.
+
+### Moving the reference: expand, then contract
+
+Regenerating the artifact in place is a flag day. Every service that publishes `common.v1` components
+goes red the moment the new artifact reaches `@v1`, and leaving the artifact alone turns each of them
+red instead as soon as it regenerates its spec at the new pin. Eleven specs publish those components
+today (org-bff, platform-bff, realtime-gateway, ai, auth, communication, identity, org-service,
+platform-identity, stripe-adapter and subscription), and none carries an API-0007 baseline. So the
+artifact can accept **two vintages for the length of a migration**: the top-level
+`components`/`source` pair is the **current** set, and at most one more set sits beside it, either
+`next` (newer, being rolled out) or `previous` (older, kept briefly after promotion).
+
+```jsonc
+{
+  "_comment": "...",
+  "components": { "common.v1.ErrorCode": { ... }, ... },                                   // current
+  "source": { "module": "github.com/coderaxis/platform-contracts-go", "version": "v0.78.0" },
+  "next": {
+    "components": { "common.v1.ErrorCode": { ... }, ... },
+    "source": { "module": "github.com/coderaxis/platform-contracts-go", "version": "v0.80.0" }
+  }
+}
+```
+
+A file with no `next` or `previous` is exactly what the emitter prints, and it behaves as it always
+did, down to the wording of every message. What an extra set changes:
+
+- **A spec passes by reproducing one accepted set whole.** Each set is judged only on the component
+  names it defines, so a service may still publish other `common.v1` messages its DTOs reach. A spec
+  whose `PaginationMeta` matches `next` while its `ErrorCode` matches current fails, even though each
+  component matches *some* accepted set. A spec is projected from one `platform-contracts-go` pin, and
+  its components reference each other (`ErrorResponse` → `ProblemDetails` → `ErrorCode`), so a mix
+  was produced by no release. It describes a wire that no single build emits, and in practice it
+  means the spec was only partly regenerated or was edited by hand. The failure lists, for each
+  component, which set it matches and which it differs from. The count frozen by the ratchet is the
+  distance to the *nearest* set.
+- **The artifact is validated before any service is judged.** At most one extra set. `next` must be
+  newer than current, and `previous` older. Both versions must be stable `vX.Y.Z` tags from the same
+  module. The extra set must project something different from current. A misspelt member name is an
+  error, not an ignored key. Any violation exits 2.
+- **The floor must name an accepted set that is not `next`.** `ci.yaml` runs
+  `check-api-contract.py --verify-floor controls/module-floors.yaml`. With one set, the floor must
+  equal that set's version, as before. With two, the floor must equal one of the two versions. "At
+  most the newest" would not be enough: a floor below the oldest set, or between the two, admits a
+  pin that produces neither set, which is the disagreement this check exists to rule out. The floor
+  also must not name `next`. A floor there fails the pin policy for every repository that has not
+  bumped yet, which are the repositories the window exists to let bump one at a time. That failure
+  is strict on preprod/prod, and on the consumer bump PRs `bump-module-pin` opens against `main`.
+- **The file changes only through the checker's own flags**, and each flag validates its result
+  before writing it: `--stage-next`, `--promote-next` and `--drop-set`. Output is byte-identical to
+  the emitter's canonical JSON, so a window that opens, promotes and closes leaves exactly the bytes
+  the emitter prints for the new vintage.
+
+Each step below is one reviewed commit to this repository. `release.yaml` moves `@v1` onto every
+commit that lands on main, so each step reaches the fleet within minutes:
+
+| Step | Command (in this repository unless noted) | Fleet effect |
+| --- | --- | --- |
+| 1. Add next | In platform-shared-go, with `go.mod` requiring the new `platform-contracts-go` tag, run `go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components > /tmp/common-v1-next.json`. Do not use a `replace`: the emitter records the version `go.mod` requires, not the code the replace substituted, so the output would carry the wrong `source.version`. Then here: `python3 scripts/check-api-contract.py --stage-next /tmp/common-v1-next.json`. Leave the floor at current. | Nothing goes red. Every service keeps passing on current and may now pass on next. |
+| 2. Repos bump one by one | In each service: bump `platform-contracts-go` (and the platform-shared-go that projects it), regenerate `docs/openapi.json` from that one pin, then push. API-0007 reports `match the next vX proto projection`. | A spec on neither set, or on a mix of both, fails and names both sets. Track progress with `python3 scripts/check-api-contract.py <service roots…> --format json` and read each API-0007 `evidence`. |
+| 3. Promote next to current | When no service still reports `current`: `python3 scripts/check-api-contract.py --promote-next`. You may raise the `platform-contracts-go` floor to the new version in the same commit. | Still nothing goes red: the old set stays accepted as `previous`, and a floor that still names it is valid. |
+| 4. Drop old | `python3 scripts/check-api-contract.py --drop-set previous`, plus `min:` for `platform-contracts-go` in `controls/module-floors.yaml` set to the new version if step 3 did not raise it. Check with `--verify-floor controls/module-floors.yaml`. | The artifact is byte-identical to the emitter's output for the new vintage. This is the contract step: a service still publishing the old set now fails. |
+
+To abandon a window before step 3 (for example, the new projection turns out to be wrong), run
+`python3 scripts/check-api-contract.py --drop-set next`. That restores the previous bytes exactly.
+A second window cannot open while `next` or `previous` is present, so the fleet never accepts more
+than two vintages at once.
 
 ### Control catalog (policy-as-code)
 
@@ -563,7 +631,7 @@ _Generated from `controls/api-contract.yaml` by `scripts/check-api-contract.py -
 | API-0003 | A test that validates live traffic against the OpenAPI document must import platform/openapicontract/conformance. Driving kin-openapi directly - constructing a gorillamux router or calling openapi3filter.ValidateResponse - is a hand-rolled copy of the shared suite and is prohibited. | major | source | http-api | platform-architecture | active |
 | API-0004 | Every 2xx JSON response must reference common.v1.SuccessResponse and every 4xx/5xx JSON response must reference common.v1.ErrorResponse. The envelope is owned by proto/common/v1 and is not redefinable per service. | critical | spec | http-api | platform-architecture | active |
 | API-0005 | Every operation carries a unique operationId, and the service commits docs/openapi.operationids.lock.json recording each id with the version that introduced it, its deprecation state, and its visibility. | major | spec | http-api | platform-architecture | active |
-| API-0007 | Every common.v1.* component in the service's spec must be byte-identical to the projection in controls/common-v1-components.json, which is generated from the proto SSOT by commonv1policy and carries the platform-contracts-go version it was projected from. A service publishing no common.v1 components is governed by API-0004 instead, not failed twice here. | major | spec | http-api | platform-architecture | active |
+| API-0007 | The common.v1.* components in the service's spec must be byte-identical, as a whole, to one accepted projection in controls/common-v1-components.json: the current set, or the next or previous set the artifact carries while the projection moves between two platform-contracts-go vintages. A spec mixing components from two accepted sets matches neither. Every set is generated from the proto SSOT by commonv1policy and carries the version it was projected from. A service publishing no common.v1 components is governed by API-0004 instead, not failed twice here. | major | spec | http-api | platform-architecture | active |
 | API-0006 | cmd/server/swagger_main.go and any other swaggo annotation source is prohibited. The canonical generator reflects Go types through the shared contract engine. | minor | source | always | platform-architecture | active |
 | API-0008 | A GET returning a single mutable resource must declare a strong ETag response header, and a PUT, PATCH or DELETE on such a resource must declare the If-Match request header together with 412 Precondition Failed and 428 Precondition Required responses. | major | spec | http-api | platform-architecture | active |
 | API-0009 | Runtime code that sets Cache-Control with a directive permitting storage must set Vary in the same handler, naming every request header the body depends on, including Authorization when the response is authenticated. A no-store response needs no Vary, and neither does a response that is genuinely identical for every caller and marked public. | major | source | always | platform-architecture | active |

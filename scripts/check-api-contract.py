@@ -75,12 +75,110 @@ BASELINE_COMMENT = ("Frozen debt for this service, co-owned by three gates that 
 #   go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components
 # in platform-shared-go, redirected here. Its `source.version` records the
 # platform-contracts-go release it was projected from.
+#
+# The top-level `components`/`source` pair is the CURRENT set. While the projection moves
+# to a new contracts vintage, the file may carry ONE more accepted set beside it, under
+# `next` (staged, newer than current) or `previous` (just promoted away from, older). Both
+# are written by --stage-next / --promote-next / --drop-set from emitter output, never by
+# hand. A file with neither is exactly what the emitter prints, and means what it always
+# meant: one vintage, one reference.
 CANONICAL_COMPONENTS = SELF_REPO / "controls" / "common-v1-components.json"
-_canonical_cache = None
+# What main() compares against: CANONICAL_COMPONENTS unless --components names another file.
+reference_path = CANONICAL_COMPONENTS
+CONTRACTS_MODULE = "github.com/coderaxis/platform-contracts-go"
+CURRENT_SET = "current"
+EXTRA_SET_ROLES = ("next", "previous")
+REFERENCE_KEYS = {"_comment", "components", "source", *EXTRA_SET_ROLES}
+STABLE_VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+_canonical_cache: dict = {}
 
 
-def load_canonical_components():
-    """Return (components, source_version), or (None, None) when unavailable.
+@dataclass(frozen=True)
+class ComponentSet:
+    """One accepted common.v1 projection: every component one contracts vintage produces."""
+    role: str
+    module: str
+    version: str
+    components: dict
+
+    @property
+    def label(self) -> str:
+        return f"{self.role} {self.version}"
+
+
+def _stable_version(version: str):
+    m = STABLE_VERSION_RE.match(version or "")
+    return tuple(int(p) for p in m.groups()) if m else None
+
+
+def _canonical(value) -> str:
+    return json.dumps(value, sort_keys=True)
+
+
+def parse_reference(doc) -> tuple:
+    """Return (accepted sets, newest first, None) or (None, reason) for an unusable reference.
+
+    A single-set file - today's, and whatever the emitter prints - keeps its old tolerance
+    for an unrecorded version. An extra set tightens that on purpose: it only exists to
+    order two vintages, so both have to be stable tags, the extra one has to sit on the side
+    of current its role names, and it has to project something different, or the window it
+    opens migrates nothing.
+    """
+    if not isinstance(doc, dict):
+        return None, "is not a JSON object"
+    unknown = sorted(set(doc) - REFERENCE_KEYS)
+    if unknown:
+        # A misspelt `next` would otherwise be ignored, and the migration it was meant to
+        # open would surface as a fleet of red API-0007 lanes instead of one error here.
+        return None, (f"carries unknown member(s) {unknown}; the accepted members are "
+                      f"{sorted(REFERENCE_KEYS)}")
+
+    def one(role: str, body) -> tuple:
+        if not isinstance(body, dict):
+            return None, f"{role} set is not an object"
+        comps = body.get("components")
+        if not isinstance(comps, dict) or not comps:
+            return None, (f"{role} set has no components, so every spec would match it and "
+                          f"API-0007 would pass without comparing anything")
+        source = body.get("source") if isinstance(body.get("source"), dict) else {}
+        return ComponentSet(role, str(source.get("module") or CONTRACTS_MODULE),
+                            str(source.get("version") or "unknown"), comps), None
+
+    current, err = one(CURRENT_SET, doc)
+    if err:
+        return None, err
+    extras = [role for role in EXTRA_SET_ROLES if role in doc]
+    if not extras:
+        return [current], None
+    if len(extras) > 1:
+        return None, (f"carries both {' and '.join(extras)}. At most two vintages are accepted "
+                      f"at once: drop `previous` (finishing the last migration) before staging "
+                      f"the next one")
+    extra, err = one(extras[0], doc[extras[0]])
+    if err:
+        return None, err
+    if extra.module != current.module:
+        return None, (f"{extra.label} was projected from {extra.module}, current from "
+                      f"{current.module}; accepted sets must come from the same module")
+    cur_v, extra_v = _stable_version(current.version), _stable_version(extra.version)
+    if cur_v is None or extra_v is None:
+        return None, (f"current {current.version!r} and {extra.role} {extra.version!r} must both "
+                      f"be stable vX.Y.Z tags; an accepted set from an untagged or replaced "
+                      f"build cannot be pinned by any service")
+    if extra.role == "next" and not extra_v > cur_v:
+        return None, f"{extra.label} is not newer than current {current.version}"
+    if extra.role == "previous" and not extra_v < cur_v:
+        return None, f"{extra.label} is not older than current {current.version}"
+    if _canonical(extra.components) == _canonical(current.components):
+        return None, (f"{extra.label} projects components byte-identical to current "
+                      f"{current.version}, so there is nothing to migrate. Regenerate the "
+                      f"artifact at the version the floor should name instead")
+    # Newest first, so a spec both sets accept is reported against the vintage it is headed to.
+    return ([extra, current] if extra.role == "next" else [current, extra]), None
+
+
+def load_canonical_components() -> tuple:
+    """Return (accepted sets, None) for reference_path, or (None, reason) when it is unusable.
 
     Callers must treat unavailable as a configuration error, not a skip - main() checks
     this up front and exits 2. The artifact ships in this repository beside this script,
@@ -88,15 +186,16 @@ def load_canonical_components():
     and a version gate that reports a pass because it could not find its reference is worse
     than no gate at all.
     """
-    global _canonical_cache
-    if _canonical_cache is None:
+    path = Path(reference_path)
+    key = str(path)
+    if key not in _canonical_cache:
         try:
-            doc = json.loads(CANONICAL_COMPONENTS.read_text(encoding="utf-8"))
-            _canonical_cache = (doc.get("components") or {},
-                                (doc.get("source") or {}).get("version", "unknown"))
-        except (OSError, json.JSONDecodeError):
-            _canonical_cache = (None, None)
-    return _canonical_cache
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            _canonical_cache[key] = (None, f"is missing or unreadable ({exc})")
+        else:
+            _canonical_cache[key] = parse_reference(doc)
+    return _canonical_cache[key]
 
 SEVERITY_ORDER = {"critical": 3, "major": 2, "minor": 1}
 VALID_SEVERITY = set(SEVERITY_ORDER)
@@ -1156,8 +1255,8 @@ def canonical_components_current(repo: ServiceRepo) -> Finding:
     """
     if repo.spec_error:
         return Finding(False, f"docs/openapi.json is unparseable: {repo.spec_error}", count=1)
-    reference, ref_version = load_canonical_components()
-    if reference is None:
+    sets, _ = load_canonical_components()
+    if sets is None:
         return Finding(True, "no reference artifact available; skipped", count=0)
     schemas = ((repo.spec or {}).get("components") or {}).get("schemas") or {}
     published = {k: v for k, v in schemas.items() if k.startswith("common.v1.")}
@@ -1165,19 +1264,80 @@ def canonical_components_current(repo: ServiceRepo) -> Finding:
         # Pre-migration service on a bespoke envelope. API-0004 already owns that failure;
         # reporting it twice would double-count the same debt in two baselines.
         return Finding(True, "no common.v1 components published; API-0004 governs adoption", count=0)
-    problems = []
-    for name in sorted(set(reference) | set(published)):
-        want, got = reference.get(name), published.get(name)
-        if want is None:
-            continue  # a service may publish extra components of its own
-        if got is None:
-            problems.append(f"{name}: missing from the spec but present in {ref_version}")
-        elif json.dumps(got, sort_keys=True) != json.dumps(want, sort_keys=True):
-            problems.append(f"{name}: differs from the {ref_version} proto projection")
-    if problems:
-        return Finding(False, f"{len(problems)} component(s) stale against {ref_version}",
-                       _capped(problems), len(problems))
-    return Finding(True, f"common.v1 components match the {ref_version} proto projection", count=0)
+    return compare_to_accepted_sets(published, sets)
+
+
+def compare_to_accepted_sets(published: dict, sets: list) -> Finding:
+    """Pass when the spec reproduces ONE accepted set whole; never a per-component mix.
+
+    Each set is judged on its own names only - a service may publish other common.v1 messages
+    its DTOs reach, as it always could. Whole-set rather than per-component, because a spec
+    is projected from one platform-contracts-go pin and the components point at each other:
+    ErrorResponse refs ProblemDetails, which refs ErrorCode. A spec whose ErrorCode matches
+    one vintage and PaginationMeta the other was built from no release at all, so it
+    describes a wire no single build emits. A per-component rule would accept exactly that,
+    and would also accept a spec that was only half regenerated after a bump.
+
+    The count is the distance to the NEAREST accepted set, so the ratchet reads "components
+    to fix" and a single-set reference counts exactly as it did before sets existed.
+    """
+    per_set = []
+    for cset in sets:
+        problems = {}
+        for name, want in cset.components.items():
+            got = published.get(name)
+            if got is None:
+                problems[name] = "missing"
+            elif _canonical(got) != _canonical(want):
+                problems[name] = "differs"
+        per_set.append((cset, problems))
+
+    single = len(sets) == 1
+    label = (lambda s: s.version) if single else (lambda s: s.label)
+    for cset, problems in per_set:
+        if not problems:
+            if single:
+                return Finding(True, f"common.v1 components match the {cset.version} proto "
+                                     f"projection", count=0)
+            others = ", ".join(o.label for o in sets if o is not cset)
+            return Finding(True, f"common.v1 components match the {cset.label} proto projection "
+                                 f"({others} also accepted)", count=0)
+
+    details, unmatched = [], False
+    for name in sorted({n for s in sets for n in s.components}):
+        states = [(s, p.get(name, "match")) for s, p in per_set if name in s.components]
+        if all(state == "match" for _, state in states):
+            continue
+        holders = " and ".join(label(s) for s, _ in states)
+        matched = " and ".join(label(s) for s, state in states if state == "match")
+        differing = [label(s) for s, state in states if state == "differs"]
+        if name not in published:
+            unmatched = True
+            details.append(f"{name}: missing from the spec but present in {holders}")
+        elif matched:
+            details.append(f"{name}: matches the {matched} proto projection but differs from "
+                           f"{' and '.join(differing)}")
+        else:
+            unmatched = True
+            plural = "s" if len(differing) > 1 else ""
+            details.append(f"{name}: differs from the {' and '.join(differing)} proto "
+                           f"projection{plural}")
+
+    count = min(len(p) for _, p in per_set)
+    if single:
+        evidence = f"{count} component(s) stale against {sets[0].version}"
+    else:
+        distances = ", ".join(f"{len(p)} against {s.label}" for s, p in per_set)
+        nearest = min(per_set, key=lambda sp: len(sp[1]))[0]
+        if unmatched:
+            evidence = (f"common.v1 components match no accepted proto projection "
+                        f"({distances}; nearest is {nearest.label})")
+        else:
+            # Every component matches some accepted set, just not the same one.
+            evidence = (f"common.v1 components mix proto vintages ({distances}): a spec must "
+                        f"reproduce one accepted projection whole, so regenerate it from a "
+                        f"single platform-contracts-go pin (nearest is {nearest.label})")
+    return Finding(False, evidence, _capped(details), count)
 
 
 def no_swaggo_annotation_source(repo: ServiceRepo) -> Finding:
@@ -1522,7 +1682,161 @@ def verify_docs(doc: dict, path: Path) -> int:
     return 0
 
 
+# --- the API-0007 reference artifact: floor agreement and the expand/contract window ---------
+
+def _contracts_floor(floors_doc):
+    """The platform-contracts-go floor as a string, or None when none is declared.
+
+    Accepts both shapes check_module_pins.load_floors does: a mapping with `min`, or a bare
+    version string.
+    """
+    floors = floors_doc.get("floors") if isinstance(floors_doc, dict) else None
+    spec = floors.get(CONTRACTS_MODULE) if isinstance(floors, dict) else None
+    if isinstance(spec, dict):
+        spec = spec.get("min")
+    return None if spec is None else str(spec)
+
+
+def floor_problems(floors_doc, sets: list) -> list:
+    """Reasons controls/module-floors.yaml and the reference disagree about the contract vintage.
+
+    With one set this is the old rule, floor == source.version. With two, the floor must
+    still NAME an accepted set - membership, not "at most the newest". A repository pinned
+    exactly at the floor has to project components some accepted set reproduces; a floor
+    below the oldest set, or between the two, admits a pin that produces neither, which is
+    the disagreement this check exists to rule out. And it must not name `next`: the floor
+    records the vintage the fleet has been moved to (module-floors.yaml, RAISING A FLOOR),
+    and promoting next to current is the act that records that move.
+    """
+    floor = _contracts_floor(floors_doc)
+    if floor is None:
+        return [f"controls/module-floors.yaml declares no floor for {CONTRACTS_MODULE}, so no "
+                f"service is required to pin a vintage API-0007 accepts"]
+    current = next(s for s in sets if s.role == CURRENT_SET)
+    chosen = {s.version: s for s in sets}.get(floor)
+    if chosen is None:
+        if len(sets) == 1:
+            fix = (f"Move the floor to {current.version}, or regenerate the artifact at the "
+                   f"floor's version from platform-shared-go with `go run "
+                   f"./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.")
+        else:
+            fix = f"Point the floor at current {current.version}."
+        return [f"controls/module-floors.yaml requires {CONTRACTS_MODULE} {floor}, but "
+                f"controls/common-v1-components.json accepts "
+                f"{' and '.join(s.label for s in sets)}. {fix}"]
+    if chosen.role == "next":
+        return [f"controls/module-floors.yaml requires {CONTRACTS_MODULE} {floor}, which is the "
+                f"staged next set: the fleet has not been moved to it yet, and a floor there "
+                f"fails every repository the window exists to let bump one at a time. Keep the "
+                f"floor at current {current.version}; raise it once next is promoted "
+                f"(--promote-next)."]
+    return []
+
+
+def verify_floor(floors_path: Path) -> int:
+    sets, reason = load_canonical_components()
+    if sets is None:
+        print(f"::error::{reference_path} {reason}")
+        return 2
+    try:
+        floors_doc = yaml.safe_load(Path(floors_path).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"::error::cannot read {floors_path}: {exc}")
+        return 2
+    problems = floor_problems(floors_doc, sets)
+    for p in problems:
+        print(f"::error::{p}")
+    if problems:
+        return 1
+    floor = _contracts_floor(floors_doc)
+    others = [s.label for s in sets if s.version != floor]
+    print(f"floor and reference artifact agree on {floor}"
+          + (f" ({', '.join(others)} also accepted)" if others else ""))
+    return 0
+
+
+def _reference_json(doc: dict) -> str:
+    # Byte-identical to platform-shared-go's openapicontract.CanonicalJSON for this document:
+    # sorted keys, 2-space indent, no HTML escaping, trailing newline. So a window that is
+    # opened, promoted and closed leaves exactly the bytes the emitter prints for the new vintage.
+    return json.dumps(doc, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def _write_reference(doc: dict, what: str) -> int:
+    sets, reason = parse_reference(doc)
+    if sets is None:
+        print(f"::error::refusing to write {reference_path}: the result {reason}")
+        return 1
+    Path(reference_path).write_text(_reference_json(doc), encoding="utf-8")
+    _canonical_cache.pop(str(reference_path), None)
+    print(f"api-contract: {what}; {reference_path} now accepts "
+          f"{' and '.join(s.label for s in sets)}")
+    return 0
+
+
+def _read_reference(path: Path) -> tuple:
+    """(document, None) for a file that is a valid reference on its own, else (None, reason).
+
+    Every edit starts from a valid file: rewriting an invalid one could launder it, since the
+    result is only checked for being valid, not for being what the input meant.
+    """
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"{path} is missing or unreadable ({exc})"
+    _, reason = parse_reference(doc)
+    return (None, f"{path} {reason}") if reason else (doc, None)
+
+
+def stage_next(emitted_path: Path) -> int:
+    """Open a window: accept the emitter's output for a newer vintage beside current."""
+    doc, err = _read_reference(reference_path)
+    emitted, err2 = _read_reference(emitted_path)
+    if err or err2:
+        print(f"::error::{err or err2}")
+        return 2
+    open_sets = [role for role in EXTRA_SET_ROLES if role in doc]
+    if open_sets:
+        print(f"::error::{reference_path} already carries `{open_sets[0]}`. Finish that window "
+              f"first: --drop-set previous after the fleet moved, or --drop-set next to abandon it.")
+        return 1
+    if any(role in emitted for role in EXTRA_SET_ROLES):
+        print(f"::error::{emitted_path} carries an accepted-set member; stage raw "
+              f"emit-canonical-components output, not another reference file.")
+        return 1
+    staged = dict(doc, next={"components": emitted["components"], "source": emitted.get("source")})
+    return _write_reference(staged, f"staged next from {emitted_path}")
+
+
+def promote_next() -> int:
+    """Close the expand phase: next becomes current, the old current stays accepted as previous."""
+    doc, err = _read_reference(reference_path)
+    if err:
+        print(f"::error::{err}")
+        return 2
+    if "next" not in doc:
+        print(f"::error::{reference_path} carries no `next` set to promote.")
+        return 1
+    promoted = {k: v for k, v in doc.items() if k not in ("components", "source", "next")}
+    promoted.update(components=doc["next"]["components"], source=doc["next"].get("source"),
+                    previous={"components": doc["components"], "source": doc.get("source")})
+    return _write_reference(promoted, "promoted next to current")
+
+
+def drop_set(role: str) -> int:
+    """Drop `previous` to finish a window, or `next` to abandon one."""
+    doc, err = _read_reference(reference_path)
+    if err:
+        print(f"::error::{err}")
+        return 2
+    if role not in doc:
+        print(f"::error::{reference_path} carries no `{role}` set to drop.")
+        return 1
+    return _write_reference({k: v for k, v in doc.items() if k != role}, f"dropped {role}")
+
+
 def main(argv: list) -> int:
+    global reference_path
     ap = argparse.ArgumentParser(description="Service API-contract guard (executable form of "
                                              "ADR-0048 + ADR-0067 + RFC-0001).")
     ap.add_argument("roots", nargs="*", default=["."], help="service repository roots to check")
@@ -1534,7 +1848,33 @@ def main(argv: list) -> int:
                     help="freeze current violation counts into .api-contract-baseline.json")
     ap.add_argument("--write-docs", metavar="FILE", help="regenerate the control table in FILE and exit")
     ap.add_argument("--verify-docs", metavar="FILE", help="fail if FILE's control table drifted; then exit")
+    ref = ap.add_argument_group(
+        "API-0007 reference artifact",
+        "The accepted common.v1 component sets. --verify-floor, --stage-next, --promote-next "
+        "and --drop-set act on --components and exit.")
+    ref.add_argument("--components", metavar="FILE", default=str(CANONICAL_COMPONENTS),
+                     help="reference artifact API-0007 compares against (default: %(default)s)")
+    ref.add_argument("--verify-floor", metavar="FLOORS",
+                     help="fail unless FLOORS' platform-contracts-go floor names an accepted, "
+                          "non-next set")
+    ref.add_argument("--stage-next", metavar="EMITTED",
+                     help="accept EMITTED (raw emit-canonical-components output for a newer "
+                          "vintage) as the next set beside current")
+    ref.add_argument("--promote-next", action="store_true",
+                     help="make next the current set, keeping the old current accepted as previous")
+    ref.add_argument("--drop-set", choices=EXTRA_SET_ROLES,
+                     help="stop accepting previous (window finished) or next (window abandoned)")
     args = ap.parse_args(argv)
+    reference_path = Path(args.components)
+
+    if args.verify_floor:
+        return verify_floor(Path(args.verify_floor))
+    if args.stage_next:
+        return stage_next(Path(args.stage_next))
+    if args.promote_next:
+        return promote_next()
+    if args.drop_set:
+        return drop_set(args.drop_set)
 
     doc = load_controls(Path(args.controls))
     if args.write_docs:
@@ -1548,14 +1888,17 @@ def main(argv: list) -> int:
     threshold = SEVERITY_ORDER[args.fail_on]
     controls = doc["controls"]
 
-    # Refuse to run a control whose reference artifact is missing rather than let it report a
-    # pass it never actually checked.
+    # Refuse to run a control whose reference artifact is missing or malformed rather than let
+    # it report a pass it never actually checked.
     if any(c.get("detector") == "canonical_components_current" for c in controls):
-        if load_canonical_components()[0] is None:
-            print(f"::error::API-0007 is enabled but {CANONICAL_COMPONENTS} is missing or "
-                  "unreadable. Check out this repository's controls/ directory, or regenerate "
-                  "the artifact from platform-shared-go with `go run "
-                  "./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.")
+        sets, reason = load_canonical_components()
+        if sets is None:
+            print(f"::error::API-0007 is enabled but {reference_path} {reason}. Check out this "
+                  "repository's controls/ directory, or regenerate the artifact from "
+                  "platform-shared-go with `go run "
+                  "./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`; "
+                  "change which sets it accepts only with --stage-next, --promote-next or "
+                  "--drop-set.")
             return 2
     reports, failed = [], False
     for raw in (args.roots or ["."]):
