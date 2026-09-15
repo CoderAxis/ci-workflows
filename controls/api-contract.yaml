@@ -169,18 +169,24 @@ controls:
     refs: [ADR-0048]
 
   - id: API-0007
-    title: Published common.v1 components match the current proto projection
+    title: Published common.v1 components match one accepted proto projection
     owner: platform-architecture
     scope: spec
     status: active
     severity: major
     applies_when: http-api
     policy: >-
-      Every common.v1.* component in the service's spec must be byte-identical to the
-      projection in controls/common-v1-components.json, which is generated from the proto SSOT
-      by commonv1policy and carries the platform-contracts-go version it was projected from.
-      A service publishing no common.v1 components is governed by API-0004 instead, not failed
-      twice here.
+      The common.v1.* components in the service's spec must be byte-identical, as a whole, to
+      one accepted projection in controls/common-v1-components.json: the current set, or the
+      next or previous set the artifact carries while the projection moves between two
+      platform-contracts-go vintages. A spec mixing components from two accepted sets matches
+      neither. Every set is generated from the proto SSOT by commonv1policy and carries the
+      version it was projected from. The platform-contracts-go floor in
+      controls/module-floors.yaml must equal the version of the current set or, during the
+      grace after a promote, the previous set - never next, and never a stale version no
+      accepted set carries - so a service pinned at the floor projects a set this control
+      accepts. A service publishing no common.v1 components is governed by API-0004 instead,
+      not failed twice here.
     rationale: >-
       API-0004 proves a response points AT the envelope; this proves the envelope it points at
       is the CURRENT one, and the two are genuinely different guarantees. Each service projects
@@ -192,10 +198,15 @@ controls:
       30 under the reference service's, so two services could both be green while disagreeing
       about which error codes exist.
     remediation: >-
-      Bump the service's platform-contracts-go pin to at least the version named in the
-      reference artifact's `source.version`, then regenerate the spec. If the reference itself
-      is behind the proto, regenerate it from platform-shared-go with
-      `go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.
+      Pin platform-contracts-go at the version one accepted set names - `source.version`, or
+      `next.source.version` while a window is open - and platform-shared-go at that set's
+      `source.projector.version` where it is recorded, bumping both in one change, then
+      regenerate the whole spec from that pair; a failure listing components that match
+      different sets is a partial regeneration or a hand edit. If the reference itself is
+      behind the proto, build the emitter at a platform-shared-go tag (`go run
+      github.com/coderaxis/platform-shared-go/platform/openapicontract/commonv1policy/cmd/emit-canonical-components@<tag>`)
+      and open a window with `check-api-contract.py --stage-next` instead of replacing
+      current, which this repository's CI refuses (README, "Moving the reference").
     detector: canonical_components_current
     refs: [RFC-0001, ADR-0048]
 
