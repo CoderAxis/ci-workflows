@@ -2438,12 +2438,12 @@ jobs:
       # The save used to be actions/cache's post step, and it ran out of disk. By then the runner
       # held the restored cache directory (3.0 GiB on edge-gateway, 3.5 GiB on auth-service), the
       # layers this run exported into it, the builder's own state, and every image compose built
-      # or pulled. Then the save wrote an archive about as large as the directory. From
-      # 2026-09-04 every save failed with "zstd: error 70 : Write error : cannot write block : No
-      # space left on device". Mostly that was a warning on a green job, and the cache was never
-      # updated. When the runner could not even write its own log, it failed the job after the
-      # suite had passed: edge-gateway#106 (job 104352477313) and auth-service main run
-      # 34966028753.
+      # or pulled. Then the save wrote an archive about as large as the directory, and failed with
+      # "zstd: error 70 : Write error : cannot write block : No space left on device". It failed on
+      # every edge-gateway run checked from 2026-09-09 to 2026-09-15, so that repository's cache
+      # still dates from 2026-09-04. Mostly the failure was a warning on a green job. When the
+      # runner could not even write its own log, it failed the job after the suite had passed:
+      # edge-gateway#106 (job 104352477313) and auth-service main run 34966028753.
       #
       # Two things are removed here, and both belong to this job alone. The builder's state is a
       # second copy of every layer the build imported or produced; what the next run needs was
