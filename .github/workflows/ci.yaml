@@ -1013,7 +1013,13 @@ jobs:
   # is raised and the artifact is not regenerated, the two disagree about which proto vintage is
   # canonical - and every service would then be measured against a version nothing is required
   # to pin. That pair is asserted here because it is the one inconsistency no service-side run
-  # could ever surface.
+  # could ever surface. The artifact may accept a second vintage while the projection moves
+  # (`next`, then `previous`); the floor must then equal current's or previous's version, never
+  # next's and never a stale one. The artifact is also held against the last release, because a
+  # hand-added `previous` (and a floor pointed at it) is well-formed on its own and only history
+  # shows it was never promoted - and because this job is not a required check on main, so a red
+  # commit can land and would otherwise be released inside the next green one. release.yaml
+  # repeats that check against the tag it releases from.
   #
   # Policy SSOT: ADR-0048, ADR-0067, RFC-0001.
   api-contract:
@@ -1023,6 +1029,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # The transition step reads the last release's copy of the reference artifact, and the
+          # release history behind a reopen. Full history brings every release tag with it; a
+          # shallow clone has neither, and would fall back to weaker bases.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -1110,52 +1121,67 @@ jobs:
           done
           echo "all eight RFC-0038 controls fired as expected (exit $rc)"
 
-      - name: The module floor and the reference artifact name the same proto vintage
-        run: |
-          python3 - <<'PY'
-          import json, pathlib, sys, yaml
-          module = "github.com/coderaxis/platform-contracts-go"
-          floors = yaml.safe_load(pathlib.Path("controls/module-floors.yaml").read_text())["floors"]
-          floor = str(floors[module]["min"])
-          ref = json.loads(pathlib.Path("controls/common-v1-components.json").read_text())
-          got = ref["source"]["version"]
-          if got != floor:
-              print(f"::error::controls/module-floors.yaml requires {module} {floor}, but "
-                    f"controls/common-v1-components.json was projected from {got}. Regenerate the "
-                    "artifact from platform-shared-go with `go run "
-                    "./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.")
-              sys.exit(1)
-          print(f"floor and reference artifact agree on {floor}")
-          PY
+      # With one accepted set this is floor == source.version, as it always was. While a window is
+      # open the floor must equal the version of current or previous, never next, so a window
+      # closes only with the floor on current. And against the newest release tag HEAD contains -
+      # what @v1 consumers run - the artifact may make exactly one window step (stage, abandon,
+      # promote, close, a relabel of unchanged components, or a git revert of a promote or a
+      # close). A step landed but not yet released counts toward this change. Only a clone with no
+      # release tag falls back to the event's base. README, "Moving the reference". The rules live
+      # in check-api-contract.py rather than inline here so the suite below can hold them against
+      # fixtures and real git history.
+      - name: The module floor and the reference artifact agree, and moved only by allowed steps
+        run: python3 scripts/check-api-contract.py --verify-floor controls/module-floors.yaml --base-from-event
 
-      - name: Mutation test - API-0007 must fail a spec on a stale proto vintage
+      # The accepted-set rules: one whole set passes and a per-component mix fails naming both,
+      # a single-set artifact reads exactly as before, the artifact is validated before any
+      # service is judged, sets are ordered on the (contracts, projector) pair, a window opened,
+      # promoted and closed by the checker's own flags ends on the emitter's bytes, and the
+      # transition rules above hold against fixtures and real git repositories.
+      - name: API-0007 accepted sets, floor and transition rules, window tooling
+        run: python3 scripts/test_api_contract_canonical_components.py
+
+      # One fixture per accepted set, each that set's components with an ErrorCode value no
+      # release has. It used to drop the LAST value from current instead, which is also exactly
+      # `previous` after a migration that appended one value - the usual contracts change - so the
+      # fixture passed and this job went red on the promote commit. A value that is not a real
+      # code cannot reproduce any vintage, and the fixture checks that before it is used.
+      - name: Mutation test - API-0007 must fail a spec that reproduces no accepted proto vintage
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json, pathlib, shutil
-          fixture = pathlib.Path("/tmp/api007-fixture")
-          shutil.rmtree(fixture, ignore_errors=True)
-          (fixture / "docs").mkdir(parents=True)
           ref = json.loads(pathlib.Path("controls/common-v1-components.json").read_text())
-          components = dict(ref["components"])
-          # Drop one enum value: exactly what an older platform-contracts-go pin produces.
-          stale = json.loads(json.dumps(components["common.v1.ErrorCode"]))
-          stale["enum"] = stale["enum"][:-1]
-          components["common.v1.ErrorCode"] = stale
-          (fixture / "docs" / "openapi.json").write_text(json.dumps(
-              {"openapi": "3.0.3", "info": {"title": "fixture", "version": "1"}, "paths": {},
-               "components": {"schemas": components}}))
+          sets = {"current": ref["components"]}
+          sets.update({role: ref[role]["components"] for role in ("next", "previous") if role in ref})
+          root = pathlib.Path("/tmp/api007-fixtures")
+          shutil.rmtree(root, ignore_errors=True)
+          canon = lambda v: json.dumps(v, sort_keys=True)
+          for role, accepted in sets.items():
+              components = json.loads(json.dumps(accepted))
+              components["common.v1.ErrorCode"]["enum"].append("API_0007_MUTATION_NOT_A_REAL_CODE")
+              for other, want in sets.items():
+                  if canon(components["common.v1.ErrorCode"]) == canon(want["common.v1.ErrorCode"]):
+                      raise SystemExit(f"::error::the {role} fixture's ErrorCode reproduces {other}; "
+                                       "this mutation test would pass vacuously")
+              (root / role / "docs").mkdir(parents=True)
+              (root / role / "docs" / "openapi.json").write_text(json.dumps(
+                  {"openapi": "3.0.3", "info": {"title": "fixture", "version": "1"}, "paths": {},
+                   "components": {"schemas": components}}))
+          print("fixtures:", ", ".join(sets))
           PY
-          set +e
-          out="$(python3 scripts/check-api-contract.py /tmp/api007-fixture --fail-on major 2>&1)"
-          rc=$?
-          set -e
-          echo "$out"
-          if [ "$rc" -eq 0 ] || ! echo "$out" | grep -q "::error::\[API-0007\]"; then
-            echo "::error::API-0007 did not fire against a spec built on a stale proto vintage"
-            exit 1
-          fi
-          echo "API-0007 fired as expected (exit $rc)"
+          for fixture in /tmp/api007-fixtures/*; do
+            set +e
+            out="$(python3 scripts/check-api-contract.py "$fixture" --fail-on major 2>&1)"
+            rc=$?
+            set -e
+            echo "$out"
+            if [ "$rc" -eq 0 ] || ! echo "$out" | grep -q "::error::\[API-0007\]"; then
+              echo "::error::API-0007 did not fire against the $(basename "$fixture") fixture, a spec no accepted vintage produces"
+              exit 1
+            fi
+            echo "API-0007 fired against the $(basename "$fixture") fixture as expected (exit $rc)"
+          done
 
       - name: Mutation test - a missing reference artifact must fail, never pass
         run: |

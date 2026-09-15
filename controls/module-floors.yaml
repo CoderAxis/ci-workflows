@@ -54,7 +54,13 @@
 #
 # API-0007 in controls/api-contract.yaml is the paired control: this file makes a service
 # depend on a current contract module, API-0007 makes it actually publish the current
-# components.
+# components. The platform-contracts-go floor must equal the version of a set that artifact
+# accepts: its current set, or its `previous` set during the grace after a promote - never a
+# staged `next`, and never a stale version below every accepted set (README, "Moving the
+# reference"). So closing a window (dropping `previous`) raises this floor to current before or in
+# the same change, and rolling a promote back brings a floor raised onto the promoted set back
+# down with it. `check-api-contract.py --verify-floor` enforces that in this repository's CI and in
+# release.yaml before @v1 moves.
 
 version: 1
 domain: module-floors
@@ -66,7 +72,9 @@ floors:
       Carries the common.v1 envelope, Meta, PaginationMeta, ProblemDetails and the ErrorCode
       enum that every service's OpenAPI components are projected from. v0.7.0 is the vintage
       controls/common-v1-components.json is generated from, so a pin below it cannot produce
-      components matching the reference and will fail API-0007.
+      components matching the reference and will fail API-0007. It must name a version that
+      artifact accepts as current or previous: never a `next` set before that set is promoted,
+      and raised to current when a window closes.
 
   github.com/coderaxis/platform-shared-go:
     min: v1.22.0

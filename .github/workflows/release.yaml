@@ -175,6 +175,28 @@ jobs:
           echo "${latest} + ${bump} -> ${V}"
           { echo "release=true"; echo "version=${V}"; echo "previous=${latest}"; } >> "${GITHUB_OUTPUT}"
 
+      - name: Set up Python
+        if: steps.version.outputs.release == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The API-0007 reference artifact may move by exactly one window step per release, and the
+      # platform-contracts-go floor must name its current or previous set (README, "Moving the
+      # reference"). The CI run this workflow waits for checks that too, but it is not a required
+      # check on main: a commit that turned it red can land, and the next commit's green run would
+      # otherwise release it. So the release itself is held against the tag it bumps from - the
+      # exact delta @v1 consumers are about to receive - and refuses rather than carry two steps,
+      # a forged `previous`, a replaced current or a floor on no accepted set to the fleet.
+      - name: Refuse a release whose API-0007 reference moves by more than one step or whose contracts floor names no accepted set
+        if: steps.version.outputs.release == 'true'
+        env:
+          PREV: ${{ steps.version.outputs.previous }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade PyYAML
+          python3 scripts/check-api-contract.py --verify-floor controls/module-floors.yaml --base "${PREV}"
+
       - name: Tag the release and move v1 onto it
         if: steps.version.outputs.release == 'true'
         env:
