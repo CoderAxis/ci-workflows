@@ -194,14 +194,15 @@ controls:
       30 under the reference service's, so two services could both be green while disagreeing
       about which error codes exist.
     remediation: >-
-      Pin platform-contracts-go at a version one accepted set names - `source.version`, or
-      `next.source.version` while a window is open - and regenerate the whole spec from that
-      one pin; a failure listing components that match different sets is a partial
-      regeneration or a hand edit. If the reference itself is behind the proto, regenerate it
-      from platform-shared-go with
-      `go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`, and
-      open a window with `check-api-contract.py --stage-next` instead of replacing current
-      (README, "Moving the reference").
+      Pin platform-contracts-go at the version one accepted set names - `source.version`, or
+      `next.source.version` while a window is open - and platform-shared-go at that set's
+      `source.projector.version` where it is recorded, bumping both in one change, then
+      regenerate the whole spec from that pair; a failure listing components that match
+      different sets is a partial regeneration or a hand edit. If the reference itself is
+      behind the proto, build the emitter at a platform-shared-go tag (`go run
+      github.com/coderaxis/platform-shared-go/platform/openapicontract/commonv1policy/cmd/emit-canonical-components@<tag>`)
+      and open a window with `check-api-contract.py --stage-next` instead of replacing
+      current, which this repository's CI refuses (README, "Moving the reference").
     detector: canonical_components_current
     refs: [RFC-0001, ADR-0048]
 

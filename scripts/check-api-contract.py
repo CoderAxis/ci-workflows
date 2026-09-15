@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,15 +79,23 @@ BASELINE_COMMENT = ("Frozen debt for this service, co-owned by three gates that 
 # platform-contracts-go release it was projected from.
 #
 # The top-level `components`/`source` pair is the CURRENT set. While the projection moves
-# to a new contracts vintage, the file may carry ONE more accepted set beside it, under
-# `next` (staged, newer than current) or `previous` (just promoted away from, older). Both
-# are written by --stage-next / --promote-next / --drop-set from emitter output, never by
-# hand. A file with neither is exactly what the emitter prints, and means what it always
-# meant: one vintage, one reference.
+# to a new vintage, the file may carry ONE more accepted set beside it, under `next`
+# (staged, newer than current) or `previous` (just promoted away from, older). Both are
+# written by --stage-next / --promote-next / --drop-set from emitter output, and this
+# repository's CI holds every change to the file against its base commit (--verify-floor
+# --base), so a set cannot be added, replaced or reordered by hand. A file with neither is
+# exactly what the emitter prints, and means what it always meant: one vintage, one reference.
+#
+# A vintage is a PAIR. platform-contracts-go carries the messages, but platform-shared-go
+# carries the projection rules (protoschema, commonv1policy), so one contracts release
+# projects differently under two shared-go releases. `source.projector` records the
+# shared-go release when the emitter knows it; `source.version` alone cannot order two sets
+# whose projection moved only in shared-go.
 CANONICAL_COMPONENTS = SELF_REPO / "controls" / "common-v1-components.json"
 # What main() compares against: CANONICAL_COMPONENTS unless --components names another file.
 reference_path = CANONICAL_COMPONENTS
 CONTRACTS_MODULE = "github.com/coderaxis/platform-contracts-go"
+PROJECTOR_MODULE = "github.com/coderaxis/platform-shared-go"
 CURRENT_SET = "current"
 EXTRA_SET_ROLES = ("next", "previous")
 REFERENCE_KEYS = {"_comment", "components", "source", *EXTRA_SET_ROLES}
@@ -95,20 +105,39 @@ _canonical_cache: dict = {}
 
 @dataclass(frozen=True)
 class ComponentSet:
-    """One accepted common.v1 projection: every component one contracts vintage produces."""
+    """One accepted common.v1 projection: every component one (contracts, projector) pair produces."""
     role: str
     module: str
     version: str
     components: dict
+    # The platform-shared-go release that projected the set, when the emitter recorded it.
+    projector_module: str | None = None
+    projector_version: str | None = None
+    # The raw `source` object, so two sets compare on everything that names their provenance.
+    source: dict = field(default_factory=dict)
+
+    @property
+    def vintage(self) -> str:
+        if self.projector_version is None:
+            return self.version
+        return f"{self.version} via {self.projector_module.rsplit('/', 1)[-1]} {self.projector_version}"
 
     @property
     def label(self) -> str:
-        return f"{self.role} {self.version}"
+        return f"{self.role} {self.vintage}"
+
+    @property
+    def identity(self) -> str:
+        return _canonical({"components": self.components, "source": self.source})
 
 
 def _stable_version(version: str):
     m = STABLE_VERSION_RE.match(version or "")
     return tuple(int(p) for p in m.groups()) if m else None
+
+
+def _cmp(a, b) -> int:
+    return (a > b) - (a < b)
 
 
 def _canonical(value) -> str:
@@ -123,6 +152,13 @@ def parse_reference(doc) -> tuple:
     order two vintages, so both have to be stable tags, the extra one has to sit on the side
     of current its role names, and it has to project something different, or the window it
     opens migrates nothing.
+
+    Ordering is on the (contracts, projector) pair. A newer contracts release orders two
+    sets on its own, so files written before `source.projector` existed keep working. Equal
+    contracts releases are ordered only by recorded projector versions: that is the
+    projection change shipping in platform-shared-go alone. And the projector may not move
+    against the contracts direction, since a newer contracts release projected by an older
+    shared-go drops whatever projection rules the newer shared-go added.
     """
     if not isinstance(doc, dict):
         return None, "is not a JSON object"
@@ -141,8 +177,15 @@ def parse_reference(doc) -> tuple:
             return None, (f"{role} set has no components, so every spec would match it and "
                           f"API-0007 would pass without comparing anything")
         source = body.get("source") if isinstance(body.get("source"), dict) else {}
+        projector = source.get("projector")
+        if projector is not None and not (isinstance(projector, dict) and projector.get("version")):
+            return None, (f"{role} set's source.projector must be an object naming the "
+                          f"platform-shared-go `module` and `version` that projected it")
         return ComponentSet(role, str(source.get("module") or CONTRACTS_MODULE),
-                            str(source.get("version") or "unknown"), comps), None
+                            str(source.get("version") or "unknown"), comps,
+                            str(projector.get("module") or PROJECTOR_MODULE) if projector else None,
+                            str(projector["version"]) if projector else None,
+                            source), None
 
     current, err = one(CURRENT_SET, doc)
     if err:
@@ -165,14 +208,38 @@ def parse_reference(doc) -> tuple:
         return None, (f"current {current.version!r} and {extra.role} {extra.version!r} must both "
                       f"be stable vX.Y.Z tags; an accepted set from an untagged or replaced "
                       f"build cannot be pinned by any service")
-    if extra.role == "next" and not extra_v > cur_v:
-        return None, f"{extra.label} is not newer than current {current.version}"
-    if extra.role == "previous" and not extra_v < cur_v:
-        return None, f"{extra.label} is not older than current {current.version}"
+    for s in (current, extra):
+        if s.projector_version is not None and _stable_version(s.projector_version) is None:
+            # `go run ./...` inside a checkout reports "(devel)": no service can pin that.
+            return None, (f"{s.label} records projector {s.projector_version!r}, which is not a "
+                          f"stable vX.Y.Z tag; stage emitter output from a tagged platform-shared-go "
+                          f"release (go run <package>@<tag>) so services can pin the pair")
+    if (current.projector_module and extra.projector_module
+            and current.projector_module != extra.projector_module):
+        return None, (f"{extra.label} was projected by {extra.projector_module}, current by "
+                      f"{current.projector_module}; accepted sets must share a projector module")
+    direction = "newer" if extra.role == "next" else "older"
+    want = 1 if extra.role == "next" else -1
+    contracts = _cmp(extra_v, cur_v)
+    projector = (None if current.projector_version is None or extra.projector_version is None
+                 else _cmp(_stable_version(extra.projector_version),
+                           _stable_version(current.projector_version)))
+    if contracts == -want or (contracts == 0 and projector in (0, -want)):
+        return None, f"{extra.label} is not {direction} than current {current.vintage}"
+    if contracts == 0 and projector is None:
+        return None, (f"{extra.label} is not {direction} than current {current.vintage}: both name "
+                      f"the same {CONTRACTS_MODULE} release, and only a platform-shared-go "
+                      f"release recorded on BOTH sets (source.projector) can order a projection "
+                      f"change that ships in platform-shared-go alone")
+    if projector == -want:
+        return None, (f"{extra.label} pairs a {direction} contracts release with a projector that "
+                      f"is not {direction} than current {current.vintage}, so it drops projection "
+                      f"rules the other set's platform-shared-go already applies")
     if _canonical(extra.components) == _canonical(current.components):
         return None, (f"{extra.label} projects components byte-identical to current "
-                      f"{current.version}, so there is nothing to migrate. Regenerate the "
-                      f"artifact at the version the floor should name instead")
+                      f"{current.vintage}, so there is nothing to migrate. Relabel current "
+                      f"instead: replace the file with that emitter output, which changes only "
+                      f"`source`")
     # Newest first, so a spec both sets accept is reported against the vintage it is headed to.
     return ([extra, current] if extra.role == "next" else [current, extra]), None
 
@@ -1684,14 +1751,18 @@ def verify_docs(doc: dict, path: Path) -> int:
 
 # --- the API-0007 reference artifact: floor agreement and the expand/contract window ---------
 
+def _contracts_floor_spec(floors_doc):
+    floors = floors_doc.get("floors") if isinstance(floors_doc, dict) else None
+    return floors.get(CONTRACTS_MODULE) if isinstance(floors, dict) else None
+
+
 def _contracts_floor(floors_doc):
     """The platform-contracts-go floor as a string, or None when none is declared.
 
     Accepts both shapes check_module_pins.load_floors does: a mapping with `min`, or a bare
     version string.
     """
-    floors = floors_doc.get("floors") if isinstance(floors_doc, dict) else None
-    spec = floors.get(CONTRACTS_MODULE) if isinstance(floors, dict) else None
+    spec = _contracts_floor_spec(floors_doc)
     if isinstance(spec, dict):
         spec = spec.get("min")
     return None if spec is None else str(spec)
@@ -1700,40 +1771,307 @@ def _contracts_floor(floors_doc):
 def floor_problems(floors_doc, sets: list) -> list:
     """Reasons controls/module-floors.yaml and the reference disagree about the contract vintage.
 
-    With one set this is the old rule, floor == source.version. With two, the floor must
-    still NAME an accepted set - membership, not "at most the newest". A repository pinned
-    exactly at the floor has to project components some accepted set reproduces; a floor
-    below the oldest set, or between the two, admits a pin that produces neither, which is
-    the disagreement this check exists to rule out. And it must not name `next`: the floor
-    records the vintage the fleet has been moved to (module-floors.yaml, RAISING A FLOOR),
-    and promoting next to current is the act that records that move.
+    The floor must not sit ABOVE the current set. That is the disagreement no service-side
+    run can surface: every repository pinned at the floor would project components newer
+    than anything API-0007 accepts, and nothing would be required to pin the vintage the
+    artifact names. It follows that the floor never names a staged `next`, which is newer
+    than current.
+
+    A floor BELOW current is only a stale floor. It lets a repository pin an older contracts
+    release, and API-0007 still fails that repository the moment it publishes components no
+    accepted set reproduces. Requiring equality instead - or membership in the accepted sets
+    while a window is open - would make closing a window depend on raising a fleet-wide floor,
+    which fails the pin policy for every module below it (101 go.mod files pinned
+    platform-contracts-go at 22 versions on 2026-09-15; 11 specs publish common.v1 components),
+    and the next window could not open until it was done. Raising a floor stays its own decision
+    (module-floors.yaml, RAISING A FLOOR).
+
+    Two versions that cannot be ordered (an unrecorded "unknown", a non-tag floor) must be
+    equal, which is the rule this check had before windows existed.
+
+    What this cannot see is history: a floor lowered to a stale value is still "not above
+    current". floor_transition_problems holds that against the base commit.
     """
     floor = _contracts_floor(floors_doc)
     if floor is None:
         return [f"controls/module-floors.yaml declares no floor for {CONTRACTS_MODULE}, so no "
                 f"service is required to pin a vintage API-0007 accepts"]
     current = next(s for s in sets if s.role == CURRENT_SET)
-    chosen = {s.version: s for s in sets}.get(floor)
-    if chosen is None:
-        if len(sets) == 1:
-            fix = (f"Move the floor to {current.version}, or regenerate the artifact at the "
-                   f"floor's version from platform-shared-go with `go run "
-                   f"./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.")
-        else:
-            fix = f"Point the floor at current {current.version}."
+    floor_v, current_v = _stable_version(floor), _stable_version(current.version)
+    if floor_v is None or current_v is None:
+        if floor == current.version:
+            return []
         return [f"controls/module-floors.yaml requires {CONTRACTS_MODULE} {floor}, but "
-                f"controls/common-v1-components.json accepts "
-                f"{' and '.join(s.label for s in sets)}. {fix}"]
-    if chosen.role == "next":
+                f"controls/common-v1-components.json names current {current.version}. The two "
+                f"cannot be ordered unless both are stable vX.Y.Z tags, so they must be equal."]
+    if floor_v <= current_v:
+        return []
+    staged = next((s for s in sets if s.role == "next" and s.version == floor), None)
+    if staged:
         return [f"controls/module-floors.yaml requires {CONTRACTS_MODULE} {floor}, which is the "
-                f"staged next set: the fleet has not been moved to it yet, and a floor there "
+                f"staged {staged.label}: the fleet has not been moved to it yet, and a floor there "
                 f"fails every repository the window exists to let bump one at a time. Keep the "
-                f"floor at current {current.version}; raise it once next is promoted "
+                f"floor at or below current {current.version}; raise it once next is promoted "
                 f"(--promote-next)."]
-    return []
+    return [f"controls/module-floors.yaml requires {CONTRACTS_MODULE} {floor}, above current "
+            f"{current.version} in controls/common-v1-components.json (which accepts "
+            f"{' and '.join(s.label for s in sets)}). Every repository pinned at the floor would "
+            f"project components API-0007 does not accept. Keep the floor at or below "
+            f"{current.version}, or move the reference first: --stage-next with emitter output "
+            f"for the new vintage, then --promote-next."]
 
 
-def verify_floor(floors_path: Path) -> int:
+def _state(sets) -> str:
+    return "{" + ", ".join(s.label for s in sets) + "}"
+
+
+def transition_problems(base_sets, head_sets) -> tuple:
+    """(problems, summary) for the change from the base commit's accepted sets to the head's.
+
+    parse_reference judges a file on its own, so it accepts any `previous` older than current,
+    whether or not the fleet was ever measured against it. Only the base commit knows that.
+    A change may make exactly ONE window step, each of which the checker's own flags produce:
+
+      stage     {current}          -> {current, next}        --stage-next
+      abandon   {current, next}    -> {current}              --drop-set next
+      promote   {current, next}    -> {next as current, current as previous}   --promote-next
+      close     {current, previous} -> {current}             --drop-set previous
+      relabel   same roles, byte-identical components, provenance not moving backwards
+
+    Anything else fails. In particular: a `previous` that was not the current set on the base
+    (a forged grace set, which would readmit an old projection); replacing current in place
+    (regenerating the artifact over itself - a flag day for every spec, and during a window it
+    also discards `next`); and two steps in one change, such as stage then promote, which would
+    promote a vintage no service had the chance to adopt while it was still `next`. One step
+    per change also means each step reaches the fleet through @v1 before the next one lands.
+    """
+    if base_sets is None:
+        return [], "the reference artifact is new in this change"
+    b = {s.role: s for s in base_sets}
+    h = {s.role: s for s in head_sets}
+    bc, bn, bp = b[CURRENT_SET], b.get("next"), b.get("previous")
+    hc, hn, hp = h[CURRENT_SET], h.get("next"), h.get("previous")
+    roles_b, roles_h = set(b), set(h)
+
+    def same(x, y) -> bool:
+        return x is not None and y is not None and x.identity == y.identity
+
+    if roles_b == roles_h and all(same(b[r], h[r]) for r in roles_b):
+        return [], f"accepted sets unchanged {_state(head_sets)}"
+    if roles_b == {CURRENT_SET} and roles_h == {CURRENT_SET, "next"} and same(bc, hc):
+        return [], f"staged {hn.label} beside current {hc.vintage}: the window is open"
+    if roles_b == {CURRENT_SET, "next"} and roles_h == {CURRENT_SET} and same(bc, hc):
+        return [], f"dropped {bn.label}: the window is abandoned"
+    if (roles_b == {CURRENT_SET, "next"} and roles_h == {CURRENT_SET, "previous"}
+            and same(bn, hc) and same(bc, hp)):
+        return [], f"promoted next to current {hc.vintage}; {hp.label} stays accepted"
+    if roles_b == {CURRENT_SET, "previous"} and roles_h == {CURRENT_SET} and same(bc, hc):
+        return [], f"dropped {bp.label}: the window is closed"
+
+    if roles_b == roles_h and all(_canonical(b[r].components) == _canonical(h[r].components)
+                                  for r in roles_b):
+        problems, relabelled = [], []
+        for role in sorted(roles_b):
+            old, new = b[role], h[role]
+            if old.identity == new.identity:
+                continue
+            relabelled.append(f"{old.label} -> {new.vintage}")
+            if old.module != new.module:
+                problems.append(f"{old.label} changes module {old.module} -> {new.module}")
+            for what, was, now in (("version", old.version, new.version),
+                                   ("projector", old.projector_version, new.projector_version)):
+                if was is None or _stable_version(was) is None:
+                    continue  # nothing recorded to go backwards from
+                if now is None or _stable_version(now) is None:
+                    problems.append(f"{old.label} loses its recorded {what} {was}; regenerate with "
+                                    f"an emitter that records it")
+                elif _stable_version(now) < _stable_version(was):
+                    problems.append(f"{old.label} relabels its {what} backwards, {was} -> {now}")
+        if not problems:
+            return [], f"relabelled {', '.join(relabelled)} with components unchanged"
+        return [f"controls/common-v1-components.json relabels a set with unchanged components, "
+                f"but {'; '.join(problems)}. A relabel corrects provenance and never moves it "
+                f"backwards."], ""
+
+    hints = []
+    if hp is not None and not same(hp, bp) and not same(hp, bc):
+        hints.append(f"{hp.label} was not the current set on the base, so it would readmit a "
+                     f"projection the fleet was never measured against as current")
+    if not same(hc, bc):
+        if same(hc, bn):
+            if hp is None:
+                hints.append(f"next {bn.vintage} became current without keeping {bc.vintage} as "
+                             f"previous, which is promote and close in one change")
+        elif same(hc, bp):
+            hints.append(f"current was rolled back to previous {bp.vintage}, which fails every spec "
+                         f"already on {bc.vintage}")
+        elif same(hp, bc):
+            hints.append(f"{hc.vintage} became current without ever being staged as next, which is "
+                         f"stage and promote in one change: no service could adopt it before it was "
+                         f"promoted")
+        else:
+            hints.append(f"current was replaced in place ({bc.vintage} -> {hc.vintage}): regenerating "
+                         f"the artifact over itself is a flag day for every spec that publishes "
+                         f"common.v1 components; stage the emitter output with --stage-next instead")
+    if hn is not None and bp is not None:
+        hints.append("`previous` was dropped and `next` staged in one change")
+    if hn is not None and bn is not None and not same(hn, bn):
+        hints.append(f"next was replaced ({bn.vintage} -> {hn.vintage}); drop it with --drop-set "
+                     f"next, then stage the new one")
+    return [f"controls/common-v1-components.json goes from {_state(base_sets)} to "
+            f"{_state(head_sets)}, which is not one window step"
+            + (f": {'; '.join(hints)}" if hints else "")
+            + ". One change may stage next (--stage-next, when no extra set is open), abandon it "
+              "(--drop-set next), promote it (--promote-next), close the window (--drop-set "
+              "previous), or relabel a set whose components are unchanged (README, \"Moving the "
+              "reference\")."], ""
+
+
+def floor_transition_problems(base_doc, head_doc) -> tuple:
+    """(problems, summary) for the platform-contracts-go floor moving from the base to the head.
+
+    A floor only rises. floor_problems accepts any floor not above current, so without the base
+    a lowered floor would read as merely stale - and it would let the fleet pin a contracts
+    release it had already been moved off, which on main used to take the reference artifact
+    (and so every spec) down with it.
+
+    A deliberate rollback of a raise is still possible, because a raise that turns the pin
+    policy red across the fleet has happened here before (module-floors.yaml, "WHO A FLOOR
+    APPLIES TO") and this job gates the release that would carry the fix. It has to be declared
+    in the reviewed file: `lowered_from: <the base floor>` beside `min:`, added in the same
+    change, so a declaration left over from an earlier rollback cannot authorise a new one.
+    """
+    base, head = _contracts_floor(base_doc), _contracts_floor(head_doc)
+    if base is None:
+        return [], "no floor on the base"
+    if head is None or head == base:
+        # A removed floor is floor_problems' failure to report, not a second one here.
+        return [], f"floor unchanged at {base}" if head == base else ""
+    base_v, head_v = _stable_version(base), _stable_version(head)
+    if base_v is not None and head_v is not None and head_v > base_v:
+        return [], f"floor raised {base} -> {head}"
+
+    def declared(doc):
+        spec = _contracts_floor_spec(doc)
+        return str(spec["lowered_from"]) if isinstance(spec, dict) and "lowered_from" in spec else None
+
+    if declared(head_doc) == base and declared(base_doc) != base:
+        return [], f"floor lowered {base} -> {head}, declared with lowered_from: {base}"
+    how = ("lowers" if base_v is not None and head_v is not None
+           else "moves, in a way that cannot be ordered,")
+    return [f"controls/module-floors.yaml {how} the {CONTRACTS_MODULE} floor from {base} to {head}. "
+            f"A floor only rises: lowering it lets repositories pin a contracts release the fleet "
+            f"was moved off. If this is a deliberate rollback of a raise, declare it in the same "
+            f"change with `lowered_from: {base}` beside `min: {head}`."], ""
+
+
+def _git_out(repo: Path, *args: str) -> tuple:
+    proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def resolve_event_base(repo: Path, event_name: str, event: dict) -> tuple:
+    """(base commit or None, reason, whether a base is required) for a GitHub event.
+
+    Not diffrange.resolve_range: that returns a pull request's MERGE BASE, which suits "which
+    paths did this branch touch", but a transition has to be judged against what main holds
+    now. A pull_request checkout is the merge commit, so the base is its first parent,
+    pull_request.base.sha - otherwise window steps other changes landed on main since the
+    branch point would be charged to this one.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from diffrange import ensure_commit, is_ancestor  # noqa: E402 - only this path needs git
+
+    if event_name in ("pull_request", "pull_request_target"):
+        base = str(((event.get("pull_request") or {}).get("base") or {}).get("sha") or "")
+        if not base:
+            return None, "the pull_request payload carries no base SHA", True
+        if not ensure_commit(repo, base):
+            return None, f"pull request base {base[:12]} is not in this clone", True
+        return base, f"pull request base {base[:12]}", True
+    if event_name == "push":
+        if event.get("deleted"):
+            return None, "a branch deletion changes nothing", False
+        before = str(event.get("before") or "")
+        if (before and set(before) != {"0"} and not event.get("created") and not event.get("forced")
+                and ensure_commit(repo, before) and is_ancestor(repo, before, "HEAD")):
+            return before, f"push before-SHA {before[:12]}", True
+        # The first push of a branch or a force push has no usable before-SHA. What such a branch
+        # would change is what it holds against the default branch - unless it IS the default
+        # branch, whose merge base with itself is itself and would check nothing.
+        default = str((event.get("repository") or {}).get("default_branch") or "main")
+        if event.get("ref") == f"refs/heads/{default}":
+            return None, (f"a push to {default} without a usable before-SHA (created or forced) "
+                          f"cannot be held against anything"), True
+        ref = f"refs/remotes/origin/{default}"
+        if _git_out(repo, "rev-parse", "--verify", "-q", ref)[0] != 0:
+            _git_out(repo, "fetch", "--no-tags", "--quiet", "origin", f"+refs/heads/{default}:{ref}")
+        rc, out, _ = _git_out(repo, "merge-base", ref, "HEAD")
+        if rc == 0 and out.strip():
+            return out.strip(), f"merge base {out.strip()[:12]} with origin/{default}", True
+        return None, f"no usable before-SHA and no merge base with origin/{default}", True
+    return None, f"a {event_name or 'local'} run describes no change to hold against a base", False
+
+
+def _read_at(repo: Path, base: str, path: Path) -> tuple:
+    """(text or None, error or None) for `path` as the base commit held it. None text = absent."""
+    rc, top, err = _git_out(repo, "rev-parse", "--show-toplevel")
+    if rc != 0:
+        return None, f"{repo} is not a git repository ({err.strip()})"
+    try:
+        rel = Path(path).resolve().relative_to(Path(top.strip()).resolve()).as_posix()
+    except ValueError:
+        return None, f"{path} is not inside the git repository at {top.strip()}"
+    if _git_out(repo, "cat-file", "-e", f"{base}^{{commit}}")[0] != 0:
+        return None, f"base {base} is not a commit in this clone"
+    if _git_out(repo, "cat-file", "-e", f"{base}:{rel}")[0] != 0:
+        return None, None
+    rc, text, err = _git_out(repo, "show", f"{base}:{rel}")
+    return (text, None) if rc == 0 else (None, f"git show {base}:{rel} failed ({err.strip()})")
+
+
+def verify_transition(floors_path: Path, floors_doc, sets: list, base: str) -> int:
+    repo = Path(reference_path).resolve().parent
+    problems = []
+    ref_text, err = _read_at(repo, base, Path(reference_path))
+    floor_text, err2 = (None, None) if err else _read_at(Path(floors_path).resolve().parent,
+                                                         base, Path(floors_path))
+    if err or err2:
+        print(f"::error::cannot read the base commit: {err or err2}")
+        return 2
+
+    base_sets = None
+    if ref_text is not None:
+        try:
+            base_sets, reason = parse_reference(json.loads(ref_text))
+        except json.JSONDecodeError as exc:
+            reason = f"is not JSON ({exc})"
+        if base_sets is None:
+            # Holding a change to a base the checker cannot read would block the fix for it.
+            print(f"::warning::the base reference artifact {reason}; its transition is not checked")
+    if ref_text is None or base_sets is not None:
+        p, summary = transition_problems(base_sets, sets)
+        problems += p
+        if summary:
+            print(f"reference artifact since {base[:12]}: {summary}")
+
+    base_floors = None
+    if floor_text is not None:
+        try:
+            base_floors = yaml.safe_load(floor_text)
+        except yaml.YAMLError as exc:
+            print(f"::warning::the base module-floors.yaml is not YAML ({exc}); its floor is not checked")
+    p, summary = floor_transition_problems(base_floors, floors_doc)
+    problems += p
+    if summary:
+        print(f"contracts floor since {base[:12]}: {summary}")
+
+    for msg in problems:
+        print(f"::error::{msg}")
+    return 1 if problems else 0
+
+
+def verify_floor(floors_path: Path, base: str | None = None, base_from_event: bool = False) -> int:
     sets, reason = load_canonical_components()
     if sets is None:
         print(f"::error::{reference_path} {reason}")
@@ -1746,13 +2084,40 @@ def verify_floor(floors_path: Path) -> int:
     problems = floor_problems(floors_doc, sets)
     for p in problems:
         print(f"::error::{p}")
-    if problems:
-        return 1
-    floor = _contracts_floor(floors_doc)
-    others = [s.label for s in sets if s.version != floor]
-    print(f"floor and reference artifact agree on {floor}"
-          + (f" ({', '.join(others)} also accepted)" if others else ""))
-    return 0
+    rc = 1 if problems else 0
+    if not problems:
+        floor = _contracts_floor(floors_doc)
+        current = next(s for s in sets if s.role == CURRENT_SET)
+        others = [s.label for s in sets if s is not current]
+        also = f" ({', '.join(others)} also accepted)" if others else ""
+        if floor == current.version:
+            print(f"floor and reference artifact agree on {floor}{also}")
+        else:
+            print(f"floor {floor} is below current {current.version}{also}: a stale floor, not a "
+                  f"disagreement - API-0007 still fails any spec no accepted set reproduces")
+
+    if base_from_event:
+        event = {}
+        event_path = os.environ.get("GITHUB_EVENT_PATH")
+        if event_path:
+            try:
+                event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"::error::cannot read the event payload at {event_path}: {exc}")
+                return 2
+        base, why, required = resolve_event_base(Path(reference_path).resolve().parent,
+                                                 os.environ.get("GITHUB_EVENT_NAME", ""), event)
+        if base is None:
+            if required:
+                # Fail closed: a transition gate that cannot find its base must not pass.
+                print(f"::error::cannot resolve the base to hold this change against: {why}")
+                return 2
+            print(f"::notice::{why}; only the floor rule above applies")
+            return rc
+        print(f"holding the reference artifact and the floor against {why}")
+    if base:
+        rc = max(rc, verify_transition(Path(floors_path), floors_doc, sets, base))
+    return rc
 
 
 def _reference_json(doc: dict) -> str:
@@ -1855,8 +2220,15 @@ def main(argv: list) -> int:
     ref.add_argument("--components", metavar="FILE", default=str(CANONICAL_COMPONENTS),
                      help="reference artifact API-0007 compares against (default: %(default)s)")
     ref.add_argument("--verify-floor", metavar="FLOORS",
-                     help="fail unless FLOORS' platform-contracts-go floor names an accepted, "
-                          "non-next set")
+                     help="fail if FLOORS' platform-contracts-go floor is above the current set")
+    base = ref.add_mutually_exclusive_group()
+    base.add_argument("--base", metavar="REF",
+                      help="with --verify-floor: also fail unless the artifact moved from REF by "
+                           "one window step and the floor did not fall")
+    base.add_argument("--base-from-event", action="store_true",
+                      help="like --base, with REF resolved from GITHUB_EVENT_NAME and "
+                           "GITHUB_EVENT_PATH (pull request base, push before-SHA); an event "
+                           "describing no change checks only the floor rule")
     ref.add_argument("--stage-next", metavar="EMITTED",
                      help="accept EMITTED (raw emit-canonical-components output for a newer "
                           "vintage) as the next set beside current")
@@ -1866,9 +2238,11 @@ def main(argv: list) -> int:
                      help="stop accepting previous (window finished) or next (window abandoned)")
     args = ap.parse_args(argv)
     reference_path = Path(args.components)
+    if (args.base or args.base_from_event) and not args.verify_floor:
+        ap.error("--base and --base-from-event only apply to --verify-floor")
 
     if args.verify_floor:
-        return verify_floor(Path(args.verify_floor))
+        return verify_floor(Path(args.verify_floor), args.base, args.base_from_event)
     if args.stage_next:
         return stage_next(Path(args.stage_next))
     if args.promote_next:
@@ -1894,11 +2268,10 @@ def main(argv: list) -> int:
         sets, reason = load_canonical_components()
         if sets is None:
             print(f"::error::API-0007 is enabled but {reference_path} {reason}. Check out this "
-                  "repository's controls/ directory, or regenerate the artifact from "
-                  "platform-shared-go with `go run "
-                  "./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`; "
-                  "change which sets it accepts only with --stage-next, --promote-next or "
-                  "--drop-set.")
+                  "repository's controls/ directory, or regenerate the artifact with `go run "
+                  "github.com/coderaxis/platform-shared-go/platform/openapicontract/commonv1policy/"
+                  "cmd/emit-canonical-components@<tag>`; change which sets it accepts only with "
+                  "--stage-next, --promote-next or --drop-set.")
             return 2
     reports, failed = [], False
     for raw in (args.roots or ["."]):

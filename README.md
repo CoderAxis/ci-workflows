@@ -539,10 +539,20 @@ Two paired controls close it, because either alone is escapable:
   `controls/common-v1-components.json`. That artifact is generated, never hand-written:
 
 ```bash
-# in platform-shared-go, redirected into this repo
-go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components \
-  > ../ci-workflows/controls/common-v1-components.json
+# from any directory outside a Go module: build the emitter at a platform-shared-go tag
+go run github.com/coderaxis/platform-shared-go/platform/openapicontract/commonv1policy/cmd/emit-canonical-components@<tag> \
+  > /tmp/common-v1.json
 ```
+
+Build it at a tag rather than with `go run ./...` inside a checkout. The projection is a pair: the
+messages come from `platform-contracts-go`, but the rules that turn them into OpenAPI live in
+`platform-shared-go`. `@<tag>` resolves `platform-contracts-go` from that release's own `go.mod`
+(so `source.version` is the release a service pinning that tag gets), refuses a `go.mod` carrying
+`replace` directives, and stamps `platform-shared-go <tag>` into the binary's build info, from which
+an emitter can write `source.projector`. A checkout reports its own version as `(devel)` and silently
+applies any `replace`, and the emitter then records the version `go.mod` requires rather than the code
+it projected. Copy the output over the artifact only when the components are unchanged (a relabel). A
+changed projection goes through a window, described next.
 
 The floor makes a service *depend on* a current contract module; API-0007 makes it actually *publish*
 current components. API-0007 exits 2 rather than passing if the reference artifact is missing or
@@ -567,7 +577,11 @@ artifact can accept **two vintages for the length of a migration**: the top-leve
   "source": { "module": "github.com/coderaxis/platform-contracts-go", "version": "v0.78.0" },
   "next": {
     "components": { "common.v1.ErrorCode": { ... }, ... },
-    "source": { "module": "github.com/coderaxis/platform-contracts-go", "version": "v0.80.0" }
+    "source": {
+      "module": "github.com/coderaxis/platform-contracts-go", "version": "v0.80.0",
+      // optional; written by an emitter that records its own release
+      "projector": { "module": "github.com/coderaxis/platform-shared-go", "version": "v1.61.0" }
+    }
   }
 }
 ```
@@ -578,43 +592,78 @@ did, down to the wording of every message. What an extra set changes:
 - **A spec passes by reproducing one accepted set whole.** Each set is judged only on the component
   names it defines, so a service may still publish other `common.v1` messages its DTOs reach. A spec
   whose `PaginationMeta` matches `next` while its `ErrorCode` matches current fails, even though each
-  component matches *some* accepted set. A spec is projected from one `platform-contracts-go` pin, and
-  its components reference each other (`ErrorResponse` → `ProblemDetails` → `ErrorCode`), so a mix
-  was produced by no release. It describes a wire that no single build emits, and in practice it
-  means the spec was only partly regenerated or was edited by hand. The failure lists, for each
-  component, which set it matches and which it differs from. The count frozen by the ratchet is the
-  distance to the *nearest* set.
-- **The artifact is validated before any service is judged.** At most one extra set. `next` must be
-  newer than current, and `previous` older. Both versions must be stable `vX.Y.Z` tags from the same
-  module. The extra set must project something different from current. A misspelt member name is an
-  error, not an ignored key. Any violation exits 2.
-- **The floor must name an accepted set that is not `next`.** `ci.yaml` runs
-  `check-api-contract.py --verify-floor controls/module-floors.yaml`. With one set, the floor must
-  equal that set's version, as before. With two, the floor must equal one of the two versions. "At
-  most the newest" would not be enough: a floor below the oldest set, or between the two, admits a
-  pin that produces neither set, which is the disagreement this check exists to rule out. The floor
-  also must not name `next`. A floor there fails the pin policy for every repository that has not
-  bumped yet, which are the repositories the window exists to let bump one at a time. That failure
-  is strict on preprod/prod, and on the consumer bump PRs `bump-module-pin` opens against `main`.
-- **The file changes only through the checker's own flags**, and each flag validates its result
-  before writing it: `--stage-next`, `--promote-next` and `--drop-set`. Output is byte-identical to
-  the emitter's canonical JSON, so a window that opens, promotes and closes leaves exactly the bytes
-  the emitter prints for the new vintage.
+  component matches *some* accepted set. A spec is projected from one pin pair, and its components
+  reference each other (`ErrorResponse` → `ProblemDetails` → `ErrorCode`), so a mix was produced by
+  no release. It describes a wire that no single build emits, and in practice it means the spec was
+  only partly regenerated or was edited by hand. The failure lists, for each component, which set it
+  matches and which it differs from. The count frozen by the ratchet is the distance to the
+  *nearest* set.
+- **The artifact is validated before any service is judged.** At most one extra set. Both
+  `platform-contracts-go` versions must be stable `vX.Y.Z` tags from the same module, and so must any
+  recorded projector version. Sets are ordered on the (contracts, projector) pair: `next` must be
+  newer than current and `previous` older. A newer contracts release orders two sets on its own. Two
+  sets on the *same* contracts release are ordered only when both record `source.projector`. That is
+  the case of a projection change that ships in `platform-shared-go` alone, such as a new `required`
+  list on `Meta`. The projector may not move against the contracts release. The extra set must
+  project something different from current. A misspelt member name is an error, not an ignored key.
+  Any violation exits 2.
+- **The floor must not sit above current.** `ci.yaml` runs
+  `check-api-contract.py --verify-floor controls/module-floors.yaml --base-from-event`. A floor above
+  the current set is the disagreement no service-side run can surface: every repository pinned at the
+  floor would project components newer than anything API-0007 accepts. So the floor never names a
+  staged `next`. A floor *below* current is only stale. It lets a repository pin an older release,
+  and API-0007 still fails that repository as soon as it publishes components no accepted set
+  reproduces. Requiring the floor to equal an accepted version would tie closing a window to a
+  fleet-wide floor raise. Such a raise fails the pin policy for every module below it: on 2026-09-15,
+  101 `go.mod` files pinned `platform-contracts-go` at 22 different versions, while only 11 specs
+  publish `common.v1` components. The next window could not open until that raise was done. Versions that cannot be ordered, such as an unrecorded `unknown`, must be equal.
+- **Every change is held against the commit it lands on.** On its own, a file can look well-formed
+  while carrying a hand-added `previous` or a lowered floor, and only history shows it was never
+  promoted. Against `pull_request.base.sha`, a push's before-SHA, or the merge base with `main` for a
+  branch's first push, a change may make **exactly one** of these steps:
+
+  | Step | Base → head | Produced by |
+  | --- | --- | --- |
+  | stage | `{current}` → `{current, next}` | `--stage-next` |
+  | abandon | `{current, next}` → `{current}` | `--drop-set next` |
+  | promote | `{current, next}` → `{next as current, current as previous}` | `--promote-next` |
+  | close | `{current, previous}` → `{current}` | `--drop-set previous` |
+  | relabel | same sets, byte-identical components, provenance not moving backwards | emitter output copied over a set whose components did not change |
+
+  Everything else fails and names what it saw. That covers a `previous` that was not current on the
+  base, current replaced in place (during a window that would also discard `next`), current rolled
+  back, and two steps in one change such as stage-then-promote. The one-step rule guarantees that
+  each step reaches the fleet through `@v1` before the next one lands. The `platform-contracts-go`
+  floor may rise or stay. It falls only when the same change declares the rollback beside `min:` in
+  the reviewed file, as `lowered_from: <the floor being lowered>`. A raise that turned the pin policy
+  red across the fleet has happened before (module-floors.yaml, "WHO A FLOOR APPLIES TO"), and this
+  job gates the release that would carry the rollback, so a rollback has to be possible, but never
+  silently. A schedule or dispatch run describes no change, so only the floor rule applies there.
+- **Output is canonical.** `--stage-next`, `--promote-next` and `--drop-set` each validate their
+  result before writing it, byte-identical to the emitter's canonical JSON. A window that opens,
+  promotes and closes leaves exactly the bytes the emitter prints for the new vintage.
 
 Each step below is one reviewed commit to this repository. `release.yaml` moves `@v1` onto every
 commit that lands on main, so each step reaches the fleet within minutes:
 
 | Step | Command (in this repository unless noted) | Fleet effect |
 | --- | --- | --- |
-| 1. Add next | In platform-shared-go, with `go.mod` requiring the new `platform-contracts-go` tag, run `go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components > /tmp/common-v1-next.json`. Do not use a `replace`: the emitter records the version `go.mod` requires, not the code the replace substituted, so the output would carry the wrong `source.version`. Then here: `python3 scripts/check-api-contract.py --stage-next /tmp/common-v1-next.json`. Leave the floor at current. | Nothing goes red. Every service keeps passing on current and may now pass on next. |
-| 2. Repos bump one by one | In each service: bump `platform-contracts-go` (and the platform-shared-go that projects it), regenerate `docs/openapi.json` from that one pin, then push. API-0007 reports `match the next vX proto projection`. | A spec on neither set, or on a mix of both, fails and names both sets. Track progress with `python3 scripts/check-api-contract.py <service roots…> --format json` and read each API-0007 `evidence`. |
-| 3. Promote next to current | When no service still reports `current`: `python3 scripts/check-api-contract.py --promote-next`. You may raise the `platform-contracts-go` floor to the new version in the same commit. | Still nothing goes red: the old set stays accepted as `previous`, and a floor that still names it is valid. |
-| 4. Drop old | `python3 scripts/check-api-contract.py --drop-set previous`, plus `min:` for `platform-contracts-go` in `controls/module-floors.yaml` set to the new version if step 3 did not raise it. Check with `--verify-floor controls/module-floors.yaml`. | The artifact is byte-identical to the emitter's output for the new vintage. This is the contract step: a service still publishing the old set now fails. |
+| 1. Add next | Tag `platform-contracts-go` vM, then tag a `platform-shared-go` vN whose `go.mod` requires vM. Build the emitter at vN from outside any module (`go run github.com/coderaxis/platform-shared-go/platform/openapicontract/commonv1policy/cmd/emit-canonical-components@vN > /tmp/common-v1-next.json`). Then, here: `python3 scripts/check-api-contract.py --stage-next /tmp/common-v1-next.json`. Leave the floor where it is. | Nothing goes red. Every service keeps passing on current and may now pass on next. |
+| 2. Repos bump one by one | In each service, in **one** PR: bump `platform-contracts-go` to vM **and** `platform-shared-go` to vN (the exact pair next was staged from), regenerate `docs/openapi.json`, then push. API-0007 reports `match the next vM proto projection`. A `bump-module-pin` PR that moves only one of the two modules projects a third shape. If the projection change lives in the module it did not move, API-0007 fails that PR, so fold the two bumps together. | A spec on neither set, or on a mix of both, fails and names both sets. Track progress with `python3 scripts/check-api-contract.py <service roots…> --format json` and read each API-0007 `evidence`. |
+| 3. Promote next to current | When no service still reports `current`: `python3 scripts/check-api-contract.py --promote-next`. | Still nothing goes red: the old set stays accepted as `previous`. |
+| 4. Close | `python3 scripts/check-api-contract.py --drop-set previous`, then `--verify-floor controls/module-floors.yaml --base origin/main`. | The artifact is byte-identical to the emitter's output for the new vintage. This is the contract step: a service still publishing the old set now fails API-0007. The floor does not have to move, and a floor below the new current stays valid. |
+
+Raising the `platform-contracts-go` floor is a separate decision, with its own fleet effect: every
+module pinned below the new floor fails the pin policy, strictly on preprod/prod and on the consumer
+bump PRs `bump-module-pin` opens against `main`, whether or not it publishes a spec. Raise it when the
+fleet has been moved (module-floors.yaml, "RAISING A FLOOR"), at any time after promotion, and never
+above current.
 
 To abandon a window before step 3 (for example, the new projection turns out to be wrong), run
 `python3 scripts/check-api-contract.py --drop-set next`. That restores the previous bytes exactly.
 A second window cannot open while `next` or `previous` is present, so the fleet never accepts more
-than two vintages at once.
+than two vintages at once. Closing a window never waits on the fleet's pins, so the next one can
+open right after step 4.
 
 ### Control catalog (policy-as-code)
 
