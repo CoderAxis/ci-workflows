@@ -181,14 +181,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The API-0007 reference artifact and the platform-contracts-go floor may move by exactly one
-      # window step per release, and the floor never falls undeclared (README, "Moving the
+      # The API-0007 reference artifact may move by exactly one window step per release, and the
+      # platform-contracts-go floor must name its current or previous set (README, "Moving the
       # reference"). The CI run this workflow waits for checks that too, but it is not a required
       # check on main: a commit that turned it red can land, and the next commit's green run would
       # otherwise release it. So the release itself is held against the tag it bumps from - the
       # exact delta @v1 consumers are about to receive - and refuses rather than carry two steps,
-      # a forged `previous`, a replaced current or a silently lowered floor to the fleet.
-      - name: Refuse a release that moves the API-0007 reference or the contracts floor by more than one step
+      # a forged `previous`, a replaced current or a floor on no accepted set to the fleet.
+      - name: Refuse a release whose API-0007 reference moves by more than one step or whose contracts floor names no accepted set
         if: steps.version.outputs.release == 'true'
         env:
           PREV: ${{ steps.version.outputs.previous }}

@@ -1761,18 +1761,14 @@ def verify_docs(doc: dict, path: Path) -> int:
 
 # --- the API-0007 reference artifact: floor agreement and the expand/contract window ---------
 
-def _contracts_floor_spec(floors_doc):
-    floors = floors_doc.get("floors") if isinstance(floors_doc, dict) else None
-    return floors.get(CONTRACTS_MODULE) if isinstance(floors, dict) else None
-
-
 def _contracts_floor(floors_doc):
     """The platform-contracts-go floor as a string, or None when none is declared.
 
     Accepts both shapes check_module_pins.load_floors does: a mapping with `min`, or a bare
     version string.
     """
-    spec = _contracts_floor_spec(floors_doc)
+    floors = floors_doc.get("floors") if isinstance(floors_doc, dict) else None
+    spec = floors.get(CONTRACTS_MODULE) if isinstance(floors, dict) else None
     if isinstance(spec, dict):
         spec = spec.get("min")
     return None if spec is None else str(spec)
@@ -1781,54 +1777,65 @@ def _contracts_floor(floors_doc):
 def floor_problems(floors_doc, sets: list) -> list:
     """Reasons controls/module-floors.yaml and the reference disagree about the contract vintage.
 
-    The floor must not sit ABOVE the current set. That is the disagreement no service-side
-    run can surface: every repository pinned at the floor would project components newer
-    than anything API-0007 accepts, and nothing would be required to pin the vintage the
-    artifact names. It follows that the floor never names a staged `next`, which is newer
-    than current.
+    The floor must EQUAL the version of an accepted set that is not `next`: current, or
+    `previous` during the grace after a promote. With one set that is the rule this check had
+    before windows existed, floor == source.version.
 
-    A floor BELOW current is only a stale floor. It lets a repository pin an older contracts
-    release, and API-0007 still fails that repository the moment it publishes components no
-    accepted set reproduces. Requiring equality instead - or membership in the accepted sets
-    while a window is open - would make closing a window depend on raising a fleet-wide floor,
-    which fails the pin policy for every module below it (101 go.mod files pinned
-    platform-contracts-go at 22 versions on 2026-09-15; 11 specs publish common.v1 components),
-    and the next window could not open until it was done. Raising a floor stays its own decision
-    (module-floors.yaml, RAISING A FLOOR).
+    Membership, not "at most current". The floor is the version every repository is required
+    to pin, so a repository pinned exactly at it has to project components some accepted set
+    reproduces. A floor below the oldest set, or between two, admits a pin that produces
+    neither. That stale floor is the disagreement this check exists to rule out, and it fails
+    here as it always did. It follows that a window cannot close (--drop-set previous) while
+    the floor still names previous: the floor moves to current first, or in the same change.
 
-    Two versions that cannot be ordered (an unrecorded "unknown", a non-tag floor) must be
-    equal, which is the rule this check had before windows existed.
+    Never `next`: the floor records the vintage the fleet has been moved to (module-floors.yaml,
+    RAISING A FLOOR), and a floor there fails the pin policy for every repository the window
+    exists to let bump one at a time. So a floor raised onto a promoted set comes back down in
+    the change that rolls the promote back (a demote).
 
-    What this cannot see is history: a floor lowered to a stale value is still "not above
-    current". floor_transition_problems holds that against the last release.
+    The floor needs no history of its own. It can only name a set the artifact accepts, and the
+    artifact is held against the last release (transition_problems), so the floor can only move
+    to a vintage the fleet was measured against as current.
     """
     floor = _contracts_floor(floors_doc)
     if floor is None:
         return [f"controls/module-floors.yaml declares no floor for {CONTRACTS_MODULE}, so no "
                 f"service is required to pin a vintage API-0007 accepts"]
-    current = next(s for s in sets if s.role == CURRENT_SET)
-    floor_v, current_v = _stable_version(floor), _stable_version(current.version)
-    if floor_v is None or current_v is None:
-        if floor == current.version:
-            return []
-        return [f"controls/module-floors.yaml requires {CONTRACTS_MODULE} {floor}, but "
-                f"controls/common-v1-components.json names current {current.version}. The two "
-                f"cannot be ordered unless both are stable vX.Y.Z tags, so they must be equal."]
-    if floor_v <= current_v:
+    held = [s for s in sets if s.role != "next"]
+    if any(s.version == floor for s in held):
         return []
+    current = next(s for s in sets if s.role == CURRENT_SET)
     staged = next((s for s in sets if s.role == "next" and s.version == floor), None)
     if staged:
         return [f"controls/module-floors.yaml requires {CONTRACTS_MODULE} {floor}, which is the "
-                f"staged {staged.label}: the fleet has not been moved to it yet, and a floor there "
-                f"fails every repository the window exists to let bump one at a time. Keep the "
-                f"floor at or below current {current.version}; raise it once next is promoted "
-                f"(--promote-next)."]
-    return [f"controls/module-floors.yaml requires {CONTRACTS_MODULE} {floor}, above current "
-            f"{current.version} in controls/common-v1-components.json (which accepts "
-            f"{' and '.join(s.label for s in sets)}). Every repository pinned at the floor would "
-            f"project components API-0007 does not accept. Keep the floor at or below "
-            f"{current.version}, or move the reference first: --stage-next with emitter output "
-            f"for the new vintage, then --promote-next."]
+                f"{staged.label} set: the fleet has not been moved to it yet, and a floor there "
+                f"fails every repository the window exists to let bump one at a time. Point the "
+                f"floor at current {current.version}. Raise it once next is promoted "
+                f"(--promote-next); a change that rolls a promote back takes the floor back with it."]
+    targets = " or ".join(dict.fromkeys(s.version for s in held))
+    accepts = (f"accepts only {current.label}" if len(sets) == 1
+               else f"accepts {' and '.join(s.label for s in sets)}")
+    floor_v = _stable_version(floor)
+    held_v = [_stable_version(s.version) for s in held]
+    if floor_v is None or any(v is None for v in held_v):
+        why = (f"The floor must equal {targets}; versions that are not stable vX.Y.Z tags cannot "
+               f"be ordered, and only equality says which set a repository pinned at the floor "
+               f"produces.")
+    elif floor_v > max(held_v):
+        why = (f"Every repository pinned at the floor would project components API-0007 does not "
+               f"accept. Point the floor at {targets}, or move the reference first: --stage-next "
+               f"with emitter output for the new vintage, then --promote-next, then raise the floor.")
+    elif floor_v < min(held_v):
+        why = (f"The floor is stale: a repository pinned at it projects components no accepted set "
+               f"reproduces, so nothing requires a vintage API-0007 accepts. Raise the floor to "
+               f"{targets}"
+               + (". A window closes (--drop-set previous) only with the floor on current, raised "
+                  "first or in the same change." if len(sets) == 1 else "."))
+    else:
+        why = (f"The floor falls between the accepted sets, so a repository pinned at it projects "
+               f"components none of them reproduces. Point the floor at {targets}.")
+    return [f"controls/module-floors.yaml requires {CONTRACTS_MODULE} {floor}, but "
+            f"controls/common-v1-components.json {accepts}. {why}"]
 
 
 def _state(sets) -> str:
@@ -1852,12 +1859,13 @@ def transition_problems(base_sets, head_sets, closed_previous=None) -> tuple:
       reopen    {current}           -> {current, previous}    git revert of a close
 
     The two rollbacks are safe without a declaration. A demote accepts exactly the sets the base
-    did, so no spec changes verdict; only the floor ceiling falls, and floor_problems and
-    floor_transition_problems judge that. A reopen readmits only `closed_previous`: the
-    `previous` set the last release before the close still carried beside this same current
-    (see previous_before_close) - a projection the fleet ran as current until it was promoted
-    away from, and exactly what the close dropped. Releases rather than commits, because commits
-    between two releases never reached the fleet and a merge can carry any intermediate state.
+    did, so no spec changes verdict; floor_problems then requires a floor raised onto the demoted
+    set to come back to the new current in the same change. A reopen readmits only
+    `closed_previous`: the `previous` set the last release before the close still carried beside
+    this same current (see previous_before_close) - a projection the fleet ran as current until
+    it was promoted away from, and exactly what the close dropped. Releases rather than commits,
+    because commits between two releases never reached the fleet and a merge can carry any
+    intermediate state.
     A current that replaced its predecessor in place, as every regeneration did before windows
     existed, left no grace set in any release, so nothing older can be reopened.
 
@@ -1968,44 +1976,6 @@ def transition_problems(base_sets, head_sets, closed_previous=None) -> tuple:
               "(--drop-set next), promote it (--promote-next), close the window (--drop-set "
               "previous), relabel a set whose components are unchanged, or roll back a promote or "
               "a close with git revert (README, \"Moving the reference\")."], ""
-
-
-def floor_transition_problems(base_doc, head_doc) -> tuple:
-    """(problems, summary) for the platform-contracts-go floor moving from the base to the head.
-
-    A floor only rises. floor_problems accepts any floor not above current, so without the base
-    a lowered floor would read as merely stale - and it would let the fleet pin a contracts
-    release it had already been moved off, which on main used to take the reference artifact
-    (and so every spec) down with it.
-
-    A deliberate rollback of a raise is still possible, because a raise that turns the pin
-    policy red across the fleet has happened here before (module-floors.yaml, "WHO A FLOOR
-    APPLIES TO") and this check gates the release that would carry the fix. It has to be declared
-    in the reviewed file: `lowered_from: <the base floor>` beside `min:`, added in the same
-    change, so a declaration left over from an earlier rollback cannot authorise a new one.
-    """
-    base, head = _contracts_floor(base_doc), _contracts_floor(head_doc)
-    if base is None:
-        return [], "no floor on the base"
-    if head is None or head == base:
-        # A removed floor is floor_problems' failure to report, not a second one here.
-        return [], f"floor unchanged at {base}" if head == base else ""
-    base_v, head_v = _stable_version(base), _stable_version(head)
-    if base_v is not None and head_v is not None and head_v > base_v:
-        return [], f"floor raised {base} -> {head}"
-
-    def declared(doc):
-        spec = _contracts_floor_spec(doc)
-        return str(spec["lowered_from"]) if isinstance(spec, dict) and "lowered_from" in spec else None
-
-    if declared(head_doc) == base and declared(base_doc) != base:
-        return [], f"floor lowered {base} -> {head}, declared with lowered_from: {base}"
-    how = ("lowers" if base_v is not None and head_v is not None
-           else "moves, in a way that cannot be ordered,")
-    return [f"controls/module-floors.yaml {how} the {CONTRACTS_MODULE} floor from {base} to {head}. "
-            f"A floor only rises: lowering it lets repositories pin a contracts release the fleet "
-            f"was moved off. If this is a deliberate rollback of a raise, declare it in the same "
-            f"change with `lowered_from: {base}` beside `min: {head}`."], ""
 
 
 def _git_out(repo: Path, *args: str) -> tuple:
@@ -2122,23 +2092,15 @@ def _reference_sets(text):
         return None
 
 
-def _floors_with_contracts_floor(text):
-    try:
-        doc = yaml.safe_load(text)
-    except yaml.YAMLError:
-        return None
-    return doc if _contracts_floor(doc) is not None else None
-
-
 def last_usable_state(path: Path, base: str, parse) -> tuple:
     """(parsed, the commit it was read at, error) for the newest state of `path` at or before `base`
     that `parse` accepts; (None, None, None) when its history has none.
 
     A base where the file is missing or unusable is not a clean slate. Otherwise deleting the
-    artifact (or breaking it, or dropping the contracts floor) in one commit and adding a forged
-    one in the next would read as "new in this change", and the base could not be held against
-    at all. A release never holds an unusable pair - CI and release.yaml both refuse one - so
-    this matters for the event fallbacks, and walks back only when the base itself is unusable.
+    artifact (or breaking it) in one commit and adding a forged one in the next would read as
+    "new in this change", and the base could not be held against at all. A release never holds
+    an unusable artifact - CI and release.yaml both refuse one - so this matters for the event
+    fallbacks, and walks back only when the base itself is unusable.
     """
     repo, rel, err = _in_repo(path)
     if err:
@@ -2198,18 +2160,14 @@ def previous_before_close(path: Path, base: str, current) -> tuple:
     return None, None
 
 
-def verify_transition(floors_path: Path, floors_doc, sets: list, base: str) -> int:
-    problems = []
+def verify_transition(sets: list, base: str) -> int:
     base_sets, ref_rev, err = last_usable_state(Path(reference_path), base, _reference_sets)
-    base_floors, floor_rev, err2 = ((None, None, None) if err else
-                                    last_usable_state(Path(floors_path), base, _floors_with_contracts_floor))
-    if err or err2:
-        print(f"::error::cannot read the base commit: {err or err2}")
+    if err:
+        print(f"::error::cannot read the base commit: {err}")
         return 2
-    for name, rev in (("reference artifact", ref_rev), ("contracts floor", floor_rev)):
-        if rev is not None and rev != base:
-            print(f"::notice::{base} has no usable {name}; holding this change against its last usable "
-                  f"state, at {rev[:12]}")
+    if ref_rev is not None and ref_rev != base:
+        print(f"::notice::{base} has no usable reference artifact; holding this change against its "
+              f"last usable state, at {ref_rev[:12]}")
 
     closed = None
     if (base_sets is not None and len(base_sets) == 1
@@ -2218,15 +2176,9 @@ def verify_transition(floors_path: Path, floors_doc, sets: list, base: str) -> i
         if closed is not None:
             print(f"the last release before the close ({tag}) carried previous {closed.vintage} "
                   f"beside current {base_sets[0].vintage}")
-    p, summary = transition_problems(base_sets, sets, closed)
-    problems += p
+    problems, summary = transition_problems(base_sets, sets, closed)
     if summary:
         print(f"reference artifact since {base[:12]}: {summary}")
-
-    p, summary = floor_transition_problems(base_floors, floors_doc)
-    problems += p
-    if summary:
-        print(f"contracts floor since {base[:12]}: {summary}")
 
     for msg in problems:
         print(f"::error::{msg}")
@@ -2256,13 +2208,14 @@ def verify_floor(floors_path: Path, base: str | None = None, base_from_event: bo
     if not problems:
         floor = _contracts_floor(floors_doc)
         current = next(s for s in sets if s.role == CURRENT_SET)
-        others = [s.label for s in sets if s is not current]
-        also = f" ({', '.join(others)} also accepted)" if others else ""
         if floor == current.version:
-            print(f"floor and reference artifact agree on {floor}{also}")
+            others = [s.label for s in sets if s is not current]
+            print(f"floor and reference artifact agree on {floor}"
+                  + (f" ({', '.join(others)} also accepted)" if others else ""))
         else:
-            print(f"floor {floor} is below current {current.version}{also}: a stale floor, not a "
-                  f"disagreement - API-0007 still fails any spec no accepted set reproduces")
+            named = next(s for s in sets if s.role == "previous" and s.version == floor)
+            print(f"floor and reference artifact agree on {floor}, the {named.label} set ({current.label} "
+                  f"also accepted); the floor moves to {current.version} before or with --drop-set previous")
 
     if base_from_event:
         event = {}
@@ -2282,9 +2235,9 @@ def verify_floor(floors_path: Path, base: str | None = None, base_from_event: bo
                 return 2
             print(f"::notice::{why}; only the floor rule above applies")
             return rc
-        print(f"holding the reference artifact and the floor against {why}")
+        print(f"holding the reference artifact against {why}")
     if base:
-        rc = max(rc, verify_transition(Path(floors_path), floors_doc, sets, base))
+        rc = max(rc, verify_transition(sets, base))
     return rc
 
 
@@ -2397,12 +2350,12 @@ def main(argv: list) -> int:
     ref.add_argument("--components", metavar="FILE", default=str(CANONICAL_COMPONENTS),
                      help="reference artifact API-0007 compares against (default: %(default)s)")
     ref.add_argument("--verify-floor", metavar="FLOORS",
-                     help="fail if FLOORS' platform-contracts-go floor is above the current set")
+                     help="fail unless FLOORS' platform-contracts-go floor equals the version of "
+                          "the current or previous set (never next)")
     base = ref.add_mutually_exclusive_group()
     base.add_argument("--base", metavar="REF",
                       help="with --verify-floor: also fail unless the artifact moved from REF by "
-                           "one window step and the floor did not fall (release.yaml passes the "
-                           "tag it releases from)")
+                           "one window step (release.yaml passes the tag it releases from)")
     base.add_argument("--base-from-event", action="store_true",
                       help="like --base, with REF the newest release tag HEAD contains; only in a "
                            "clone with no release tag, the event in GITHUB_EVENT_NAME and "

@@ -553,8 +553,9 @@ an emitter can write `source.projector`. Today's emitter does not write it yet, 
 prints still names `go run ./...`. Both are platform-shared-go changes, and neither needs a change
 here. A checkout reports its own version as `(devel)` and silently
 applies any `replace`, and the emitter then records the version `go.mod` requires rather than the code
-it projected. Copy the output over the artifact only when the components are unchanged (a relabel). A
-changed projection goes through a window, described next.
+it projected. Copy the output over the artifact only when the components are unchanged (a relabel),
+and move the `platform-contracts-go` floor to the new `source.version` in the same change when you
+relabel current. A changed projection goes through a window, described next.
 
 The floor makes a service *depend on* a current contract module; API-0007 makes it actually *publish*
 current components. API-0007 exits 2 rather than passing if the reference artifact is missing or
@@ -609,20 +610,25 @@ did, down to the wording of every message. What an extra set changes:
   list on `Meta`. The projector may not move against the contracts release. The extra set must
   project something different from current. A misspelt member name is an error, not an ignored key.
   Any violation exits 2.
-- **The floor must not sit above current.** `ci.yaml` runs
-  `check-api-contract.py --verify-floor controls/module-floors.yaml --base-from-event`. A floor above
-  the current set is the disagreement no service-side run can surface: every repository pinned at the
-  floor would project components newer than anything API-0007 accepts. So the floor never names a
-  staged `next`. A floor *below* current is only stale. It lets a repository pin an older release,
-  and API-0007 still fails that repository as soon as it publishes components no accepted set
-  reproduces. Requiring the floor to equal an accepted version would tie closing a window to a
-  fleet-wide floor raise. Such a raise fails the pin policy for every module below it: on 2026-09-15,
-  101 `go.mod` files pinned `platform-contracts-go` at 22 different versions, while only 11 specs
-  publish `common.v1` components. The next window could not open until that raise was done. Versions
-  that cannot be ordered, such as an unrecorded `unknown`, must be equal.
+- **The floor must name an accepted set that is not `next`.** `ci.yaml` runs
+  `check-api-contract.py --verify-floor controls/module-floors.yaml --base-from-event`. The
+  `platform-contracts-go` floor must equal the version of current, or of `previous` during the grace
+  after a promote. With one set that is the rule this repository always had: floor ==
+  `source.version`. It is membership, not "at most current". The floor is the version every
+  repository is required to pin, so a repository pinned exactly at it has to project components some
+  accepted set reproduces. A floor above current, below the oldest set, or between the two admits a
+  pin that produces none of them, and fails. A stale floor fails as it always did. The floor also must
+  not name `next`. A floor there fails the pin policy for every repository that has not bumped yet,
+  which are the repositories the window exists to let bump one at a time. That failure is strict on
+  preprod/prod, and on the consumer bump PRs `bump-module-pin` opens against `main`. Two consequences
+  shape the procedure below. A window **closes only with the floor on current**, raised before the
+  close or in the same change. And a floor raised onto a promoted set comes back down in the change
+  that rolls the promote back. The floor keeps no history of its own and needs no rollback
+  declaration: it can only name a set the artifact accepts, and the artifact is held against the last
+  release. Versions that cannot be ordered, such as an unrecorded `unknown`, must be equal.
 - **Every change is held against the last release.** On its own, a file can look well-formed while
-  carrying a hand-added `previous` or a lowered floor, and only history shows it was never promoted.
-  So the artifact and the floor are compared with the newest release tag (`vX.Y.Z`) the checked-out
+  carrying a hand-added `previous`, with the floor pointed at it, and only history shows it was never
+  promoted. So the artifact is compared with the newest release tag (`vX.Y.Z`) the checked-out
   commit contains, which is what `@v1` consumers run. Two places run that comparison. CI runs
   `--verify-floor controls/module-floors.yaml --base-from-event` on every push and pull request.
   `release.yaml` runs `--base <the tag it bumps from>` before it moves `@v1`. A change may make
@@ -646,11 +652,8 @@ did, down to the wording of every message. What an extra set changes:
   and releases, not commits, are what count: commits between two releases never reached the fleet.
   A projection that was replaced in place, as every regeneration was before windows existed, left
   no grace release. It cannot be copied back in from history: release v1.15.3 was on contracts
-  v0.4.0, and it stays out. The `platform-contracts-go` floor may rise or stay. It falls only when
-  the same change declares the rollback beside `min:` in the reviewed file, as `lowered_from: <the
-  floor being lowered>`. A raise that turned the pin policy red across the fleet has happened before
-  (module-floors.yaml, "WHO A FLOOR APPLIES TO"), and a rollback has to be releasable, but never
-  silently.
+  v0.4.0, and it stays out. The floor rule above applies to every step's result, so a rollback moves
+  the floor to a set it readmits, and that needs no declaration.
 
   Why the last release and not the commit a change lands on: `api-contract` is not a required check
   on `main` (the ruleset only forbids force pushes and deletion), and `release.yaml` releases a commit
@@ -664,9 +667,8 @@ did, down to the wording of every message. What an extra set changes:
   run (`cancel-in-progress`), in which case re-run that commit's CI and Release first. Only a clone
   with no release tag in its history, such as a test fixture, falls back to the event:
   `pull_request.base.sha`, a push's before-SHA, or the merge base with `main`. A base that lacks a
-  usable artifact or floor is held against the last commit before it that had one, never treated as
-  new. A schedule or dispatch run in such a clone describes no change, so only the floor rule applies
-  there.
+  usable artifact is held against the last commit before it that had one, never treated as new. A
+  schedule or dispatch run in such a clone describes no change, so only the floor rule applies there.
 - **Output is canonical.** `--stage-next`, `--promote-next` and `--drop-set` each validate their
   result before writing it, byte-identical to the emitter's canonical JSON. Each set keeps the
   emitter's `_comment` for its own vintage, so a window that opens, promotes and closes leaves exactly
@@ -687,24 +689,25 @@ so each step reaches the fleet within minutes. Land the next step only after tha
 
 | Step | Command (in this repository unless noted) | Fleet effect |
 | --- | --- | --- |
-| 1. Add next | Tag `platform-contracts-go` vM, then tag a `platform-shared-go` vN whose `go.mod` requires vM. Build the emitter at vN from outside any module (`go run github.com/coderaxis/platform-shared-go/platform/openapicontract/commonv1policy/cmd/emit-canonical-components@vN > /tmp/common-v1-next.json`). Then, here: `python3 scripts/check-api-contract.py --stage-next /tmp/common-v1-next.json`. Leave the floor where it is. | Nothing goes red. Every service keeps passing on current and may now pass on next. |
+| 1. Add next | Tag `platform-contracts-go` vM, then tag a `platform-shared-go` vN whose `go.mod` requires vM. Build the emitter at vN from outside any module (`go run github.com/coderaxis/platform-shared-go/platform/openapicontract/commonv1policy/cmd/emit-canonical-components@vN > /tmp/common-v1-next.json`). Then, here: `python3 scripts/check-api-contract.py --stage-next /tmp/common-v1-next.json`. Leave the floor on current: it may never name `next`. | Nothing goes red. Every service keeps passing on current and may now pass on next. |
 | 2. Repos bump one by one | In each service, in **one** PR: bump `platform-contracts-go` to vM **and** `platform-shared-go` to vN (the exact pair next was staged from), regenerate `docs/openapi.json`, then push. API-0007 reports `match the next vM proto projection`. A `bump-module-pin` PR that moves only one of the two modules projects a third shape. If the projection change lives in the module it did not move, API-0007 fails that PR, so fold the two bumps together. | A spec on neither set, or on a mix of both, fails and names both sets. Track progress with `python3 scripts/check-api-contract.py <service roots…> --format json` and read each API-0007 `evidence`. |
-| 3. Promote next to current | When no service still reports `current`: `python3 scripts/check-api-contract.py --promote-next`. | Still nothing goes red: the old set stays accepted as `previous`. |
-| 4. Close | `python3 scripts/check-api-contract.py --drop-set previous`, then `--verify-floor controls/module-floors.yaml --base-from-event`, which holds the working tree against the last release as CI will. | The artifact is byte-identical to the emitter's output for the new vintage. This is the contract step: a service still publishing the old set now fails API-0007. The floor does not have to move, and a floor below the new current stays valid. |
+| 3. Promote next to current | When no service still reports `current`: `python3 scripts/check-api-contract.py --promote-next`. Leave the floor on the old version, which is now `previous`, or raise `min:` for `platform-contracts-go` in `controls/module-floors.yaml` to vM in the same commit or a later one. | Still nothing goes red: the old set stays accepted as `previous`, and a floor that names it is valid. A raise fails the pin policy for every module pinned below vM. |
+| 4. Close | `python3 scripts/check-api-contract.py --drop-set previous`, with `min:` for `platform-contracts-go` set to vM in the same commit if step 3 did not raise it. Then `--verify-floor controls/module-floors.yaml --base-from-event`, which holds the working tree against the last release as CI will. | The artifact is byte-identical to the emitter's output for the new vintage. This is the contract step: a service still publishing the old set now fails API-0007, and every module pinned below vM fails the pin policy. A close that leaves the floor on the dropped version fails `--verify-floor` as a stale floor. |
 
-Raising the `platform-contracts-go` floor is a separate decision, with its own fleet effect: every
-module pinned below the new floor fails the pin policy, strictly on preprod/prod and on the consumer
-bump PRs `bump-module-pin` opens against `main`, whether or not it publishes a spec. Raise it when the
-fleet has been moved (module-floors.yaml, "RAISING A FLOOR"), at any time after promotion, and never
-above current.
+The floor raise is what a close costs the fleet beyond API-0007. Every module pinned below the new
+floor fails the pin policy, strictly on preprod/prod and on the consumer bump PRs `bump-module-pin`
+opens against `main`, whether or not it publishes a spec. So close a window when the fleet has been
+moved (module-floors.yaml, "RAISING A FLOOR"). Until then the window stays in grace, the floor may
+stay on `previous`, and a new window cannot open.
 
 To abandon a window before step 3 (for example, the new projection turns out to be wrong), run
-`python3 scripts/check-api-contract.py --drop-set next`. That restores the previous bytes exactly.
-To roll back step 3 or step 4 after it was released (a straggler outside the known publishers went
-red, say), `git revert` that commit: a reverted promote is a demote and a reverted close is a reopen,
-and both pass. A second window cannot open while `next` or `previous` is present, so the fleet never
-accepts more than two vintages at once. Closing a window never waits on the fleet's pins, so the
-next one can open right after step 4.
+`python3 scripts/check-api-contract.py --drop-set next`. That restores the previous bytes exactly;
+the floor never left current. To roll back step 3 or step 4 after it was released (a straggler
+outside the known publishers went red, say), `git revert` that commit: a reverted promote is a demote
+and a reverted close is a reopen, and both pass. Reverting a close that raised the floor also restores
+the floor to `previous`. Reverting a promote whose floor raise to vM landed in a later commit needs
+that raise reverted in the same change, because vM is `next` again. A second window cannot open
+while `next` or `previous` is present, so the fleet never accepts more than two vintages at once.
 
 ### Control catalog (policy-as-code)
 
@@ -721,7 +724,7 @@ _Generated from `controls/api-contract.yaml` by `scripts/check-api-contract.py -
 | API-0003 | A test that validates live traffic against the OpenAPI document must import platform/openapicontract/conformance. Driving kin-openapi directly - constructing a gorillamux router or calling openapi3filter.ValidateResponse - is a hand-rolled copy of the shared suite and is prohibited. | major | source | http-api | platform-architecture | active |
 | API-0004 | Every 2xx JSON response must reference common.v1.SuccessResponse and every 4xx/5xx JSON response must reference common.v1.ErrorResponse. The envelope is owned by proto/common/v1 and is not redefinable per service. | critical | spec | http-api | platform-architecture | active |
 | API-0005 | Every operation carries a unique operationId, and the service commits docs/openapi.operationids.lock.json recording each id with the version that introduced it, its deprecation state, and its visibility. | major | spec | http-api | platform-architecture | active |
-| API-0007 | The common.v1.* components in the service's spec must be byte-identical, as a whole, to one accepted projection in controls/common-v1-components.json: the current set, or the next or previous set the artifact carries while the projection moves between two platform-contracts-go vintages. A spec mixing components from two accepted sets matches neither. Every set is generated from the proto SSOT by commonv1policy and carries the version it was projected from. A service publishing no common.v1 components is governed by API-0004 instead, not failed twice here. | major | spec | http-api | platform-architecture | active |
+| API-0007 | The common.v1.* components in the service's spec must be byte-identical, as a whole, to one accepted projection in controls/common-v1-components.json: the current set, or the next or previous set the artifact carries while the projection moves between two platform-contracts-go vintages. A spec mixing components from two accepted sets matches neither. Every set is generated from the proto SSOT by commonv1policy and carries the version it was projected from. The platform-contracts-go floor in controls/module-floors.yaml must equal the version of the current set or, during the grace after a promote, the previous set - never next, and never a stale version no accepted set carries - so a service pinned at the floor projects a set this control accepts. A service publishing no common.v1 components is governed by API-0004 instead, not failed twice here. | major | spec | http-api | platform-architecture | active |
 | API-0006 | cmd/server/swagger_main.go and any other swaggo annotation source is prohibited. The canonical generator reflects Go types through the shared contract engine. | minor | source | always | platform-architecture | active |
 | API-0008 | A GET returning a single mutable resource must declare a strong ETag response header, and a PUT, PATCH or DELETE on such a resource must declare the If-Match request header together with 412 Precondition Failed and 428 Precondition Required responses. | major | spec | http-api | platform-architecture | active |
 | API-0009 | Runtime code that sets Cache-Control with a directive permitting storage must set Vary in the same handler, naming every request header the body depends on, including Authorization when the response is authenticated. A no-store response needs no Vary, and neither does a response that is genuinely identical for every caller and marked public. | major | source | always | platform-architecture | active |

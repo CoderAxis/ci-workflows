@@ -14,16 +14,17 @@ that keep that window from weakening the gate:
     failure names both sets
   - a single-set file (every file before this change, and raw emitter output) reads exactly as
     before, message for message
-  - the floor is never above the current set (so never on `next`), and a floor below it is only
-    stale, so closing a window never waits on a fleet-wide floor raise
+  - the floor equals the version of an accepted set that is not `next` (current, or previous
+    during grace): a stale floor below every accepted set fails, a floor on `next` fails, and a
+    window closes only with the floor on current
   - a vintage is a (platform-contracts-go, platform-shared-go) pair: a projection change that
     ships in shared-go alone can be staged once both sets record their projector
   - the window is opened, promoted and closed by the checker's own flags, and closing it leaves
     the bytes the emitter prints for the new vintage, so the artifact stays generated
   - against the last release, the artifact moves by exactly one window step (a promote or a close
-    may be rolled back with git revert) and the floor never falls unless the rollback is
-    declared, so a hand-added `previous` or a lowered floor that is well-formed on its own still
-    fails - on every later commit until it is fixed, and in release.yaml before @v1 moves
+    may be rolled back with git revert, the floor following it), so a hand-added `previous` that
+    is well-formed on its own still fails - on every later commit until it is fixed, and in
+    release.yaml before @v1 moves
 
 Fixtures are synthetic and built in tempfile, never the committed artifact's current contents,
 because that file is expected to change shape during a real window and a test pinned to it
@@ -277,17 +278,21 @@ def grace_of(current: dict, previous: dict) -> dict:
     return dict(current, previous={"components": previous["components"], "source": previous["source"]})
 
 
-def test_floor_is_never_above_current():
+def test_floor_names_an_accepted_set_that_is_not_next():
+    def fails(floor, sets, *fragments, why):
+        p = m.floor_problems(floors(floor), sets)
+        expect(len(p) == 1 and all(f in p[0] for f in fragments), f"{why}: {p}")
+
     single = sets_of(V070)
     expect(m.floor_problems(floors("v0.7.0"), single) == [], "single set: floor == version holds")
     expect(m.floor_problems({"floors": {MODULE: "v0.7.0"}}, single) == [],
            "a bare version string is a floor too")
-    p = m.floor_problems(floors("v0.8.0"), single)
-    expect(len(p) == 1 and "v0.8.0" in p[0] and "v0.7.0" in p[0] and "above current" in p[0],
-           f"single set: a floor above the reference names both versions: {p}")
-    expect(m.floor_problems(floors("v0.6.0"), single) == [],
-           "a floor below current is stale, not a disagreement: API-0007 still fails old specs")
-    expect(len(m.floor_problems({"floors": {}}, single)) == 1, "no contracts floor at all is a problem")
+    fails("v0.8.0", single, "v0.8.0", "accepts only current v0.7.0", "does not accept",
+          why="single set: a floor above the reference names both versions")
+    fails("v0.6.0", single, "v0.6.0", "accepts only current v0.7.0", "stale", "Raise the floor to v0.7.0",
+          why="single set: a stale floor below the reference fails, as it did before windows existed")
+    p = m.floor_problems({"floors": {}}, single)
+    expect(len(p) == 1 and "declares no floor" in p[0], f"no contracts floor at all is a problem, and says so: {p}")
     unknown = sets_of(dict(V070, source={}))
     expect(len(m.floor_problems(floors("v0.7.0"), unknown)) == 1
            and m.floor_problems(floors("unknown"), unknown) == [],
@@ -295,22 +300,32 @@ def test_floor_is_never_above_current():
 
     window = sets_of(with_next(V070, V080))
     expect(m.floor_problems(floors("v0.7.0"), window) == [], "during expand the floor stays at current")
-    p = m.floor_problems(floors("v0.8.0"), window)
-    expect(len(p) == 1 and "staged next v0.8.0" in p[0] and "--promote-next" in p[0],
-           f"a floor on next fails the repos the window lets bump one at a time: {p}")
+    fails("v0.8.0", window, "next v0.8.0 set", "Point the floor at current v0.7.0", "--promote-next",
+          why="a floor on next fails the repos the window lets bump one at a time")
     for above in ("v0.7.5", "v0.9.0"):
-        p = m.floor_problems(floors(above), window)
-        expect(len(p) == 1 and "next v0.8.0" in p[0] and "current v0.7.0" in p[0],
-               f"floor {above} is above current, and the message names both sets: {p}")
-    expect(m.floor_problems(floors("v0.6.0"), window) == [], "a stale floor stays valid in a window")
+        fails(above, window, "next v0.8.0", "current v0.7.0", "Point the floor at v0.7.0",
+              why=f"floor {above} names no accepted set, and the message names both sets")
+    fails("v0.6.0", window, "stale", "Raise the floor to v0.7.0",
+          why="a stale floor below every accepted set fails in a window too")
 
     grace = sets_of(grace_of(V080, V070))
-    expect(m.floor_problems(floors("v0.7.0"), grace) == [], "after promotion the floor may still name previous")
-    expect(m.floor_problems(floors("v0.8.0"), grace) == [], "after promotion the floor may name current")
+    expect(m.floor_problems(floors("v0.7.0"), grace) == [], "during grace the floor may still name previous")
+    expect(m.floor_problems(floors("v0.8.0"), grace) == [], "during grace the floor may name current")
+    fails("v0.6.0", grace, "stale", "current v0.8.0 and previous v0.7.0",
+          why="a stale floor below both grace sets fails")
+    fails("v0.7.5", grace, "between the accepted sets", "Point the floor at v0.8.0 or v0.7.0",
+          why="a floor between previous and current produces neither")
+    fails("v0.9.0", grace, "does not accept", why="a floor above current fails during grace")
 
     closed = sets_of(V080)
-    expect(m.floor_problems(floors("v0.7.0"), closed) == [],
-           "closing a window does not force the fleet-wide floor up: the old floor is only stale")
+    fails("v0.7.0", closed, "stale", "Raise the floor to v0.8.0", "--drop-set previous",
+          why="closing a window with the floor still on previous fails: the floor moves to current first "
+              "or in the same change")
+    expect(m.floor_problems(floors("v0.8.0"), closed) == [], "a closed window holds with the floor on current")
+
+    demoted = sets_of(with_next(V070, V080))  # a promote rolled back
+    fails("v0.8.0", demoted, "next v0.8.0 set", "rolls a promote back takes the floor back with it",
+          why="a floor raised onto a promoted set comes back down with the demote")
 
 
 # ── the projector: platform-shared-go is half of a vintage ───────────────────────────────────
@@ -332,6 +347,9 @@ def test_a_projection_change_in_shared_go_alone_can_be_staged():
            f"labels carry the projector when it is recorded: {[s.label for s in sets]}")
     expect(m.floor_problems(floors("v0.7.0"), sets) == [],
            "a floor at the shared contracts release names current, not only next")
+    promoted = sets_of(grace_of(projected(emitted("v0.7.0", components_v080()), "v1.61.0"), cur))
+    expect(m.floor_problems(floors("v0.7.0"), promoted) == [],
+           "after promotion the shared contracts release is current's version as well as previous's")
     f = m.compare_to_accepted_sets(published(components_v080()), sets)
     expect(f.ok and "next v0.7.0 via platform-shared-go v1.61.0" in f.evidence,
            f"a spec on the new projection passes and says which pair: {f.evidence}")
@@ -469,31 +487,6 @@ def test_a_relabel_corrects_provenance_and_never_moves_it_backwards():
            f"dropping the recorded projector: {problems}")
 
 
-def test_the_floor_only_rises_unless_a_rollback_is_declared():
-    for base, head, ok, fragment, why in (
-        ("v0.7.0", "v0.7.0", True, "unchanged", "unchanged"),
-        ("v0.7.0", "v0.8.0", True, "raised v0.7.0 -> v0.8.0", "a raise"),
-        ("v0.7.0", "v0.4.0", False, "lowers", "the review's downgrade: the floor lowered to a forged previous"),
-        ("v0.8.0", "v0.7.0", False, "lowered_from: v0.8.0", "grace: lowering a raised floor back to previous"),
-    ):
-        problems, summary = m.floor_transition_problems(floors(base), floors(head))
-        expect((problems == []) == ok and fragment in (summary if ok else problems[0]),
-               f"{why}: problems={problems} summary={summary!r}")
-
-    problems, summary = m.floor_transition_problems(floors("v0.8.0"), floors("v0.7.0", lowered_from="v0.8.0"))
-    expect(problems == [] and "declared with lowered_from" in summary,
-           f"a rollback declared in the reviewed file passes: {problems}")
-    problems, _ = m.floor_transition_problems(floors("v0.8.0", lowered_from="v0.8.0"),
-                                              floors("v0.7.0", lowered_from="v0.8.0"))
-    expect(len(problems) == 1, "a declaration left over from an earlier rollback does not authorise a new one")
-    problems, _ = m.floor_transition_problems(floors("v0.8.0"), floors("v0.7.0", lowered_from="v0.9.0"))
-    expect(len(problems) == 1, "the declaration must name the floor being lowered")
-    problems, _ = m.floor_transition_problems({"floors": {MODULE: "v0.8.0"}}, {"floors": {MODULE: "v0.7.0"}})
-    expect(len(problems) == 1 and "min: v0.7.0" in problems[0], f"bare-string floors lower too: {problems}")
-    problems, summary = m.floor_transition_problems(None, floors("v0.4.0"))
-    expect(problems == [], "no floor on the base: nothing to hold the head to")
-
-
 # ── the window, through the real CLI ─────────────────────────────────────────────────────────
 
 def run(*args) -> subprocess.CompletedProcess:
@@ -533,29 +526,35 @@ def test_window_lifecycle_ends_on_the_emitters_bytes():
         grace = json.loads(ref.read_text(encoding="utf-8"))
         expect(grace.get("_comment") == RENAMED_COMMENT and grace["previous"].get("_comment") == V070["_comment"],
                f"each comment travels with its set through a promote: {grace.get('_comment')!r}")
-        expect(run("--components", ref, "--verify-floor", floor_old).returncode == 0,
-               "promotion alone breaks nobody: the floor may still name previous")
+        p = run("--components", ref, "--verify-floor", floor_old)
+        expect(p.returncode == 0 and "the previous v0.7.0 set" in p.stdout
+               and "moves to v0.8.0 before or with --drop-set previous" in p.stdout,
+               f"promotion alone breaks nobody: during grace the floor may still name previous: {p.stdout}")
+        p = run("--components", ref, "--verify-floor", floor_new)
+        expect(p.returncode == 0 and "agree on v0.8.0 (previous v0.7.0 also accepted)" in p.stdout,
+               f"during grace the floor may be raised to current: {p.stdout}")
 
         p = run("--components", ref, "--drop-set", "previous")
         expect(p.returncode == 0 and labels() == ["current v0.8.0"], f"drop previous closes it: {p.stdout}")
         expect(ref.read_bytes() == new.read_bytes(),
                "a closed window must leave exactly the bytes the emitter printed for the new vintage")
         p = run("--components", ref, "--verify-floor", floor_old)
-        expect(p.returncode == 0 and "stale floor" in p.stdout,
-               f"closing the window does not force the fleet-wide floor up: {p.stdout}")
+        expect(p.returncode == 1 and "stale" in p.stdout and "Raise the floor to v0.8.0" in p.stdout,
+               f"a closed window with the floor left on the dropped set fails: {p.stdout}")
         expect(run("--components", ref, "--verify-floor", floor_new).returncode == 0,
-               "and a raised floor holds")
+               "and with the floor raised to current it holds")
 
-        # The next migration is not blocked on the fleet's pins: with the floor still at the old
-        # vintage, a second window opens as soon as the first one is closed.
+        # The next window opens over the raised floor, and the old floor stays stale while it is open.
         newer = tmp / "emitted-v0.9.0.json"
         newer.write_text(m._reference_json(emitted("v0.9.0", dict(
             components_v080(), **{"common.v1.CursorPaginationMeta": {"type": "object"}}))), encoding="utf-8")
         p = run("--components", ref, "--stage-next", newer)
         expect(p.returncode == 0 and labels() == ["next v0.9.0", "current v0.8.0"],
-               f"a second window opens over a stale floor: {p.stdout}{p.stderr}")
-        expect(run("--components", ref, "--verify-floor", floor_old).returncode == 0,
-               "and the stale floor stays valid while it is open")
+               f"a second window opens once the first is closed: {p.stdout}{p.stderr}")
+        expect(run("--components", ref, "--verify-floor", floor_new).returncode == 0,
+               "the floor on current holds while the second window is open")
+        expect(run("--components", ref, "--verify-floor", floor_old).returncode == 1,
+               "a floor below every accepted set stays stale while it is open")
 
 
 def test_abandoning_next_restores_the_original_bytes():
@@ -699,19 +698,25 @@ def test_the_reviews_downgrade_passes_alone_and_fails_against_the_base():
         tmp = pathlib.Path(tmp)
         repo = ControlsRepo(tmp / "ci-workflows", V070, floors("v0.7.0"))
         base = repo.git("rev-parse", "HEAD")
+        # The floor pointed at the forged set: a member of the forged file's accepted sets.
         repo.write(grace_of(V070, minus_enum_values(V070, 2, "v0.4.0")), floors("v0.4.0"))
 
         alone = repo.verify()
         expect(alone.returncode == 0,
                f"on its own the forged file is well-formed; that is why the base is needed: {alone.stdout}")
         p = repo.verify("--base", base)
-        expect(p.returncode == 1 and "is not the set a close could have dropped" in p.stdout
-               and "lowers the github.com/coderaxis/platform-contracts-go floor from v0.7.0 to v0.4.0" in p.stdout,
-               f"against the base, both the forged previous and the lowered floor fail: {p.stdout}{p.stderr}")
+        expect(p.returncode == 1 and "is not the set a close could have dropped" in p.stdout,
+               f"against the base, the forged previous fails, and the floor on it with it: {p.stdout}{p.stderr}")
+
+        repo.write(V070, floors("v0.4.0"))
+        p = repo.verify()
+        expect(p.returncode == 1 and "stale" in p.stdout,
+               f"without a forged set to name, the lowered floor is stale on its own: {p.stdout}{p.stderr}")
 
         repo.write(with_next(V070, V080), floors("v0.7.0"))
         p = repo.verify("--base", base)
-        expect(p.returncode == 0 and "staged next v0.8.0" in p.stdout and "floor unchanged at v0.7.0" in p.stdout,
+        expect(p.returncode == 0 and "staged next v0.8.0" in p.stdout
+               and "floor and reference artifact agree on v0.7.0" in p.stdout,
                f"a real stage passes and says what moved: {p.stdout}{p.stderr}")
 
         p = repo.verify("--base", "0123456789abcdef0123456789abcdef01234567")
@@ -730,15 +735,16 @@ def test_without_a_release_the_base_is_resolved_from_the_github_event():
         subprocess.run(["git", "clone", "-q", "--bare", str(repo.root), str(origin)], check=True)
         repo.git("remote", "add", "origin", str(origin))
         repo.git("fetch", "-q", "origin")
-        repo.git("switch", "-q", "-c", "lower-the-floor")
-        repo.write(grace_of(V080, V070), floors("v0.7.0"))
-        head = repo.commit("lower the floor back to previous")
+        repo.git("switch", "-q", "-c", "swap-previous")
+        repo.write(grace_of(V080, minus_enum_values(V070, 1, "v0.6.0")), floors("v0.8.0"))
+        head = repo.commit("swap previous for an older set")
 
         # A pull_request checkout is the merge commit; its base is pull_request.base.sha.
         env = event_env(tmp, "pull_request", {"pull_request": {"base": {"sha": main_tip}, "head": {"sha": head}}})
         p = repo.verify("--base-from-event", env=env)
-        expect(p.returncode == 1 and "lowers" in p.stdout and "lowered_from: v0.8.0" in p.stdout,
-               f"pull_request: lowering a raised floor back to previous fails: {p.stdout}{p.stderr}")
+        expect(p.returncode == 1 and f"pull request base {main_tip[:12]}" in p.stdout
+               and "was not the current set on the base" in p.stdout,
+               f"pull_request: swapping previous for a set the base never ran as current fails: {p.stdout}{p.stderr}")
 
         # A normal push is held against its before-SHA.
         env = event_env(tmp, "push", {"before": main_tip, "after": head, "created": False, "forced": False})
@@ -758,8 +764,8 @@ def test_without_a_release_the_base_is_resolved_from_the_github_event():
         repo.git("switch", "-q", "-c", "elsewhere", main_tip)
         (repo.root / "README.md").write_text("a commit HEAD will not contain\n", encoding="utf-8")
         elsewhere = repo.commit("elsewhere")
-        repo.git("switch", "-q", "lower-the-floor")
-        env = event_env(tmp, "push", {"ref": "refs/heads/lower-the-floor", "before": elsewhere, "after": head,
+        repo.git("switch", "-q", "swap-previous")
+        env = event_env(tmp, "push", {"ref": "refs/heads/swap-previous", "before": elsewhere, "after": head,
                                       "created": False, "forced": False, "repository": {"default_branch": "main"}})
         p = repo.verify("--base-from-event", env=env)
         expect("push before-SHA" not in p.stdout and f"merge base {main_tip[:12]} with origin/main" in p.stdout,
@@ -770,13 +776,15 @@ def test_without_a_release_the_base_is_resolved_from_the_github_event():
         expect(p.returncode == 2 and "cannot be held against anything" in p.stdout,
                f"push to main (before not an ancestor of HEAD) fails closed: {p.stdout}{p.stderr}")
 
-        # Declared in the reviewed file, the rollback passes.
-        repo.write(grace_of(V080, V070), floors("v0.7.0", lowered_from="v0.8.0"))
-        repo.commit("declare the rollback")
+        # Restoring previous passes. Moving the floor back to previous in the same change needs no
+        # declaration: previous is an accepted set, and the artifact is what history holds.
+        repo.write(grace_of(V080, V070), floors("v0.7.0"))
+        repo.commit("restore previous, floor back on it")
         env = event_env(tmp, "pull_request", {"pull_request": {"base": {"sha": main_tip}}})
         p = repo.verify("--base-from-event", env=env)
-        expect(p.returncode == 0 and "declared with lowered_from" in p.stdout,
-               f"a declared rollback passes: {p.stdout}{p.stderr}")
+        expect(p.returncode == 0 and "accepted sets unchanged" in p.stdout
+               and "floor and reference artifact agree on v0.7.0, the previous v0.7.0 set" in p.stdout,
+               f"a floor moved between the two grace sets passes: {p.stdout}{p.stderr}")
 
         # A force push to the default branch has no before-SHA and nothing to fall back to.
         env = event_env(tmp, "push", {"ref": "refs/heads/main", "before": main_tip, "after": head,
@@ -837,11 +845,13 @@ def test_a_red_commit_is_not_released_inside_the_next_one():
         released = repo.git("rev-parse", "HEAD")
         repo.release("v1.0.0")
 
+        # The floor follows current down, so the file agrees with itself and only history objects.
         repo.write(V070, floors("v0.7.0"))
-        downgrade = repo.commit("A: roll current back and lower the floor, undeclared")
+        downgrade = repo.commit("A: roll current back, with the floor")
         p = repo.verify("--base-from-event", env=push_to_main(tmp, released, downgrade))
         expect(p.returncode == 1 and "the last release v1.0.0" in p.stdout and "replaced in place" in p.stdout
-               and "lowers" in p.stdout, f"A is red against the last release: {p.stdout}{p.stderr}")
+               and "floor and reference artifact agree on v0.7.0" in p.stdout,
+               f"A is red against the last release: {p.stdout}{p.stderr}")
 
         (repo.root / "README.md").write_text("an unrelated edit\n", encoding="utf-8")
         unrelated = repo.commit("B: unrelated")
@@ -850,7 +860,7 @@ def test_a_red_commit_is_not_released_inside_the_next_one():
                f"against its before-SHA, B reads as unchanged - the gap: {p.stdout}{p.stderr}")
         p = repo.verify("--base-from-event", env=push_to_main(tmp, downgrade, unrelated))
         expect(p.returncode == 1 and "the last release v1.0.0" in p.stdout and "replaced in place" in p.stdout
-               and "lowers" in p.stdout and "is the last release, and every change since it counts" in p.stdout,
+               and "is the last release, and every change since it counts" in p.stdout,
                f"B stays red until A is fixed, because the fleet has not received A: {p.stdout}{p.stderr}")
 
         # The fix is a plain revert of A, which the before-SHA would read as a forbidden step of its own.
@@ -859,7 +869,8 @@ def test_a_red_commit_is_not_released_inside_the_next_one():
         p = repo.verify("--base", unrelated)
         expect(p.returncode == 1, f"against its before-SHA, the revert itself looks like a flag day: {p.stdout}")
         p = repo.verify("--base-from-event", env=push_to_main(tmp, unrelated, fixed))
-        expect(p.returncode == 0 and "accepted sets unchanged" in p.stdout and "floor unchanged at v0.8.0" in p.stdout,
+        expect(p.returncode == 0 and "accepted sets unchanged" in p.stdout
+               and "floor and reference artifact agree on v0.8.0" in p.stdout,
                f"against the last release, the revert passes: {p.stdout}{p.stderr}")
 
 
@@ -932,19 +943,30 @@ def test_a_promote_or_a_close_rolls_back_with_git_revert():
         promote = repo.commit("promote")
         repo.release("v1.2.0", promote)
         tool("--drop-set", "previous")
-        close = repo.commit("close")
+        p = repo.verify("--base-from-event", env=push_to_main(tmp, promote, repo.commit("close, floor left behind")))
+        expect(p.returncode == 1 and "stale" in p.stdout and "dropped previous v0.7.0: the window is closed" in p.stdout,
+               f"a close is one window step, but not with the floor still on the set it drops: {p.stdout}{p.stderr}")
+        repo.git("reset", "-q", "--hard", promote)
+        tool("--drop-set", "previous")
+        repo.floors.write_text(json.dumps(floors("v0.8.0")), encoding="utf-8")
+        close = repo.commit("close, raising the floor to current")
+        p = repo.verify("--base-from-event", env=push_to_main(tmp, promote, close))
+        expect(p.returncode == 0 and "the window is closed" in p.stdout
+               and "floor and reference artifact agree on v0.8.0" in p.stdout,
+               f"a close that raises the floor in the same change passes: {p.stdout}{p.stderr}")
         repo.release("v1.3.0", close)
 
         repo.git("revert", "--no-edit", close)
         p = repo.verify("--base-from-event", env=push_to_main(tmp, close, repo.git("rev-parse", "HEAD")))
         expect(p.returncode == 0 and "reopened previous v0.7.0" in p.stdout
-               and "the last release before the close (v1.2.0) carried previous v0.7.0" in p.stdout,
-               f"a reverted close passes: previous is what the release before the close carried: "
-               f"{p.stdout}{p.stderr}")
+               and "the last release before the close (v1.2.0) carried previous v0.7.0" in p.stdout
+               and "floor and reference artifact agree on v0.7.0, the previous v0.7.0 set" in p.stdout,
+               f"a reverted close passes, taking the floor back to previous: previous is what the release "
+               f"before the close carried: {p.stdout}{p.stderr}")
 
         repo.git("reset", "-q", "--hard", close)
         repo.write(grace_of(dict(V080, _comment=RENAMED_COMMENT), minus_enum_values(V070, 1, "v0.6.0")),
-                   floors("v0.7.0"))
+                   floors("v0.8.0"))
         p = repo.verify("--base-from-event", env=push_to_main(tmp, close, repo.commit("forged reopen")))
         expect(p.returncode == 1 and "is not the set a close could have dropped" in p.stdout
                and "carried previous v0.7.0" in p.stdout, f"a reopen history does not support fails: {p.stdout}{p.stderr}")
@@ -973,6 +995,21 @@ def test_a_promote_or_a_close_rolls_back_with_git_revert():
                and "the last release v1.2.0 this ref contains (the newest release, v1.5.0, is not in it)" in p.stdout,
                f"a reverted promote passes: {p.stdout}{p.stderr}")
 
+        # A floor raised onto the promoted set during grace has to come back down with the demote.
+        repo.git("switch", "-q", "-c", "raise-then-demote", "v1.2.0")
+        repo.floors.write_text(json.dumps(floors("v0.8.0")), encoding="utf-8")
+        raised = repo.commit("raise the floor to current during grace")
+        repo.git("revert", "--no-edit", promote)
+        p = repo.verify("--base", raised)
+        expect(p.returncode == 1 and "demoted current v0.8.0" in p.stdout and "which is the next v0.8.0 set" in p.stdout,
+               f"a demote that leaves the floor on the demoted set fails: {p.stdout}{p.stderr}")
+        repo.floors.write_text(json.dumps(floors("v0.7.0")), encoding="utf-8")
+        repo.git("commit", "-q", "-a", "--amend", "--no-edit")
+        p = repo.verify("--base", raised)
+        expect(p.returncode == 0 and "demoted current v0.8.0" in p.stdout
+               and "floor and reference artifact agree on v0.7.0" in p.stdout,
+               f"the demote passes once the floor comes back with it, with no declaration: {p.stdout}{p.stderr}")
+
 
 def test_a_projection_replaced_in_place_cannot_be_reopened_from_history():
     # Before windows existed every regeneration replaced current in place. The real history has
@@ -983,10 +1020,10 @@ def test_a_projection_replaced_in_place_cannot_be_reopened_from_history():
         tmp = pathlib.Path(tmp)
         repo = ControlsRepo(tmp / "ci-workflows", V070, floors("v0.7.0"))
         repo.release("v1.0.0")
-        repo.write(V080, floors("v0.7.0"))
+        repo.write(V080, floors("v0.8.0"))
         flag_day = repo.commit("regenerate in place, as before windows")
         repo.release("v1.1.0", flag_day)
-        repo.write(grace_of(V080, V070), floors("v0.7.0"))
+        repo.write(grace_of(V080, V070), floors("v0.8.0"))
         p = repo.verify("--base-from-event", env=push_to_main(tmp, flag_day, repo.commit("reopen v0.7.0")))
         expect(p.returncode == 1 and "no release since v0.8.0 became current carried a previous set" in p.stdout,
                f"a set that was current in an old release is not reopened without a grace release: {p.stdout}{p.stderr}")
@@ -994,7 +1031,7 @@ def test_a_projection_replaced_in_place_cannot_be_reopened_from_history():
 
 def test_release_yaml_holds_the_release_against_the_tag_it_releases_from():
     # CI is not a required check on main, so this is the binding gate: nothing reaches @v1 unless
-    # the delta from the last release makes one window step and does not silently lower the floor.
+    # the floor names an accepted set and the delta from the last release makes one window step.
     wf = m.yaml.safe_load((HERE.parent / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8"))
     steps = wf["jobs"]["release"]["steps"]
 
@@ -1050,9 +1087,9 @@ def main() -> int:
 
     print(f"api-contract API-0007 reference: OK ({len(tests)} test function(s)) - one whole "
           "accepted set passes, a mix fails naming both, single-set files read as before, the "
-          "floor is never above current, a window closes on the emitter's bytes, and against "
-          "the last release the artifact moves one step (a promote or close may be reverted), "
-          "the floor never silently falls, and release.yaml holds @v1 to the same rule")
+          "floor names current or previous and never next or a stale vintage, a window closes on "
+          "the emitter's bytes, against the last release the artifact moves one step (a promote "
+          "or close may be reverted), and release.yaml holds @v1 to the same rule")
     return 0
 
 

@@ -181,8 +181,12 @@ controls:
       next or previous set the artifact carries while the projection moves between two
       platform-contracts-go vintages. A spec mixing components from two accepted sets matches
       neither. Every set is generated from the proto SSOT by commonv1policy and carries the
-      version it was projected from. A service publishing no common.v1 components is governed
-      by API-0004 instead, not failed twice here.
+      version it was projected from. The platform-contracts-go floor in
+      controls/module-floors.yaml must equal the version of the current set or, during the
+      grace after a promote, the previous set - never next, and never a stale version no
+      accepted set carries - so a service pinned at the floor projects a set this control
+      accepts. A service publishing no common.v1 components is governed by API-0004 instead,
+      not failed twice here.
     rationale: >-
       API-0004 proves a response points AT the envelope; this proves the envelope it points at
       is the CURRENT one, and the two are genuinely different guarantees. Each service projects
