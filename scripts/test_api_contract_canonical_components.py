@@ -20,9 +20,10 @@ that keep that window from weakening the gate:
     ships in shared-go alone can be staged once both sets record their projector
   - the window is opened, promoted and closed by the checker's own flags, and closing it leaves
     the bytes the emitter prints for the new vintage, so the artifact stays generated
-  - against the base commit, the artifact moves by exactly one window step and the floor never
-    falls unless the rollback is declared, so a hand-added `previous` or a lowered floor that is
-    well-formed on its own still fails
+  - against the last release, the artifact moves by exactly one window step (a promote or a close
+    may be rolled back with git revert) and the floor never falls unless the rollback is
+    declared, so a hand-added `previous` or a lowered floor that is well-formed on its own still
+    fails - on every later commit until it is fixed, and in release.yaml before @v1 moves
 
 Fixtures are synthetic and built in tempfile, never the committed artifact's current contents,
 because that file is expected to change shape during a real window and a test pinned to it
@@ -113,6 +114,8 @@ def published(components: dict, **extra) -> dict:
 
 V070 = emitted("v0.7.0", components_v070())
 V080 = emitted("v0.8.0", components_v080())
+RENAMED_COMMENT = ("Canonical common.v1 OpenAPI components, projected from the proto SSOT. Generated - do "
+                   "not edit by hand. Regenerate with `go run <package>@<tag>`.")
 
 
 # ── the committed artifact ───────────────────────────────────────────────────────────────────
@@ -251,6 +254,10 @@ def test_reference_validation():
     rejects(with_next(V070, other), "same module", "sets from two modules")
     rejects(dict(V070, nxet=V080), "unknown member", "a misspelt next must not be ignored")
     rejects(dict(V070, components={}), "no components", "an empty set would pass everything")
+    rejects(dict(V070, next={"components": components_v080(), "source": V080["source"], "sorce": {}}),
+            "next set carries unknown member(s) ['sorce']", "a misspelt member inside a set must not be ignored")
+    sets, reason = m.parse_reference(dict(V070, next=dict(V080, _comment="the emitter's comment")))
+    expect(sets is not None, f"a set may carry the emitter's comment for its vintage: {reason}")
     rejects(with_next(V070, dict(V080, components={})), "next set has no components",
             "an empty next set would pass everything")
 
@@ -386,12 +393,45 @@ def test_each_window_step_is_one_allowed_transition():
         expect(problems == [] and fragment in summary, f"{why}: problems={problems} summary={summary!r}")
 
 
+def test_a_promote_or_a_close_rolls_back_as_one_step():
+    window, grace = with_next(V070, V080), grace_of(V080, V070)
+    closed_previous = sets_of(grace)[1]  # what the release before the close carried as previous
+
+    # Reverting a promote accepts the same two sets: nobody's verdict changes.
+    problems, summary = moved(grace, window)
+    expect(problems == [] and "demoted current v0.8.0 back to next beside v0.7.0" in summary,
+           f"a reverted promote is a demote: {problems} {summary!r}")
+
+    # Reverting a close readmits the set the close dropped, as the release before it carried it.
+    problems, summary = m.transition_problems(sets_of(V080), sets_of(grace), closed_previous)
+    expect(problems == [] and "reopened previous v0.7.0" in summary,
+           f"a reverted close reopens previous: {problems} {summary!r}")
+    for closed, fragment, why in (
+        (None, "no release since v0.8.0 became current carried a previous set", "with no grace in history"),
+        (sets_of(grace_of(V080, minus_enum_values(V070, 1, "v0.7.0")))[1], "carried previous v0.7.0",
+         "when history names a different set"),
+    ):
+        problems, _ = m.transition_problems(sets_of(V080), sets_of(grace), closed)
+        expect(len(problems) == 1 and "is not the set a close could have dropped" in problems[0]
+               and fragment in problems[0], f"a reopen {why} fails and says why: {problems}")
+    problems, _ = m.transition_problems(sets_of(V080), sets_of(grace_of(V080, minus_enum_values(V070, 2, "v0.4.0"))),
+                                        closed_previous)
+    expect(len(problems) == 1 and "is not the set a close could have dropped" in problems[0],
+           f"history does not authorise reopening an OLDER set: {problems}")
+
+    # A promote rolled back without keeping the promoted set accepted does fail those specs.
+    problems, _ = moved(grace, with_next(V070, emitted("v0.9.0", published(components_v080(), **{"common.v1.X": {}}))))
+    expect(len(problems) == 1 and "without keeping v0.8.0 accepted" in problems[0],
+           f"dropping the promoted set is named as what fails specs: {problems}")
+
+
 def test_a_forged_previous_and_other_multi_step_changes_fail():
     window, grace = with_next(V070, V080), grace_of(V080, V070)
     # The review's reproduction: previous = current minus two ErrorCode values, labelled older.
     forged = grace_of(V070, minus_enum_values(V070, 2, "v0.4.0"))
     for base, head, fragment, why in (
-        (V070, forged, "was not the current set on the base", "a hand-added previous readmits an old projection"),
+        (V070, forged, "is not the set a close could have dropped (no release since v0.7.0 became current",
+         "a hand-added previous readmits an old projection"),
         (window, grace_of(V080, minus_enum_values(V070, 1, "v0.6.0")), "was not the current set on the base",
          "a promote that swaps in a different previous"),
         (grace, grace_of(V080, minus_enum_values(V070, 1, "v0.6.0")), "was not the current set on the base",
@@ -399,7 +439,11 @@ def test_a_forged_previous_and_other_multi_step_changes_fail():
         (V070, V080, "replaced in place", "regenerating the artifact over itself is a flag day"),
         (window, emitted("v0.7.0", published(components_v070(), **{"common.v1.Extra": {"type": "object"}})),
          "replaced in place", "an in-place regenerate during a window discards next"),
-        (V070, grace, "without ever being staged as next", "stage and promote in one change"),
+        # A stage must leave current byte-identical; this one also regenerates current in place.
+        (V070, with_next(emitted("v0.7.0", published(components_v070(),
+                                                      **{"common.v1.Extra": {"type": "object"}})), V080),
+         "replaced in place", "a stage that also regenerates current is a flag day"),
+        (V070, grace, "the base never accepted it as next", "stage and promote in one change"),
         (window, V080, "promote and close in one change", "promote and close in one change"),
         (grace, V070, "rolled back to previous", "rolling current back fails specs already on it"),
         (grace, with_next(V080, emitted("v0.9.0", published(components_v080(), **{"common.v1.X": {}})))
@@ -462,7 +506,9 @@ def test_window_lifecycle_ends_on_the_emitters_bytes():
         tmp = pathlib.Path(tmp)
         ref, new = tmp / "ref.json", tmp / "emitted.json"
         ref.write_text(m._reference_json(V070), encoding="utf-8")
-        new.write_text(m._reference_json(V080), encoding="utf-8")
+        # The emitter's comment text changes between the two releases (the committed one still
+        # names `go run ./...`), and a closed window must end on the NEW release's bytes anyway.
+        new.write_text(m._reference_json(dict(V080, _comment=RENAMED_COMMENT)), encoding="utf-8")
         floor_old, floor_new = tmp / "floor-old.yaml", tmp / "floor-new.yaml"
         floor_old.write_text(json.dumps(floors("v0.7.0")), encoding="utf-8")
         floor_new.write_text(json.dumps(floors("v0.8.0")), encoding="utf-8")
@@ -484,6 +530,9 @@ def test_window_lifecycle_ends_on_the_emitters_bytes():
         p = run("--components", ref, "--promote-next")
         expect(p.returncode == 0 and labels() == ["current v0.8.0", "previous v0.7.0"],
                f"promote-next makes next current and keeps the old set as previous: {p.stdout}{p.stderr}")
+        grace = json.loads(ref.read_text(encoding="utf-8"))
+        expect(grace.get("_comment") == RENAMED_COMMENT and grace["previous"].get("_comment") == V070["_comment"],
+               f"each comment travels with its set through a promote: {grace.get('_comment')!r}")
         expect(run("--components", ref, "--verify-floor", floor_old).returncode == 0,
                "promotion alone breaks nobody: the floor may still name previous")
 
@@ -514,7 +563,7 @@ def test_abandoning_next_restores_the_original_bytes():
         tmp = pathlib.Path(tmp)
         ref, new = tmp / "ref.json", tmp / "emitted.json"
         ref.write_text(m._reference_json(V070), encoding="utf-8")
-        new.write_text(m._reference_json(V080), encoding="utf-8")
+        new.write_text(m._reference_json(dict(V080, _comment=RENAMED_COMMENT)), encoding="utf-8")
         original = ref.read_bytes()
         run("--components", ref, "--stage-next", new)
         p = run("--components", ref, "--drop-set", "next")
@@ -628,6 +677,11 @@ class ControlsRepo:
         self.git("commit", "-q", "--allow-empty", "-m", message)
         return self.git("rev-parse", "HEAD")
 
+    def release(self, version: str, rev: str = "HEAD") -> None:
+        """Tag `rev` the way release.yaml does: an annotated vX.Y.Z tag (v1 moves beside it)."""
+        self.git("tag", "-a", version, "-m", version, rev)
+        self.git("tag", "-f", "-a", "v1", "-m", f"Moving major tag: {version}", f"{version}^{{commit}}")
+
     def verify(self, *extra, env: dict | None = None) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, str(CHECKER_PATH), "--components", str(self.reference),
                                "--verify-floor", str(self.floors), *map(str, extra)],
@@ -651,7 +705,7 @@ def test_the_reviews_downgrade_passes_alone_and_fails_against_the_base():
         expect(alone.returncode == 0,
                f"on its own the forged file is well-formed; that is why the base is needed: {alone.stdout}")
         p = repo.verify("--base", base)
-        expect(p.returncode == 1 and "was not the current set on the base" in p.stdout
+        expect(p.returncode == 1 and "is not the set a close could have dropped" in p.stdout
                and "lowers the github.com/coderaxis/platform-contracts-go floor from v0.7.0 to v0.4.0" in p.stdout,
                f"against the base, both the forged previous and the lowered floor fail: {p.stdout}{p.stderr}")
 
@@ -665,7 +719,9 @@ def test_the_reviews_downgrade_passes_alone_and_fails_against_the_base():
                f"an unreadable base fails closed: {p.stdout}{p.stderr}")
 
 
-def test_the_base_is_resolved_from_the_github_event():
+def test_without_a_release_the_base_is_resolved_from_the_github_event():
+    # This repository has no release tag, as in a fork or a fresh clone made without tags, so
+    # there is no last release to hold the change against and the event names the base.
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
         repo = ControlsRepo(tmp / "ci-workflows", grace_of(V080, V070), floors("v0.8.0"))
@@ -696,6 +752,23 @@ def test_the_base_is_resolved_from_the_github_event():
         p = repo.verify("--base-from-event", env=env)
         expect(p.returncode == 1 and "merge base" in p.stdout and "origin/main" in p.stdout,
                f"push (created): held against the merge base with origin/main: {p.stdout}{p.stderr}")
+
+        # A before-SHA this clone has but HEAD does not contain (a rewritten branch whose payload
+        # still says forced=false) is not a base: the merge base is used instead.
+        repo.git("switch", "-q", "-c", "elsewhere", main_tip)
+        (repo.root / "README.md").write_text("a commit HEAD will not contain\n", encoding="utf-8")
+        elsewhere = repo.commit("elsewhere")
+        repo.git("switch", "-q", "lower-the-floor")
+        env = event_env(tmp, "push", {"ref": "refs/heads/lower-the-floor", "before": elsewhere, "after": head,
+                                      "created": False, "forced": False, "repository": {"default_branch": "main"}})
+        p = repo.verify("--base-from-event", env=env)
+        expect("push before-SHA" not in p.stdout and f"merge base {main_tip[:12]} with origin/main" in p.stdout,
+               f"push (before not an ancestor of HEAD): held against the merge base: {p.stdout}{p.stderr}")
+        env = event_env(tmp, "push", {"ref": "refs/heads/main", "before": elsewhere, "after": head,
+                                      "created": False, "forced": False, "repository": {"default_branch": "main"}})
+        p = repo.verify("--base-from-event", env=env)
+        expect(p.returncode == 2 and "cannot be held against anything" in p.stdout,
+               f"push to main (before not an ancestor of HEAD) fails closed: {p.stdout}{p.stderr}")
 
         # Declared in the reviewed file, the rollback passes.
         repo.write(grace_of(V080, V070), floors("v0.7.0", lowered_from="v0.8.0"))
@@ -742,8 +815,203 @@ def test_a_pull_request_is_judged_against_main_now_not_its_branch_point():
         expect(p.returncode == 0 and "accepted sets unchanged" in p.stdout,
                f"the pull request changed nothing about the reference: {p.stdout}{p.stderr}")
         p = repo.verify("--base", branch_point)
-        expect(p.returncode == 1 and "without ever being staged as next" in p.stdout,
+        expect(p.returncode == 1 and "the base never accepted it as next" in p.stdout,
                f"held against the branch point instead, main's two steps would read as this change's: {p.stdout}")
+
+
+# ── the last release is the base ─────────────────────────────────────────────────────────────
+
+def push_to_main(tmp: pathlib.Path, before: str, after: str) -> dict:
+    return event_env(tmp, "push", {"ref": "refs/heads/main", "before": before, "after": after,
+                                   "created": False, "forced": False,
+                                   "repository": {"default_branch": "main"}})
+
+
+def test_a_red_commit_is_not_released_inside_the_next_one():
+    # The review's reproduction. main has no required checks and release.yaml releases a commit
+    # once CI passes for THAT commit, so a forbidden change that turned CI red once must not read
+    # as "unchanged" to the next, unrelated commit - which is what its before-SHA says.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        repo = ControlsRepo(tmp / "ci-workflows", V080, floors("v0.8.0"))
+        released = repo.git("rev-parse", "HEAD")
+        repo.release("v1.0.0")
+
+        repo.write(V070, floors("v0.7.0"))
+        downgrade = repo.commit("A: roll current back and lower the floor, undeclared")
+        p = repo.verify("--base-from-event", env=push_to_main(tmp, released, downgrade))
+        expect(p.returncode == 1 and "the last release v1.0.0" in p.stdout and "replaced in place" in p.stdout
+               and "lowers" in p.stdout, f"A is red against the last release: {p.stdout}{p.stderr}")
+
+        (repo.root / "README.md").write_text("an unrelated edit\n", encoding="utf-8")
+        unrelated = repo.commit("B: unrelated")
+        p = repo.verify("--base", downgrade)
+        expect(p.returncode == 0 and "accepted sets unchanged" in p.stdout,
+               f"against its before-SHA, B reads as unchanged - the gap: {p.stdout}{p.stderr}")
+        p = repo.verify("--base-from-event", env=push_to_main(tmp, downgrade, unrelated))
+        expect(p.returncode == 1 and "the last release v1.0.0" in p.stdout and "replaced in place" in p.stdout
+               and "lowers" in p.stdout and "is the last release, and every change since it counts" in p.stdout,
+               f"B stays red until A is fixed, because the fleet has not received A: {p.stdout}{p.stderr}")
+
+        # The fix is a plain revert of A, which the before-SHA would read as a forbidden step of its own.
+        repo.git("revert", "--no-edit", downgrade)
+        fixed = repo.git("rev-parse", "HEAD")
+        p = repo.verify("--base", unrelated)
+        expect(p.returncode == 1, f"against its before-SHA, the revert itself looks like a flag day: {p.stdout}")
+        p = repo.verify("--base-from-event", env=push_to_main(tmp, unrelated, fixed))
+        expect(p.returncode == 0 and "accepted sets unchanged" in p.stdout and "floor unchanged at v0.8.0" in p.stdout,
+               f"against the last release, the revert passes: {p.stdout}{p.stderr}")
+
+
+def test_deleting_the_artifact_then_adding_a_forged_one_is_held_against_what_came_before():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        forged = grace_of(V080, minus_enum_values(V070, 2, "v0.4.0"))
+        for released in (True, False):
+            repo = ControlsRepo(tmp / f"ci-workflows-{released}", V080, floors("v0.8.0"))
+            if released:
+                repo.release("v1.0.0")
+            repo.reference.unlink()
+            deleted = repo.commit("C: delete the artifact")
+            repo.write(forged, floors("v0.8.0"))
+            readded = repo.commit("D: add a forged one")
+
+            p = repo.verify("--base", deleted)
+            expect(p.returncode == 1 and "has no usable reference artifact" in p.stdout
+                   and "is not the set a close could have dropped" in p.stdout and "new in this change" not in p.stdout,
+                   f"a base without the artifact looks back to its last usable state (released={released}): "
+                   f"{p.stdout}{p.stderr}")
+            p = repo.verify("--base-from-event", env=push_to_main(tmp, deleted, readded))
+            expect(p.returncode == 1 and "is not the set a close could have dropped" in p.stdout,
+                   f"D pushed after C is red (released={released}): {p.stdout}{p.stderr}")
+
+
+def test_a_window_step_waits_for_the_release_of_the_step_before_it():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        repo = ControlsRepo(tmp / "ci-workflows", V070, floors("v0.7.0"))
+        repo.release("v1.9.0")
+        repo.write(with_next(V070, V080), floors("v0.7.0"))
+        stage = repo.commit("stage")
+        repo.write(grace_of(V080, V070), floors("v0.7.0"))
+        promote = repo.commit("promote")
+
+        p = repo.verify("--base-from-event", env=push_to_main(tmp, stage, promote))
+        expect(p.returncode == 1 and "the base never accepted it as next" in p.stdout
+               and "If an earlier window step has landed but is not released yet" in p.stdout,
+               f"a promote landing before its stage is released is two steps for one release: {p.stdout}{p.stderr}")
+
+        # v1.10.0 sorts before v1.9.0 as a string; releases are ordered as versions.
+        repo.release("v1.10.0", stage)
+        p = repo.verify("--base-from-event", env=push_to_main(tmp, stage, promote))
+        expect(p.returncode == 0 and "the last release v1.10.0" in p.stdout and "promoted next to current" in p.stdout,
+               f"once the stage is released, the same promote is one step: {p.stdout}{p.stderr}")
+
+        env = event_env(tmp, "pull_request", {"pull_request": {"base": {"sha": stage}, "head": {"sha": promote}}})
+        p = repo.verify("--base-from-event", env=env)
+        expect(p.returncode == 0 and "the last release v1.10.0" in p.stdout,
+               f"a pull request is held against the same last release: {p.stdout}{p.stderr}")
+
+
+def test_a_promote_or_a_close_rolls_back_with_git_revert():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        repo = ControlsRepo(tmp / "ci-workflows", V070, floors("v0.7.0"))
+        repo.release("v1.0.0")
+        emitted_v080 = tmp / "emitted-v0.8.0.json"
+        emitted_v080.write_text(m._reference_json(dict(V080, _comment=RENAMED_COMMENT)), encoding="utf-8")
+
+        def tool(*args):
+            p = run("--components", repo.reference, *args)
+            if p.returncode != 0:
+                raise AssertionError(f"window tool {args} failed: {p.stdout}{p.stderr}")
+
+        tool("--stage-next", emitted_v080)
+        repo.release("v1.1.0", repo.commit("stage"))
+        tool("--promote-next")
+        promote = repo.commit("promote")
+        repo.release("v1.2.0", promote)
+        tool("--drop-set", "previous")
+        close = repo.commit("close")
+        repo.release("v1.3.0", close)
+
+        repo.git("revert", "--no-edit", close)
+        p = repo.verify("--base-from-event", env=push_to_main(tmp, close, repo.git("rev-parse", "HEAD")))
+        expect(p.returncode == 0 and "reopened previous v0.7.0" in p.stdout
+               and "the last release before the close (v1.2.0) carried previous v0.7.0" in p.stdout,
+               f"a reverted close passes: previous is what the release before the close carried: "
+               f"{p.stdout}{p.stderr}")
+
+        repo.git("reset", "-q", "--hard", close)
+        repo.write(grace_of(dict(V080, _comment=RENAMED_COMMENT), minus_enum_values(V070, 1, "v0.6.0")),
+                   floors("v0.7.0"))
+        p = repo.verify("--base-from-event", env=push_to_main(tmp, close, repo.commit("forged reopen")))
+        expect(p.returncode == 1 and "is not the set a close could have dropped" in p.stdout
+               and "carried previous v0.7.0" in p.stdout, f"a reopen history does not support fails: {p.stdout}{p.stderr}")
+
+        # A stage opened and abandoned after the close does not hide the grace release behind it.
+        repo.git("reset", "-q", "--hard", close)
+        emitted_v090 = tmp / "emitted-v0.9.0.json"
+        emitted_v090.write_text(m._reference_json(emitted("v0.9.0", published(
+            components_v080(), **{"common.v1.X": {}}))), encoding="utf-8")
+        tool("--stage-next", emitted_v090)
+        repo.release("v1.4.0", repo.commit("stage v0.9.0"))
+        tool("--drop-set", "next")
+        abandon = repo.commit("abandon v0.9.0")
+        repo.release("v1.5.0", abandon)
+        repo.git("revert", "--no-edit", close)
+        p = repo.verify("--base-from-event", env=push_to_main(tmp, abandon, repo.git("rev-parse", "HEAD")))
+        expect(p.returncode == 0 and "(v1.2.0) carried previous v0.7.0" in p.stdout,
+               f"a close reverted after a stage was abandoned still reopens: {p.stdout}{p.stderr}")
+
+        # A promote reverted on a branch cut from the grace release. v1.3.0 is newer but not in it.
+        repo.git("switch", "-q", "-c", "demote", "v1.2.0")
+        repo.git("revert", "--no-edit", promote)
+        env = event_env(tmp, "pull_request", {"pull_request": {"base": {"sha": promote}}})
+        p = repo.verify("--base-from-event", env=env)
+        expect(p.returncode == 0 and "demoted current v0.8.0 back to next beside v0.7.0" in p.stdout
+               and "the last release v1.2.0 this ref contains (the newest release, v1.5.0, is not in it)" in p.stdout,
+               f"a reverted promote passes: {p.stdout}{p.stderr}")
+
+
+def test_a_projection_replaced_in_place_cannot_be_reopened_from_history():
+    # Before windows existed every regeneration replaced current in place. The real history has
+    # release v1.15.3 on contracts v0.4.0 and later releases on v0.7.0, with no release between
+    # them carrying a grace set. Copying v1.15.3's current in as `previous` is not a rollback of a
+    # close, however genuinely current it once was.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        repo = ControlsRepo(tmp / "ci-workflows", V070, floors("v0.7.0"))
+        repo.release("v1.0.0")
+        repo.write(V080, floors("v0.7.0"))
+        flag_day = repo.commit("regenerate in place, as before windows")
+        repo.release("v1.1.0", flag_day)
+        repo.write(grace_of(V080, V070), floors("v0.7.0"))
+        p = repo.verify("--base-from-event", env=push_to_main(tmp, flag_day, repo.commit("reopen v0.7.0")))
+        expect(p.returncode == 1 and "no release since v0.8.0 became current carried a previous set" in p.stdout,
+               f"a set that was current in an old release is not reopened without a grace release: {p.stdout}{p.stderr}")
+
+
+def test_release_yaml_holds_the_release_against_the_tag_it_releases_from():
+    # CI is not a required check on main, so this is the binding gate: nothing reaches @v1 unless
+    # the delta from the last release makes one window step and does not silently lower the floor.
+    wf = m.yaml.safe_load((HERE.parent / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8"))
+    steps = wf["jobs"]["release"]["steps"]
+
+    def index(fragment: str) -> int:
+        found = [i for i, s in enumerate(steps) if fragment in str(s.get("run", ""))]
+        return found[0] if found else -1
+
+    gate = index("scripts/check-api-contract.py --verify-floor controls/module-floors.yaml --base \"${PREV}\"")
+    tag = index("git push --force origin v1")
+    expect(0 <= gate < tag, f"release.yaml must run the transition check before it moves v1: gate={gate} tag={tag}")
+    if gate >= 0:
+        step = steps[gate]
+        expect(step.get("env", {}).get("PREV") == "${{ steps.version.outputs.previous }}"
+               and step.get("if") == "steps.version.outputs.release == 'true'",
+               f"the gate holds the release against the tag it bumps from: {step}")
+        expect(any("setup-python" in str(s.get("uses", "")) for s in steps[:gate]),
+               "the runner's system Python refuses pip installs (PEP 668); set up Python before the gate")
 
 
 def test_the_stale_vintage_mutation_cannot_collide_with_an_accepted_set():
@@ -783,7 +1051,8 @@ def main() -> int:
     print(f"api-contract API-0007 reference: OK ({len(tests)} test function(s)) - one whole "
           "accepted set passes, a mix fails naming both, single-set files read as before, the "
           "floor is never above current, a window closes on the emitter's bytes, and against "
-          "the base the artifact moves one step and the floor never silently falls")
+          "the last release the artifact moves one step (a promote or close may be reverted), "
+          "the floor never silently falls, and release.yaml holds @v1 to the same rule")
     return 0
 
 

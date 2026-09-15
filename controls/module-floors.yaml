@@ -55,10 +55,11 @@
 # API-0007 in controls/api-contract.yaml is the paired control: this file makes a service
 # depend on a current contract module, API-0007 makes it actually publish the current
 # components. The platform-contracts-go floor must never sit above that artifact's current set
-# (so never on a staged `next`; README, "Moving the reference"), and against the base commit it
+# (so never on a staged `next`; README, "Moving the reference"), and against the last release it
 # only rises: a deliberate rollback of a raise is declared beside `min:` as
 # `lowered_from: <the floor being lowered>` in the same change. `check-api-contract.py
-# --verify-floor --base-from-event` enforces both in this repository's CI.
+# --verify-floor` enforces both, in this repository's CI (--base-from-event) and in release.yaml
+# before @v1 moves (--base <previous release tag>).
 
 version: 1
 domain: module-floors

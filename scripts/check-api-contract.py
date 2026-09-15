@@ -81,10 +81,15 @@ BASELINE_COMMENT = ("Frozen debt for this service, co-owned by three gates that 
 # The top-level `components`/`source` pair is the CURRENT set. While the projection moves
 # to a new vintage, the file may carry ONE more accepted set beside it, under `next`
 # (staged, newer than current) or `previous` (just promoted away from, older). Both are
-# written by --stage-next / --promote-next / --drop-set from emitter output, and this
-# repository's CI holds every change to the file against its base commit (--verify-floor
-# --base), so a set cannot be added, replaced or reordered by hand. A file with neither is
-# exactly what the emitter prints, and means what it always meant: one vintage, one reference.
+# written by --stage-next / --promote-next / --drop-set from emitter output, and both this
+# repository's CI and release.yaml hold the file against the last release (--verify-floor
+# --base-from-event, --base <release tag>), so a set cannot be added, replaced or reordered by
+# hand and still reach @v1. A file with neither is exactly what the emitter prints, and means
+# what it always meant: one vintage, one reference.
+#
+# The checker trusts that a set's components ARE emitter output for the source it names: it
+# checks shape, order and history, not provenance. Review a staged set by re-running the
+# emitter at the recorded pin (README, "Moving the reference").
 #
 # A vintage is a PAIR. platform-contracts-go carries the messages, but platform-shared-go
 # carries the projection rules (protoschema, commonv1policy), so one contracts release
@@ -98,7 +103,8 @@ CONTRACTS_MODULE = "github.com/coderaxis/platform-contracts-go"
 PROJECTOR_MODULE = "github.com/coderaxis/platform-shared-go"
 CURRENT_SET = "current"
 EXTRA_SET_ROLES = ("next", "previous")
-REFERENCE_KEYS = {"_comment", "components", "source", *EXTRA_SET_ROLES}
+SET_KEYS = {"_comment", "components", "source"}
+REFERENCE_KEYS = {*SET_KEYS, *EXTRA_SET_ROLES}
 STABLE_VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 _canonical_cache: dict = {}
 
@@ -172,6 +178,10 @@ def parse_reference(doc) -> tuple:
     def one(role: str, body) -> tuple:
         if not isinstance(body, dict):
             return None, f"{role} set is not an object"
+        if role != CURRENT_SET and set(body) - SET_KEYS:
+            # The same reason as the top level: `componets` must not read as an empty set.
+            return None, (f"{role} set carries unknown member(s) {sorted(set(body) - SET_KEYS)}; "
+                          f"a set carries only {sorted(SET_KEYS)}")
         comps = body.get("components")
         if not isinstance(comps, dict) or not comps:
             return None, (f"{role} set has no components, so every spec would match it and "
@@ -1790,7 +1800,7 @@ def floor_problems(floors_doc, sets: list) -> list:
     equal, which is the rule this check had before windows existed.
 
     What this cannot see is history: a floor lowered to a stale value is still "not above
-    current". floor_transition_problems holds that against the base commit.
+    current". floor_transition_problems holds that against the last release.
     """
     floor = _contracts_floor(floors_doc)
     if floor is None:
@@ -1825,25 +1835,39 @@ def _state(sets) -> str:
     return "{" + ", ".join(s.label for s in sets) + "}"
 
 
-def transition_problems(base_sets, head_sets) -> tuple:
-    """(problems, summary) for the change from the base commit's accepted sets to the head's.
+def transition_problems(base_sets, head_sets, closed_previous=None) -> tuple:
+    """(problems, summary) for the change from the base's accepted sets to the head's.
 
-    parse_reference judges a file on its own, so it accepts any `previous` older than current,
-    whether or not the fleet was ever measured against it. Only the base commit knows that.
-    A change may make exactly ONE window step, each of which the checker's own flags produce:
+    The base is the last release (resolve_event_base), because that is what @v1 consumers run
+    and what one release carries them from. parse_reference judges a file on its own, so it
+    accepts any `previous` older than current, whether or not the fleet was ever measured
+    against it; only history knows that. A change may make exactly ONE window step:
 
-      stage     {current}          -> {current, next}        --stage-next
-      abandon   {current, next}    -> {current}              --drop-set next
-      promote   {current, next}    -> {next as current, current as previous}   --promote-next
-      close     {current, previous} -> {current}             --drop-set previous
+      stage     {current}           -> {current, next}        --stage-next
+      abandon   {current, next}     -> {current}              --drop-set next
+      promote   {current, next}     -> {next as current, current as previous}   --promote-next
+      close     {current, previous} -> {current}              --drop-set previous
       relabel   same roles, byte-identical components, provenance not moving backwards
+      demote    {current, previous} -> {previous as current, current as next}   git revert of a promote
+      reopen    {current}           -> {current, previous}    git revert of a close
 
-    Anything else fails. In particular: a `previous` that was not the current set on the base
-    (a forged grace set, which would readmit an old projection); replacing current in place
-    (regenerating the artifact over itself - a flag day for every spec, and during a window it
-    also discards `next`); and two steps in one change, such as stage then promote, which would
-    promote a vintage no service had the chance to adopt while it was still `next`. One step
-    per change also means each step reaches the fleet through @v1 before the next one lands.
+    The two rollbacks are safe without a declaration. A demote accepts exactly the sets the base
+    did, so no spec changes verdict; only the floor ceiling falls, and floor_problems and
+    floor_transition_problems judge that. A reopen readmits only `closed_previous`: the
+    `previous` set the last release before the close still carried beside this same current
+    (see previous_before_close) - a projection the fleet ran as current until it was promoted
+    away from, and exactly what the close dropped. Releases rather than commits, because commits
+    between two releases never reached the fleet and a merge can carry any intermediate state.
+    A current that replaced its predecessor in place, as every regeneration did before windows
+    existed, left no grace set in any release, so nothing older can be reopened.
+
+    Anything else fails. In particular: a `previous` that was neither current on the base nor
+    `closed_previous` (a forged grace set, which would readmit an old projection); replacing
+    current in place (regenerating the artifact over itself - a flag day for every spec, and
+    during a window it also discards `next`); and two steps in one change, such as stage then
+    promote, which would promote a vintage no service had the chance to adopt while it was still
+    `next`. Because the base is the last release, a step that has landed on main but is not
+    released yet counts toward the next change too, so a release never carries two steps.
     """
     if base_sets is None:
         return [], "the reference artifact is new in this change"
@@ -1867,6 +1891,14 @@ def transition_problems(base_sets, head_sets) -> tuple:
         return [], f"promoted next to current {hc.vintage}; {hp.label} stays accepted"
     if roles_b == {CURRENT_SET, "previous"} and roles_h == {CURRENT_SET} and same(bc, hc):
         return [], f"dropped {bp.label}: the window is closed"
+    if (roles_b == {CURRENT_SET, "previous"} and roles_h == {CURRENT_SET, "next"}
+            and same(bp, hc) and same(bc, hn)):
+        return [], (f"demoted current {bc.vintage} back to next beside {hc.vintage}: a promote rolled "
+                    f"back, accepting the same two sets")
+    if (roles_b == {CURRENT_SET} and roles_h == {CURRENT_SET, "previous"} and same(bc, hc)
+            and same(hp, closed_previous)):
+        return [], (f"reopened {hp.label}, which the last release before the close carried beside "
+                    f"{bc.vintage}: a close rolled back")
 
     if roles_b == roles_h and all(_canonical(b[r].components) == _canonical(h[r].components)
                                   for r in roles_b):
@@ -1895,20 +1927,31 @@ def transition_problems(base_sets, head_sets) -> tuple:
 
     hints = []
     if hp is not None and not same(hp, bp) and not same(hp, bc):
-        hints.append(f"{hp.label} was not the current set on the base, so it would readmit a "
-                     f"projection the fleet was never measured against as current")
+        if roles_b == {CURRENT_SET} and same(hc, bc):
+            earlier = (f"the last release before the close carried previous {closed_previous.vintage}"
+                       if closed_previous is not None
+                       else f"no release since {bc.vintage} became current carried a previous set")
+            hints.append(f"{hp.label} is not the set a close could have dropped ({earlier}), so "
+                         f"reopening it would readmit a projection no window step left accepted; only "
+                         f"a git revert of the close that dropped a grace set reopens it")
+        else:
+            hints.append(f"{hp.label} was not the current set on the base, so it would readmit a "
+                         f"projection the fleet was never measured against as current")
     if not same(hc, bc):
         if same(hc, bn):
             if hp is None:
                 hints.append(f"next {bn.vintage} became current without keeping {bc.vintage} as "
                              f"previous, which is promote and close in one change")
         elif same(hc, bp):
-            hints.append(f"current was rolled back to previous {bp.vintage}, which fails every spec "
-                         f"already on {bc.vintage}")
+            if not any(same(bc, s) for s in (hn, hp)):
+                hints.append(f"current was rolled back to previous {bp.vintage} without keeping "
+                             f"{bc.vintage} accepted, which fails every spec already on it; a promote "
+                             f"is rolled back by demoting {bc.vintage} to next (git revert of the "
+                             f"promote)")
         elif same(hp, bc):
-            hints.append(f"{hc.vintage} became current without ever being staged as next, which is "
-                         f"stage and promote in one change: no service could adopt it before it was "
-                         f"promoted")
+            hints.append(f"{hc.vintage} became current although the base never accepted it as next, "
+                         f"which is stage and promote in one change: no service could adopt it "
+                         f"before it was promoted")
         else:
             hints.append(f"current was replaced in place ({bc.vintage} -> {hc.vintage}): regenerating "
                          f"the artifact over itself is a flag day for every spec that publishes "
@@ -1923,8 +1966,8 @@ def transition_problems(base_sets, head_sets) -> tuple:
             + (f": {'; '.join(hints)}" if hints else "")
             + ". One change may stage next (--stage-next, when no extra set is open), abandon it "
               "(--drop-set next), promote it (--promote-next), close the window (--drop-set "
-              "previous), or relabel a set whose components are unchanged (README, \"Moving the "
-              "reference\")."], ""
+              "previous), relabel a set whose components are unchanged, or roll back a promote or "
+              "a close with git revert (README, \"Moving the reference\")."], ""
 
 
 def floor_transition_problems(base_doc, head_doc) -> tuple:
@@ -1937,7 +1980,7 @@ def floor_transition_problems(base_doc, head_doc) -> tuple:
 
     A deliberate rollback of a raise is still possible, because a raise that turns the pin
     policy red across the fleet has happened here before (module-floors.yaml, "WHO A FLOOR
-    APPLIES TO") and this job gates the release that would carry the fix. It has to be declared
+    APPLIES TO") and this check gates the release that would carry the fix. It has to be declared
     in the reviewed file: `lowered_from: <the base floor>` beside `min:`, added in the same
     change, so a declaration left over from an earlier rollback cannot authorise a new one.
     """
@@ -1970,17 +2013,53 @@ def _git_out(repo: Path, *args: str) -> tuple:
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def release_tags(repo: Path, merged_into: str | None = None) -> list:
+    """This repository's release tags (vX.Y.Z, as release.yaml cuts them), newest first.
+
+    With `merged_into`, only the tags that commit contains.
+    """
+    args = ["tag", "--list", "v*"] + (["--merged", merged_into] if merged_into else [])
+    rc, out, _ = _git_out(repo, *args)
+    tags = [t for t in out.split() if STABLE_VERSION_RE.match(t)] if rc == 0 else []
+    return sorted(tags, key=_stable_version, reverse=True)
+
+
 def resolve_event_base(repo: Path, event_name: str, event: dict) -> tuple:
     """(base commit or None, reason, whether a base is required) for a GitHub event.
 
-    Not diffrange.resolve_range: that returns a pull request's MERGE BASE, which suits "which
-    paths did this branch touch", but a transition has to be judged against what main holds
-    now. A pull_request checkout is the merge commit, so the base is its first parent,
-    pull_request.base.sha - otherwise window steps other changes landed on main since the
-    branch point would be charged to this one.
+    The base is the newest release tag HEAD contains, whatever the event. release.yaml moves @v1
+    onto every commit that lands on main once CI passes for THAT commit, and nothing requires CI
+    to pass on main before the next commit lands. Held against its own before-SHA, a commit that
+    turned CI red once would be released inside the next, unrelated commit, which reads as
+    "unchanged". Held against the last release, an unreleased forbidden change stays red on every
+    later commit until it is fixed, and a step that landed but is not released yet counts
+    toward the next change, so no release carries two steps. release.yaml runs the same check
+    against the tag it releases from, so a red commit on main cannot reach @v1 either way.
+
+    A pull request is judged the same way: its checkout is the merge commit, which contains
+    main and so main's last release. That also lets a revert of an unreleased forbidden change
+    pass, where judging it against pull_request.base.sha would read the revert itself as a
+    forbidden step.
+
+    Only a clone with no release tag in HEAD's history (a test fixture) falls back to the
+    event: pull_request.base.sha, a push's before-SHA, or the merge base with the default
+    branch for a branch's first push. Not diffrange.resolve_range, whose pull request MERGE
+    BASE would charge window steps main made since the branch point to this change.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from diffrange import ensure_commit, is_ancestor  # noqa: E402 - only this path needs git
+
+    if event_name == "push" and event.get("deleted"):
+        return None, "a branch deletion changes nothing", False
+    if not release_tags(repo) and _git_out(repo, "remote", "get-url", "origin")[0] == 0:
+        _git_out(repo, "fetch", "--quiet", "--tags", "origin")  # a clone made without tags
+    contained = release_tags(repo, merged_into="HEAD")
+    if contained:
+        newest = release_tags(repo)[0]
+        why = f"the last release {contained[0]}"
+        if newest != contained[0]:
+            why += f" this ref contains (the newest release, {newest}, is not in it)"
+        return contained[0], why, True
 
     if event_name in ("pull_request", "pull_request_target"):
         base = str(((event.get("pull_request") or {}).get("base") or {}).get("sha") or "")
@@ -1990,8 +2069,6 @@ def resolve_event_base(repo: Path, event_name: str, event: dict) -> tuple:
             return None, f"pull request base {base[:12]} is not in this clone", True
         return base, f"pull request base {base[:12]}", True
     if event_name == "push":
-        if event.get("deleted"):
-            return None, "a branch deletion changes nothing", False
         before = str(event.get("before") or "")
         if (before and set(before) != {"0"} and not event.get("created") and not event.get("forced")
                 and ensure_commit(repo, before) and is_ancestor(repo, before, "HEAD")):
@@ -2013,54 +2090,139 @@ def resolve_event_base(repo: Path, event_name: str, event: dict) -> tuple:
     return None, f"a {event_name or 'local'} run describes no change to hold against a base", False
 
 
-def _read_at(repo: Path, base: str, path: Path) -> tuple:
-    """(text or None, error or None) for `path` as the base commit held it. None text = absent."""
-    rc, top, err = _git_out(repo, "rev-parse", "--show-toplevel")
+def _in_repo(path: Path) -> tuple:
+    """(work tree root, path relative to it, error or None) for a file checked out in a git repository.
+
+    Every git call below runs from the root: a pathspec is relative to the working directory,
+    and `rev-list -- controls/x.json` run from controls/ matches nothing.
+    """
+    parent = Path(path).resolve().parent
+    rc, top, err = _git_out(parent, "rev-parse", "--show-toplevel")
     if rc != 0:
-        return None, f"{repo} is not a git repository ({err.strip()})"
+        return parent, None, f"{parent} is not a git repository ({err.strip()})"
+    root = Path(top.strip()).resolve()
     try:
-        rel = Path(path).resolve().relative_to(Path(top.strip()).resolve()).as_posix()
+        return root, Path(path).resolve().relative_to(root).as_posix(), None
     except ValueError:
-        return None, f"{path} is not inside the git repository at {top.strip()}"
+        return root, None, f"{path} is not inside the git repository at {root}"
+
+
+def _show(repo: Path, rev: str, rel: str):
+    """The file's text at `rev`, or None when that commit does not have it."""
+    if _git_out(repo, "cat-file", "-e", f"{rev}:{rel}")[0] != 0:
+        return None
+    rc, text, _ = _git_out(repo, "show", f"{rev}:{rel}")
+    return text if rc == 0 else None
+
+
+def _reference_sets(text):
+    try:
+        return parse_reference(json.loads(text))[0]
+    except json.JSONDecodeError:
+        return None
+
+
+def _floors_with_contracts_floor(text):
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+    return doc if _contracts_floor(doc) is not None else None
+
+
+def last_usable_state(path: Path, base: str, parse) -> tuple:
+    """(parsed, the commit it was read at, error) for the newest state of `path` at or before `base`
+    that `parse` accepts; (None, None, None) when its history has none.
+
+    A base where the file is missing or unusable is not a clean slate. Otherwise deleting the
+    artifact (or breaking it, or dropping the contracts floor) in one commit and adding a forged
+    one in the next would read as "new in this change", and the base could not be held against
+    at all. A release never holds an unusable pair - CI and release.yaml both refuse one - so
+    this matters for the event fallbacks, and walks back only when the base itself is unusable.
+    """
+    repo, rel, err = _in_repo(path)
+    if err:
+        return None, None, err
     if _git_out(repo, "cat-file", "-e", f"{base}^{{commit}}")[0] != 0:
-        return None, f"base {base} is not a commit in this clone"
-    if _git_out(repo, "cat-file", "-e", f"{base}:{rel}")[0] != 0:
+        return None, None, f"base {base} is not a commit in this clone"
+    # The base first, then each commit that changed the file, newest first: together those are
+    # every distinct state the file had in the base's history.
+    _, touched, _ = _git_out(repo, "rev-list", "--max-count=500", base, "--", rel)
+    for rev in [base, *touched.split()]:
+        text = _show(repo, rev, rel)
+        parsed = None if text is None else parse(text)
+        if parsed is not None:
+            return parsed, rev, None
+    return None, None, None
+
+
+def previous_before_close(path: Path, base: str, current) -> tuple:
+    """(set, release tag) for the `previous` a close dropped: the grace set of the newest release
+    at or before `base` that is not simply `current` alone; (None, None) when that release was
+    no grace state beside the same current, or when there is none.
+
+    Releases are walked newest first, skipping those that hold `current`'s components with no
+    `previous` (the closed state itself, a relabel of it, a window opened and abandoned since).
+    The first other release is the one before the close, and only a grace state there -
+    {current with these components, previous} - names something a close dropped. A current that
+    arrived by replacing its predecessor in place left no such release, so an older projection
+    cannot be readmitted by copying it from history. Releases, not commits: release.yaml releases
+    a commit only through this check, while commits between two releases - or inside a merge - can
+    hold any intermediate state and never reached @v1.
+    """
+    repo, rel, err = _in_repo(path)
+    tags = [] if err else release_tags(repo, merged_into=base)
+    if not tags:
         return None, None
-    rc, text, err = _git_out(repo, "show", f"{base}:{rel}")
-    return (text, None) if rc == 0 else (None, f"git show {base}:{rel} failed ({err.strip()})")
+    # One process resolves every release's blob; most releases share one, and only the
+    # distinct blobs are read and parsed.
+    proc = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch-check=%(objectname)"],
+                          input="".join(f"{tag}:{rel}\n" for tag in tags),
+                          capture_output=True, text=True)
+    blobs = proc.stdout.splitlines() if proc.returncode == 0 else []
+    parsed = {}
+    for tag, blob in zip(tags, blobs):
+        if blob.endswith(" missing"):
+            return None, None  # before the artifact existed
+        if blob not in parsed:
+            rc, text, _ = _git_out(repo, "cat-file", "blob", blob)
+            parsed[blob] = _reference_sets(text) if rc == 0 else None
+        sets = parsed[blob]
+        if sets is None:
+            continue
+        roles = {s.role: s for s in sets}
+        same_current = _canonical(roles[CURRENT_SET].components) == _canonical(current.components)
+        if same_current and "previous" not in roles:
+            continue
+        return (roles["previous"], tag) if same_current else (None, None)
+    return None, None
 
 
 def verify_transition(floors_path: Path, floors_doc, sets: list, base: str) -> int:
-    repo = Path(reference_path).resolve().parent
     problems = []
-    ref_text, err = _read_at(repo, base, Path(reference_path))
-    floor_text, err2 = (None, None) if err else _read_at(Path(floors_path).resolve().parent,
-                                                         base, Path(floors_path))
+    base_sets, ref_rev, err = last_usable_state(Path(reference_path), base, _reference_sets)
+    base_floors, floor_rev, err2 = ((None, None, None) if err else
+                                    last_usable_state(Path(floors_path), base, _floors_with_contracts_floor))
     if err or err2:
         print(f"::error::cannot read the base commit: {err or err2}")
         return 2
+    for name, rev in (("reference artifact", ref_rev), ("contracts floor", floor_rev)):
+        if rev is not None and rev != base:
+            print(f"::notice::{base} has no usable {name}; holding this change against its last usable "
+                  f"state, at {rev[:12]}")
 
-    base_sets = None
-    if ref_text is not None:
-        try:
-            base_sets, reason = parse_reference(json.loads(ref_text))
-        except json.JSONDecodeError as exc:
-            reason = f"is not JSON ({exc})"
-        if base_sets is None:
-            # Holding a change to a base the checker cannot read would block the fix for it.
-            print(f"::warning::the base reference artifact {reason}; its transition is not checked")
-    if ref_text is None or base_sets is not None:
-        p, summary = transition_problems(base_sets, sets)
-        problems += p
-        if summary:
-            print(f"reference artifact since {base[:12]}: {summary}")
+    closed = None
+    if (base_sets is not None and len(base_sets) == 1
+            and any(s.role == "previous" for s in sets)):
+        closed, tag = previous_before_close(Path(reference_path), base, base_sets[0])
+        if closed is not None:
+            print(f"the last release before the close ({tag}) carried previous {closed.vintage} "
+                  f"beside current {base_sets[0].vintage}")
+    p, summary = transition_problems(base_sets, sets, closed)
+    problems += p
+    if summary:
+        print(f"reference artifact since {base[:12]}: {summary}")
 
-    base_floors = None
-    if floor_text is not None:
-        try:
-            base_floors = yaml.safe_load(floor_text)
-        except yaml.YAMLError as exc:
-            print(f"::warning::the base module-floors.yaml is not YAML ({exc}); its floor is not checked")
     p, summary = floor_transition_problems(base_floors, floors_doc)
     problems += p
     if summary:
@@ -2068,6 +2230,12 @@ def verify_transition(floors_path: Path, floors_doc, sets: list, base: str) -> i
 
     for msg in problems:
         print(f"::error::{msg}")
+    repo, _, _ = _in_repo(Path(reference_path))
+    if problems and base in release_tags(repo):
+        print(f"::notice::{base} is the last release, and every change since it counts toward this "
+              f"one, because one release carries them all to @v1. If an earlier window step has "
+              f"landed but is not released yet, wait for its release (re-run CI and Release for that "
+              f"commit if they were cancelled), then re-run this job.")
     return 1 if problems else 0
 
 
@@ -2169,8 +2337,18 @@ def stage_next(emitted_path: Path) -> int:
         print(f"::error::{emitted_path} carries an accepted-set member; stage raw "
               f"emit-canonical-components output, not another reference file.")
         return 1
-    staged = dict(doc, next={"components": emitted["components"], "source": emitted.get("source")})
+    staged = dict(doc, next=_set_body(emitted))
     return _write_reference(staged, f"staged next from {emitted_path}")
+
+
+def _set_body(doc: dict) -> dict:
+    """A set as the emitter printed it: components, source and, when it printed one, _comment.
+
+    The comment travels with its set, so a promote puts the new vintage's comment on top and a
+    closed window is still byte-identical to the emitter's output after the emitter's comment
+    text changes between the two releases.
+    """
+    return {k: doc[k] for k in SET_KEYS if k in doc}
 
 
 def promote_next() -> int:
@@ -2182,9 +2360,8 @@ def promote_next() -> int:
     if "next" not in doc:
         print(f"::error::{reference_path} carries no `next` set to promote.")
         return 1
-    promoted = {k: v for k, v in doc.items() if k not in ("components", "source", "next")}
-    promoted.update(components=doc["next"]["components"], source=doc["next"].get("source"),
-                    previous={"components": doc["components"], "source": doc.get("source")})
+    promoted = {k: v for k, v in doc.items() if k not in (*SET_KEYS, "next")}
+    promoted.update(doc["next"], previous=_set_body(doc))
     return _write_reference(promoted, "promoted next to current")
 
 
@@ -2224,10 +2401,12 @@ def main(argv: list) -> int:
     base = ref.add_mutually_exclusive_group()
     base.add_argument("--base", metavar="REF",
                       help="with --verify-floor: also fail unless the artifact moved from REF by "
-                           "one window step and the floor did not fall")
+                           "one window step and the floor did not fall (release.yaml passes the "
+                           "tag it releases from)")
     base.add_argument("--base-from-event", action="store_true",
-                      help="like --base, with REF resolved from GITHUB_EVENT_NAME and "
-                           "GITHUB_EVENT_PATH (pull request base, push before-SHA); an event "
+                      help="like --base, with REF the newest release tag HEAD contains; only in a "
+                           "clone with no release tag, the event in GITHUB_EVENT_NAME and "
+                           "GITHUB_EVENT_PATH (pull request base, push before-SHA), and an event "
                            "describing no change checks only the floor rule")
     ref.add_argument("--stage-next", metavar="EMITTED",
                      help="accept EMITTED (raw emit-canonical-components output for a newer "

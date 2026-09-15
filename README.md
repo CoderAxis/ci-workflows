@@ -549,7 +549,9 @@ messages come from `platform-contracts-go`, but the rules that turn them into Op
 `platform-shared-go`. `@<tag>` resolves `platform-contracts-go` from that release's own `go.mod`
 (so `source.version` is the release a service pinning that tag gets), refuses a `go.mod` carrying
 `replace` directives, and stamps `platform-shared-go <tag>` into the binary's build info, from which
-an emitter can write `source.projector`. A checkout reports its own version as `(devel)` and silently
+an emitter can write `source.projector`. Today's emitter does not write it yet, and the `_comment` it
+prints still names `go run ./...`. Both are platform-shared-go changes, and neither needs a change
+here. A checkout reports its own version as `(devel)` and silently
 applies any `replace`, and the emitter then records the version `go.mod` requires rather than the code
 it projected. Copy the output over the artifact only when the components are unchanged (a relabel). A
 changed projection goes through a window, described next.
@@ -616,42 +618,79 @@ did, down to the wording of every message. What an extra set changes:
   reproduces. Requiring the floor to equal an accepted version would tie closing a window to a
   fleet-wide floor raise. Such a raise fails the pin policy for every module below it: on 2026-09-15,
   101 `go.mod` files pinned `platform-contracts-go` at 22 different versions, while only 11 specs
-  publish `common.v1` components. The next window could not open until that raise was done. Versions that cannot be ordered, such as an unrecorded `unknown`, must be equal.
-- **Every change is held against the commit it lands on.** On its own, a file can look well-formed
-  while carrying a hand-added `previous` or a lowered floor, and only history shows it was never
-  promoted. Against `pull_request.base.sha`, a push's before-SHA, or the merge base with `main` for a
-  branch's first push, a change may make **exactly one** of these steps:
+  publish `common.v1` components. The next window could not open until that raise was done. Versions
+  that cannot be ordered, such as an unrecorded `unknown`, must be equal.
+- **Every change is held against the last release.** On its own, a file can look well-formed while
+  carrying a hand-added `previous` or a lowered floor, and only history shows it was never promoted.
+  So the artifact and the floor are compared with the newest release tag (`vX.Y.Z`) the checked-out
+  commit contains, which is what `@v1` consumers run. Two places run that comparison. CI runs
+  `--verify-floor controls/module-floors.yaml --base-from-event` on every push and pull request.
+  `release.yaml` runs `--base <the tag it bumps from>` before it moves `@v1`. A change may make
+  **exactly one** of these steps:
 
-  | Step | Base → head | Produced by |
+  | Step | Last release → head | Produced by |
   | --- | --- | --- |
   | stage | `{current}` → `{current, next}` | `--stage-next` |
   | abandon | `{current, next}` → `{current}` | `--drop-set next` |
   | promote | `{current, next}` → `{next as current, current as previous}` | `--promote-next` |
   | close | `{current, previous}` → `{current}` | `--drop-set previous` |
   | relabel | same sets, byte-identical components, provenance not moving backwards | emitter output copied over a set whose components did not change |
+  | demote | `{current, previous}` → `{previous as current, current as next}` | `git revert` of a promote |
+  | reopen | `{current}` → `{current, previous}`, where `previous` is the grace set the last release before the close carried beside this current | `git revert` of a close |
 
-  Everything else fails and names what it saw. That covers a `previous` that was not current on the
-  base, current replaced in place (during a window that would also discard `next`), current rolled
-  back, and two steps in one change such as stage-then-promote. The one-step rule guarantees that
-  each step reaches the fleet through `@v1` before the next one lands. The `platform-contracts-go`
-  floor may rise or stay. It falls only when the same change declares the rollback beside `min:` in
-  the reviewed file, as `lowered_from: <the floor being lowered>`. A raise that turned the pin policy
-  red across the fleet has happened before (module-floors.yaml, "WHO A FLOOR APPLIES TO"), and this
-  job gates the release that would carry the rollback, so a rollback has to be possible, but never
-  silently. A schedule or dispatch run describes no change, so only the floor rule applies there.
+  Everything else fails and names what it saw. That covers a `previous` that was neither current in
+  the last release nor the set a close dropped, current replaced in place (during a window that would
+  also discard `next`), current rolled back without keeping the promoted set, and two steps in one
+  change such as stage-then-promote. The two rollbacks need no declaration. A demote accepts exactly
+  the sets the release did. A reopen readmits only what a close dropped, as a release carried it,
+  and releases, not commits, are what count: commits between two releases never reached the fleet.
+  A projection that was replaced in place, as every regeneration was before windows existed, left
+  no grace release. It cannot be copied back in from history: release v1.15.3 was on contracts
+  v0.4.0, and it stays out. The `platform-contracts-go` floor may rise or stay. It falls only when
+  the same change declares the rollback beside `min:` in the reviewed file, as `lowered_from: <the
+  floor being lowered>`. A raise that turned the pin policy red across the fleet has happened before
+  (module-floors.yaml, "WHO A FLOOR APPLIES TO"), and a rollback has to be releasable, but never
+  silently.
+
+  Why the last release and not the commit a change lands on: `api-contract` is not a required check
+  on `main` (the ruleset only forbids force pushes and deletion), and `release.yaml` releases a commit
+  once CI passes for *that* commit. Held against its before-SHA, a forbidden change that turned CI red
+  once would be released inside the next, unrelated commit, which reads as "unchanged". Held against
+  the last release, it stays red on every later commit until it is reverted, and `release.yaml`
+  refuses to move `@v1` over it either way. The same rule makes each step reach the fleet before the
+  next one can be released. A step that has landed but is not released yet counts toward the next
+  change, so a promote merged right behind its stage stays red. Wait for the stage's release, then
+  re-run CI and Release for the promote commit. A fast second merge can cancel the first commit's CI
+  run (`cancel-in-progress`), in which case re-run that commit's CI and Release first. Only a clone
+  with no release tag in its history, such as a test fixture, falls back to the event:
+  `pull_request.base.sha`, a push's before-SHA, or the merge base with `main`. A base that lacks a
+  usable artifact or floor is held against the last commit before it that had one, never treated as
+  new. A schedule or dispatch run in such a clone describes no change, so only the floor rule applies
+  there.
 - **Output is canonical.** `--stage-next`, `--promote-next` and `--drop-set` each validate their
-  result before writing it, byte-identical to the emitter's canonical JSON. A window that opens,
-  promotes and closes leaves exactly the bytes the emitter prints for the new vintage.
+  result before writing it, byte-identical to the emitter's canonical JSON. Each set keeps the
+  emitter's `_comment` for its own vintage, so a window that opens, promotes and closes leaves exactly
+  the bytes the emitter prints for the new vintage, even when the comment text changed between the two
+  releases. `git revert` of any step restores the bytes before it.
+- **A staged set is trusted on review.** The checker verifies a set's shape, its order against current,
+  and its history. It does not verify that the components are really what the emitter prints for the
+  `source` the set names, and the emitter does not record `source.projector` yet. A hand-edited
+  `next` labelled with a newer version would pass here, and then fail every service regenerated from
+  the real pin. So a reviewer of a stage commit re-runs step 1's emitter command at the tag the author
+  names and compares the staged set with its output. This must print nothing:
+  `diff <(jq -S '.next | {components, source}' controls/common-v1-components.json) <(jq -S
+  '{components, source}' /tmp/common-v1-next.json)`.
 
-Each step below is one reviewed commit to this repository. `release.yaml` moves `@v1` onto every
-commit that lands on main, so each step reaches the fleet within minutes:
+Each step below is one reviewed commit to this repository. `release.yaml` moves `@v1` onto a commit
+that lands on main once CI passes for it and the step check above holds against the previous release,
+so each step reaches the fleet within minutes. Land the next step only after that release is out:
 
 | Step | Command (in this repository unless noted) | Fleet effect |
 | --- | --- | --- |
 | 1. Add next | Tag `platform-contracts-go` vM, then tag a `platform-shared-go` vN whose `go.mod` requires vM. Build the emitter at vN from outside any module (`go run github.com/coderaxis/platform-shared-go/platform/openapicontract/commonv1policy/cmd/emit-canonical-components@vN > /tmp/common-v1-next.json`). Then, here: `python3 scripts/check-api-contract.py --stage-next /tmp/common-v1-next.json`. Leave the floor where it is. | Nothing goes red. Every service keeps passing on current and may now pass on next. |
 | 2. Repos bump one by one | In each service, in **one** PR: bump `platform-contracts-go` to vM **and** `platform-shared-go` to vN (the exact pair next was staged from), regenerate `docs/openapi.json`, then push. API-0007 reports `match the next vM proto projection`. A `bump-module-pin` PR that moves only one of the two modules projects a third shape. If the projection change lives in the module it did not move, API-0007 fails that PR, so fold the two bumps together. | A spec on neither set, or on a mix of both, fails and names both sets. Track progress with `python3 scripts/check-api-contract.py <service roots…> --format json` and read each API-0007 `evidence`. |
 | 3. Promote next to current | When no service still reports `current`: `python3 scripts/check-api-contract.py --promote-next`. | Still nothing goes red: the old set stays accepted as `previous`. |
-| 4. Close | `python3 scripts/check-api-contract.py --drop-set previous`, then `--verify-floor controls/module-floors.yaml --base origin/main`. | The artifact is byte-identical to the emitter's output for the new vintage. This is the contract step: a service still publishing the old set now fails API-0007. The floor does not have to move, and a floor below the new current stays valid. |
+| 4. Close | `python3 scripts/check-api-contract.py --drop-set previous`, then `--verify-floor controls/module-floors.yaml --base-from-event`, which holds the working tree against the last release as CI will. | The artifact is byte-identical to the emitter's output for the new vintage. This is the contract step: a service still publishing the old set now fails API-0007. The floor does not have to move, and a floor below the new current stays valid. |
 
 Raising the `platform-contracts-go` floor is a separate decision, with its own fleet effect: every
 module pinned below the new floor fails the pin policy, strictly on preprod/prod and on the consumer
@@ -661,9 +700,11 @@ above current.
 
 To abandon a window before step 3 (for example, the new projection turns out to be wrong), run
 `python3 scripts/check-api-contract.py --drop-set next`. That restores the previous bytes exactly.
-A second window cannot open while `next` or `previous` is present, so the fleet never accepts more
-than two vintages at once. Closing a window never waits on the fleet's pins, so the next one can
-open right after step 4.
+To roll back step 3 or step 4 after it was released (a straggler outside the known publishers went
+red, say), `git revert` that commit: a reverted promote is a demote and a reverted close is a reopen,
+and both pass. A second window cannot open while `next` or `previous` is present, so the fleet never
+accepts more than two vintages at once. Closing a window never waits on the fleet's pins, so the
+next one can open right after step 4.
 
 ### Control catalog (policy-as-code)
 
