@@ -134,11 +134,21 @@ runs:
         GOWORK=off go mod tidy
         GOWORK=off go build ./...
 
-    # A core release can change request DTOs or the operation registry, so the committed spec can
-    # be stale the moment the pin moves. The generator lives IN the bumped module, so running it
-    # regenerates the spec deterministically from the version now pinned and the drift heals
-    # inside this PR instead of surfacing later as a failed deploy. Absent in older module
-    # versions, hence the tolerated failure.
+    # A module release can change the DTOs, operation registry or canonical common.v1 components a
+    # consumer's spec is generated from, so the committed spec can be stale the moment the pin
+    # moves. Each spec-publishing consumer owns its generator behind `make openapi-contract`: some
+    # run a cmd in their own tree (org-bff, platform-bff, realtime-gateway, ai, platform-identity),
+    # auth-service runs auth-core's. Running that target after the pin change regenerates the spec
+    # from the graph now pinned, add-paths commits it, and the drift heals inside this PR instead
+    # of surfacing later as a red main (OPENAPI_DRIFT_BLOCKING) or a deploy with a stale spec.
+    #
+    # This step used to `go run ${MODULE}/adapters/inbound/http/openapi/cmd/openapi-contract`. That
+    # path exists only in auth-core and user-core, so for every other module - platform-shared-go
+    # and platform-contracts-go included, which are the releases that move the canonical
+    # components - the step no-oped behind its own notice and a pin-only PR skipped the spec.
+    #
+    # Tolerated failure, as before: a consumer whose generator is broken still gets its bump PR,
+    # and the contract gates below and in its own CI still judge the committed spec.
     - name: Regenerate OpenAPI contract from the bumped module
       if: steps.guard.outputs.skip != 'true'
       continue-on-error: true
@@ -146,15 +156,18 @@ runs:
       working-directory: ${{ inputs.target-path }}
       env:
         GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+        GONOSUMDB: github.com/coderaxis/*
         MODULE: ${{ inputs.module }}
         VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        gen="${MODULE}/adapters/inbound/http/openapi/cmd/openapi-contract"
-        if [[ -f docs/openapi.json ]] && GOWORK=off go run "${gen}" --spec docs/openapi.json; then
-          echo "contract regenerated from ${MODULE} ${VERSION}"
+        # `openapi-contract:` exactly, so a Makefile carrying only `openapi-contract-check:` does
+        # not match. GOWORK=off so the spec is a function of go.mod, which is what the PR commits.
+        if [[ -f docs/openapi.json && -f Makefile ]] && grep -qE '^openapi-contract:' Makefile; then
+          GOWORK=off make openapi-contract
+          echo "contract regenerated against ${MODULE} ${VERSION}"
         else
-          echo "::notice::no contract generator in ${MODULE} ${VERSION}; the contract gate still applies"
+          echo "::notice::no docs/openapi.json with an openapi-contract make target; the contract gate still applies"
         fi
 
     - name: Test against the new pin
