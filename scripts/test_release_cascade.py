@@ -275,6 +275,111 @@ def test_check_accepts_a_plain_floor_mapping() -> None:
           bool(errors), True)
 
 
+BUMP_ACTION = HERE.parent / "bump-module-pin" / "action.yaml"
+REGEN_STEP = "Regenerate OpenAPI contract from the bumped module"
+
+
+def bump_steps() -> list:
+    import yaml  # the release-cascade job installs PyYAML; the pin checker needs it too
+
+    return yaml.safe_load(BUMP_ACTION.read_text(encoding="utf-8"))["runs"]["steps"]
+
+
+def run_regen_step(tree: pathlib.Path) -> subprocess.CompletedProcess:
+    """Run the action's own regenerate script, exactly as written, inside a fixture consumer."""
+    step = next(s for s in bump_steps() if s.get("name") == REGEN_STEP)
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tree),
+           "MODULE": "github.com/coderaxis/platform-shared-go", "VERSION": "v1.60.0",
+           "GOWORK": "/somewhere/go.work"}
+    return subprocess.run(["bash", "-c", step["run"]], cwd=tree, env=env,
+                          capture_output=True, text=True)
+
+
+def consumer(spec: bool, makefile: str | None) -> pathlib.Path:
+    tree = pathlib.Path(tempfile.mkdtemp())
+    if spec:
+        (tree / "docs").mkdir()
+        (tree / "docs" / "openapi.json").write_text('{"stale": true}\n', encoding="utf-8")
+    if makefile is not None:
+        (tree / "Makefile").write_text(makefile, encoding="utf-8")
+    return tree
+
+
+# Recipes are tab-indented. The target records the GOWORK it ran under, so the test can prove
+# the regeneration resolved go.mod rather than a workspace.
+GENERATING_MAKEFILE = (
+    ".PHONY: openapi-contract openapi-contract-check\n"
+    "openapi-contract: ## Regenerate docs/openapi.json\n"
+    "\t@printf '%s' \"$$GOWORK\" > gowork.seen\n"
+    "\t@printf '{\"regenerated\": true}\\n' > docs/openapi.json\n"
+    "\n"
+    "openapi-contract-check:\n"
+    "\t@echo check\n"
+)
+CHECK_ONLY_MAKEFILE = (
+    "openapi-contract-check:\n"
+    "\t@printf '{\"wrong target\": true}\\n' > docs/openapi.json\n"
+)
+FAILING_MAKEFILE = "openapi-contract:\n\t@exit 3\n"
+
+
+def test_bump_regenerates_openapi_contract() -> None:
+    """The bump PR regenerates a spec-publishing consumer's docs/openapi.json.
+
+    The step used to `go run ${MODULE}/adapters/inbound/http/openapi/cmd/openapi-contract`, a path
+    platform-shared-go never had, so every shared-go fan-out opened pin-only PRs over stale specs
+    while the step printed a notice and reported success. A step that silently does nothing is
+    the failure this suite exists to catch, so each branch is exercised by running the action's
+    own script rather than a copy of it.
+    """
+    print("\nbump-module-pin: OpenAPI regeneration runs the consumer's make target")
+    names = [s.get("name") for s in bump_steps()]
+    step = next(s for s in bump_steps() if s.get("name") == REGEN_STEP)
+    check("regeneration still tolerates a broken generator (continue-on-error)",
+          step.get("continue-on-error"), True)
+    check("regeneration runs after the pin moves and before the tests judge the tree",
+          names.index("Bump the pin") < names.index(REGEN_STEP) < names.index("Test against the new pin"),
+          True)
+    check("the non-existent in-module generator path is gone",
+          "adapters/inbound/http/openapi/cmd/openapi-contract" in step["run"], False)
+
+    tree = consumer(spec=True, makefile=GENERATING_MAKEFILE)
+    proc = run_regen_step(tree)
+    check("spec + openapi-contract target: step succeeds", proc.returncode, 0)
+    check("spec + openapi-contract target: docs/openapi.json is regenerated",
+          (tree / "docs" / "openapi.json").read_text(encoding="utf-8"), '{"regenerated": true}\n')
+    seen = tree / "gowork.seen"
+    check("spec + openapi-contract target: make runs with GOWORK=off",
+          seen.read_text(encoding="utf-8") if seen.exists() else None, "off")
+    check("spec + openapi-contract target: the log names module and version",
+          "contract regenerated against github.com/coderaxis/platform-shared-go v1.60.0" in proc.stdout,
+          True)
+
+    tree = consumer(spec=True, makefile=CHECK_ONLY_MAKEFILE)
+    proc = run_regen_step(tree)
+    check("only openapi-contract-check: the prefix does not match, nothing runs",
+          ((tree / "docs" / "openapi.json").read_text(encoding="utf-8"), proc.returncode),
+          ('{"stale": true}\n', 0))
+    check("only openapi-contract-check: a notice says the gate still applies",
+          "::notice::" in proc.stdout, True)
+
+    tree = consumer(spec=True, makefile=None)
+    proc = run_regen_step(tree)
+    check("spec without a Makefile: skipped with a notice",
+          (proc.returncode, "::notice::" in proc.stdout), (0, True))
+
+    tree = consumer(spec=False, makefile=GENERATING_MAKEFILE.replace("docs/openapi.json", "spec.out"))
+    proc = run_regen_step(tree)
+    check("target without docs/openapi.json (a library): make is not run",
+          (proc.returncode, (tree / "gowork.seen").exists(), (tree / "spec.out").exists()),
+          (0, False, False))
+
+    tree = consumer(spec=True, makefile=FAILING_MAKEFILE)
+    proc = run_regen_step(tree)
+    check("a failing generator fails the step (continue-on-error keeps the bump going)",
+          proc.returncode != 0, True)
+
+
 def main() -> int:
     print("release cascade: dependency DAG derivation")
     test_fan_out_downward()
@@ -282,6 +387,7 @@ def main() -> int:
     test_cycle_is_withheld()
     test_pins_upward()
     test_pin_policy()
+    test_bump_regenerates_openapi_contract()
 
     print()
     if failures:
