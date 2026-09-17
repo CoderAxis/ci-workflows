@@ -199,6 +199,14 @@ runs:
       working-directory: ${{ inputs.target-path }}
       env:
         GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+        # The same blanking as "Test against the new pin", and for the same reason: contract tests
+        # build the consumer's router, and envutil.IsDeployed() reads the runner pod's
+        # KUBERNETES_SERVICE_HOST as a deployment, so the router refuses to start without
+        # SERVICE_TOKEN_SECRET. Only the unit step had it, so every consumer with a contract
+        # router passed its units and then failed here (platform-shared-go v1.60.0 fan-out,
+        # 2026-09-17: customer, order, product, payment, compliance and media services).
+        # service-ci.yaml's "Contract tests when present" and openapi-contract.yaml carry it too.
+        KUBERNETES_SERVICE_HOST: ""
       run: |
         set -euo pipefail
         # Imports the BUMPED module and validates the committed spec against it, so DTO or
