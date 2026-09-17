@@ -380,6 +380,106 @@ def test_bump_regenerates_openapi_contract() -> None:
           proc.returncode != 0, True)
 
 
+# A stand-in for `go` that behaves like a consumer whose tests boot a router: it applies the rule
+# platform-shared-go's envutil.IsDeployed() applies (KUBERNETES_SERVICE_HOST non-empty, or an
+# ENVIRONMENT other than local/test) and fails the way ginmiddleware.ServiceAuthMiddleware does
+# when there is no SERVICE_TOKEN_SECRET. `go list` prints one package so the unit step has work.
+FAKE_GO = r"""#!/usr/bin/env bash
+if [[ "$1" == "list" ]]; then echo "example.com/consumer/internal/app"; exit 0; fi
+echo "$*" >> "${GO_CALLS}"
+env_=$(printf '%s' "${ENVIRONMENT:-}" | tr '[:upper:]' '[:lower:]')
+if [[ -n "${KUBERNETES_SERVICE_HOST:-}" ]] || [[ -n "${env_}" && "${env_}" != "local" && "${env_}" != "test" ]]; then
+  if [[ -z "${SERVICE_TOKEN_SECRET:-}" ]]; then
+    echo "ginmiddleware: consumer-service is deployed and has no SERVICE_TOKEN_SECRET; refusing to serve unauthenticated"
+    exit 1
+  fi
+fi
+exit 0
+"""
+
+# What an ARC runner pod's environment looks like to a step: the kubelet injects these into every
+# container, including the runner's.
+RUNNER_POD_ENV = {"KUBERNETES_SERVICE_HOST": "172.20.0.1", "KUBERNETES_SERVICE_PORT": "443",
+                  "KUBERNETES_PORT": "tcp://172.20.0.1:443"}
+
+
+def run_bump_step(name: str, tree: pathlib.Path, runner_env: dict, apply_step_env: bool = True):
+    """Run a bump-module-pin step's script as the runner would: pod env, then the step's env on top.
+
+    A step `env:` value replaces the inherited variable, and "" sets it to empty rather than
+    leaving the pod's value, which is what makes the blanking work. Expression values cannot be
+    evaluated here and are replaced by a placeholder; the variables this test cares about are
+    literals.
+    """
+    step = next(s for s in bump_steps() if s.get("name") == name)
+    bindir = tree / ".fakebin"
+    bindir.mkdir(exist_ok=True)
+    fake = bindir / "go"
+    fake.write_text(FAKE_GO, encoding="utf-8")
+    fake.chmod(0o755)
+    env = {"PATH": f"{bindir}:/usr/bin:/bin:/usr/local/bin", "HOME": str(tree),
+           "GO_CALLS": str(tree / "go.calls")}
+    env.update(runner_env)
+    if apply_step_env:
+        for key, value in (step.get("env") or {}).items():
+            env[key] = "placeholder" if "${{" in str(value) else str(value)
+    return step, subprocess.run(["bash", "-c", step["run"]], cwd=tree, env=env,
+                                capture_output=True, text=True)
+
+
+def contract_consumer() -> pathlib.Path:
+    tree = pathlib.Path(tempfile.mkdtemp())
+    (tree / "tests" / "contracts").mkdir(parents=True)
+    return tree
+
+
+def test_bump_test_steps_are_not_a_deployment() -> None:
+    """Every step that runs the consumer's Go tests blanks the pod's deployment signal.
+
+    Only "Test against the new pin" carried KUBERNETES_SERVICE_HOST: "", so on the ARC pool every
+    consumer with a contract router passed its unit tests and then failed the contract gate with
+    "is deployed and has no SERVICE_TOKEN_SECRET" (platform-shared-go v1.60.0, run 35189576191).
+    The assertion is over every `go test` step, so a gate added later inherits the requirement.
+    """
+    print("\nbump-module-pin: a runner pod is not a deployment for the tests it runs")
+
+    test_steps = [s for s in bump_steps() if "go test" in (s.get("run") or "")]
+    check("the unit and contract steps are the ones that run go test",
+          sorted(s["name"] for s in test_steps), ["Contract gate", "Test against the new pin"])
+    for step in test_steps:
+        env = step.get("env") or {}
+        check(f"{step['name']}: KUBERNETES_SERVICE_HOST is blanked in the step env",
+              ("KUBERNETES_SERVICE_HOST" in env, env.get("KUBERNETES_SERVICE_HOST")), (True, ""))
+        check(f"{step['name']}: ENVIRONMENT is not set to a deployed value by the step",
+              str(env.get("ENVIRONMENT", "")).lower() in ("", "local", "test"), True)
+
+    # The control: on pod env with the step env withheld, the fake consumer must fail, or the
+    # passes below prove nothing about the blanking.
+    tree = contract_consumer()
+    _, proc = run_bump_step("Contract gate", tree, RUNNER_POD_ENV, apply_step_env=False)
+    check("control: without the step env, a router test on a runner pod fails as deployed",
+          (proc.returncode != 0, "is deployed and has no SERVICE_TOKEN_SECRET" in proc.stdout),
+          (True, True))
+
+    for name in ("Test against the new pin", "Contract gate"):
+        tree = contract_consumer()
+        _, proc = run_bump_step(name, tree, RUNNER_POD_ENV)
+        calls = (tree / "go.calls").read_text(encoding="utf-8") if (tree / "go.calls").exists() else ""
+        check(f"{name}: on a runner pod the consumer's tests run and pass",
+              (proc.returncode, "test " in calls), (0, True))
+
+    tree = contract_consumer()
+    _, proc = run_bump_step("Contract gate", tree, RUNNER_POD_ENV)
+    check("Contract gate: it runs the contract suite, not something else",
+          "test ./tests/contracts/... -count=1" in (tree / "go.calls").read_text(encoding="utf-8"),
+          True)
+
+    # Hosted runners have no KUBERNETES_SERVICE_HOST at all; the step must behave the same.
+    tree = contract_consumer()
+    _, proc = run_bump_step("Contract gate", tree, {})
+    check("Contract gate: off-cluster (hosted runner) it passes too", proc.returncode, 0)
+
+
 def main() -> int:
     print("release cascade: dependency DAG derivation")
     test_fan_out_downward()
@@ -388,6 +488,7 @@ def main() -> int:
     test_pins_upward()
     test_pin_policy()
     test_bump_regenerates_openapi_contract()
+    test_bump_test_steps_are_not_a_deployment()
 
     print()
     if failures:
