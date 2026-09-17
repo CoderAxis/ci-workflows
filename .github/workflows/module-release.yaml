@@ -443,9 +443,18 @@ jobs:
           # both for "no such release" and for "could not reach the API", and treating those the
           # same means an API blip re-publishes a release and re-dispatches every consumer bump.
           if [[ -n "${latest}" ]] && [[ "$(git rev-parse "refs/tags/${latest}^{commit}" 2>/dev/null || true)" == "$(git rev-parse HEAD)" ]]; then
-            if gh release view "${latest}" >/dev/null 2>&1; then
+            # A DRAFT Release is not a release: `gh release view` succeeds for one, and treating
+            # that as published is what stranded v1.61.0 (tag pushed, consumers never notified).
+            draftstate="$(gh release view "${latest}" --json isDraft --jq '.isDraft' 2>/dev/null || echo missing)"
+            if [[ "${draftstate}" == "false" ]]; then
               echo "::notice::${latest} is already released at HEAD; nothing to publish"
               echo "releasable=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            if [[ "${draftstate}" == "true" ]]; then
+              echo "::notice::${latest} exists at HEAD as a DRAFT Release; finalizing it"
+              gh release edit "${latest}" --draft=false || true
+              { echo "version=${latest}"; echo "releasable=true"; echo "createtag=false"; } >> "${GITHUB_OUTPUT}"
               exit 0
             fi
             # Distinguish "absent" from "unreachable" before acting on it.
@@ -809,16 +818,18 @@ jobs:
               note: $note
             }' > provenance.module.json
 
+      # The Release is created WITHOUT files, then the artifacts are uploaded in a separate,
+      # non-fatal step. action-gh-release creates the Release as a draft, uploads, and only then
+      # publishes it: a single flaky asset upload therefore left v1.61.0 and auth-core v0.24.0 as
+      # DRAFT releases whose `release` job failed, which skipped `bump-consumers` entirely - the
+      # module was fetchable by Go while no consumer was ever notified. The artifacts are evidence,
+      # not the release itself; losing one must never cost the fan-out.
       - name: Create GitHub Release
         if: steps.ver.outputs.releasable == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.version }}
           generate_release_notes: true
-          files: |
-            sbom.spdx.json
-            sbom.cyclonedx.json
-            provenance.module.json
           body: |
             ## ${{ needs.resolve.outputs.module_path }} ${{ steps.ver.outputs.version }}
 
@@ -826,6 +837,28 @@ jobs:
             SPDX and CycloneDX SBOMs are attached.
 
             **Provenance:** ${{ steps.attest.outputs.available == 'true' && 'GitHub Attestations (SLSA predicate stored by GitHub).' || 'GitHub Attestations unavailable on user-owned private repos; `provenance.module.json` is attached. Deployable images use CodeBuild cosign/SLSA (RFC-0020).' }}
+
+      # Non-fatal by design: see the note above. Each asset is retried, and a still-failing upload
+      # is a warning, so the Release stays published and the fan-out runs.
+      - name: Attach release artifacts
+        if: steps.ver.outputs.releasable == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          set -uo pipefail
+          for f in sbom.spdx.json sbom.cyclonedx.json provenance.module.json; do
+            [[ -f "${f}" ]] || { echo "::warning::${f} was not produced; skipping"; continue; }
+            for attempt in 1 2 3; do
+              if gh release upload "${V}" "${f}" --clobber; then
+                echo "uploaded ${f}"; continue 2
+              fi
+              echo "::warning::upload of ${f} failed (attempt ${attempt}/3)"; sleep $((attempt * 5))
+            done
+            echo "::warning::${f} could not be attached to ${V}; the release stands without it"
+          done
+          exit 0
 
   # ── fan-out ───────────────────────────────────────────────────────────────────────────────
   # Unconditional by design. The only condition is "was anything released", never "is this repo
