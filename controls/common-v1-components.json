@@ -374,6 +374,386 @@
       "type": "object"
     }
   },
+  "next": {
+    "_comment": "Canonical common.v1 OpenAPI components, projected from the proto SSOT. Generated - do not edit by hand. Regenerate with `go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.",
+    "components": {
+      "common.v1.CursorPaginatedMeta": {
+        "additionalProperties": false,
+        "properties": {
+          "correlationId": {
+            "type": "string"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/common.v1.CursorPaginationMeta"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "traceId": {
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "requestId",
+          "correlationId",
+          "timestamp",
+          "pagination"
+        ],
+        "type": "object"
+      },
+      "common.v1.CursorPaginationMeta": {
+        "additionalProperties": false,
+        "properties": {
+          "hasNext": {
+            "type": "boolean"
+          },
+          "hasPrevious": {
+            "type": "boolean"
+          },
+          "maxPageSize": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "nextCursor": {
+            "type": "string"
+          },
+          "pageSize": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "policyVersion": {
+            "type": "string"
+          },
+          "previousCursor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pageSize",
+          "hasNext",
+          "hasPrevious",
+          "maxPageSize",
+          "policyVersion"
+        ],
+        "type": "object"
+      },
+      "common.v1.ErrorCode": {
+        "enum": [
+          "ERROR_CODE_UNSPECIFIED",
+          "UNAUTHORIZED",
+          "FORBIDDEN",
+          "TOKEN_EXPIRED",
+          "TOKEN_INVALID",
+          "INVALID_CREDENTIALS",
+          "ACCOUNT_LOCKED",
+          "ACCOUNT_DISABLED",
+          "INVALID_INPUT",
+          "MISSING_FIELD",
+          "INVALID_FORMAT",
+          "INVALID_EMAIL",
+          "INVALID_UUID",
+          "INVALID_DATE",
+          "METHOD_NOT_ALLOWED",
+          "NOT_ACCEPTABLE",
+          "CONTENT_TOO_LARGE",
+          "UNSUPPORTED_MEDIA_TYPE",
+          "URI_TOO_LONG",
+          "UNPROCESSABLE_ENTITY",
+          "RESOURCE_NOT_FOUND",
+          "RESOURCE_ALREADY_EXISTS",
+          "CONFLICT",
+          "OPERATION_NOT_ALLOWED",
+          "QUOTA_EXCEEDED",
+          "PRECONDITION_FAILED",
+          "TOO_MANY_REQUESTS",
+          "RESOURCE_GONE",
+          "SURFACE_SUNSET",
+          "PRECONDITION_REQUIRED",
+          "INTERNAL_ERROR",
+          "DATABASE_FAILURE",
+          "DEADLOCK_DETECTED",
+          "EXTERNAL_DEPENDENCY_FAILURE",
+          "TIMEOUT",
+          "SERVICE_UNAVAILABLE",
+          "NOT_IMPLEMENTED"
+        ],
+        "type": "string"
+      },
+      "common.v1.ErrorResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/common.v1.ProblemDetails"
+              }
+            ]
+          },
+          "meta": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/common.v1.Meta"
+              }
+            ]
+          }
+        },
+        "required": [
+          "error",
+          "meta"
+        ],
+        "type": "object"
+      },
+      "common.v1.Meta": {
+        "additionalProperties": false,
+        "properties": {
+          "correlationId": {
+            "type": "string"
+          },
+          "pagination": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/common.v1.PaginationMeta"
+              }
+            ]
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "traceId": {
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "requestId",
+          "correlationId",
+          "timestamp"
+        ],
+        "type": "object"
+      },
+      "common.v1.OffsetPaginatedMeta": {
+        "additionalProperties": false,
+        "properties": {
+          "correlationId": {
+            "type": "string"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/common.v1.OffsetPaginationMeta"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "traceId": {
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "requestId",
+          "correlationId",
+          "timestamp",
+          "pagination"
+        ],
+        "type": "object"
+      },
+      "common.v1.OffsetPaginationMeta": {
+        "additionalProperties": false,
+        "properties": {
+          "hasNext": {
+            "type": "boolean"
+          },
+          "hasPrevious": {
+            "type": "boolean"
+          },
+          "maxPageSize": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "page": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "pageSize": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "policyVersion": {
+            "type": "string"
+          },
+          "totalItems": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "totalPages": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "totalItems",
+          "page",
+          "pageSize",
+          "totalPages",
+          "hasNext",
+          "hasPrevious",
+          "maxPageSize",
+          "policyVersion"
+        ],
+        "type": "object"
+      },
+      "common.v1.PaginationMeta": {
+        "additionalProperties": false,
+        "properties": {
+          "hasNext": {
+            "type": "boolean"
+          },
+          "hasPrevious": {
+            "type": "boolean"
+          },
+          "maxPageSize": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "nextCursor": {
+            "type": "string"
+          },
+          "page": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "pageSize": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "policyVersion": {
+            "type": "string"
+          },
+          "previousCursor": {
+            "type": "string"
+          },
+          "totalItems": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "totalPages": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pageSize",
+          "hasNext",
+          "hasPrevious",
+          "maxPageSize",
+          "policyVersion"
+        ],
+        "type": "object"
+      },
+      "common.v1.ProblemDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/common.v1.ErrorCode"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "details": {},
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/common.v1.ProblemItem"
+            },
+            "type": "array"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "status": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code"
+        ],
+        "type": "object"
+      },
+      "common.v1.ProblemItem": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/common.v1.ErrorCode"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "pointer": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "common.v1.SuccessResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {},
+          "meta": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/common.v1.Meta"
+              }
+            ]
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "type": "object"
+      }
+    },
+    "source": {
+      "module": "github.com/coderaxis/platform-contracts-go",
+      "version": "v0.82.0"
+    }
+  },
   "source": {
     "module": "github.com/coderaxis/platform-contracts-go",
     "version": "v0.80.0"
