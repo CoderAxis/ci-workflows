@@ -848,7 +848,6 @@ jobs:
           V: ${{ steps.ver.outputs.version }}
         run: |
           set -uo pipefail
-          rc=0
           for f in sbom.spdx.json sbom.cyclonedx.json provenance.module.json; do
             [[ -f "${f}" ]] || { echo "::warning::${f} was not produced; skipping"; continue; }
             for attempt in 1 2 3; do
@@ -858,7 +857,6 @@ jobs:
               echo "::warning::upload of ${f} failed (attempt ${attempt}/3)"; sleep $((attempt * 5))
             done
             echo "::warning::${f} could not be attached to ${V}; the release stands without it"
-            rc=1
           done
           exit 0
 
