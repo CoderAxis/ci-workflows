@@ -81,7 +81,6 @@
         "INVALID_CREDENTIALS",
         "ACCOUNT_LOCKED",
         "ACCOUNT_DISABLED",
-        "VALIDATION_FAILED",
         "INVALID_INPUT",
         "MISSING_FIELD",
         "INVALID_FORMAT",
@@ -374,7 +373,7 @@
       "type": "object"
     }
   },
-  "next": {
+  "previous": {
     "_comment": "Canonical common.v1 OpenAPI components, projected from the proto SSOT. Generated - do not edit by hand. Regenerate with `go run ./platform/openapicontract/commonv1policy/cmd/emit-canonical-components`.",
     "components": {
       "common.v1.CursorPaginatedMeta": {
@@ -457,6 +456,7 @@
           "INVALID_CREDENTIALS",
           "ACCOUNT_LOCKED",
           "ACCOUNT_DISABLED",
+          "VALIDATION_FAILED",
           "INVALID_INPUT",
           "MISSING_FIELD",
           "INVALID_FORMAT",
@@ -751,11 +751,11 @@
     },
     "source": {
       "module": "github.com/coderaxis/platform-contracts-go",
-      "version": "v0.82.0"
+      "version": "v0.80.0"
     }
   },
   "source": {
     "module": "github.com/coderaxis/platform-contracts-go",
-    "version": "v0.80.0"
+    "version": "v0.82.0"
   }
 }
