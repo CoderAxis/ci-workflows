@@ -9,15 +9,15 @@
 # destructive statements". This catalog and its checker are that missing inspection.
 #
 # Measured 2026-09-20 by this checker in --mode baseline over all 34
-# *-core-postgres repositories, 273 findings total and reproducible with
-# `scripts/check-schema-lint.py --mode baseline --repo-root <repo>`:
-#   SCHEMA-0001    2  genuinely destructive statements (DELETE then SET NOT NULL)
-#   SCHEMA-0002   49  ADD CONSTRAINT without NOT VALID, in 12 repositories
-#   SCHEMA-0003   26  enum declarations hidden in DO blocks, in 8 repositories
-#   SCHEMA-0004  196  enumerated-shaped columns with no CHECK and no enum type, 31 repos
-# Exactly one repository is clean on all four: platform-identity-core-postgres. The
-# numbers below are that run, not
-# an estimate; re-running it is how a reviewer checks this file has not gone stale.
+# *-core-postgres repositories, 275 findings, reproducible with
+# `scripts/check-schema-lint.py --mode baseline --repo-root <repo> --format json`:
+#   SCHEMA-0001    4  destructive DDL with no expand-contract marker,   3 repositories
+#   SCHEMA-0002   49  ADD CONSTRAINT without NOT VALID,                12 repositories
+#   SCHEMA-0003   26  enum declarations hidden inside a DO block,       8 repositories
+#   SCHEMA-0004  196  enumerated columns with no CHECK and no enum,    31 repositories
+# Exactly one repository is clean on all four: platform-identity-core-postgres.
+# These are that run, not an estimate; re-running it is how a reviewer checks this
+# file has not gone stale.
 #
 # What this catalog is, and is not. It is the single source of WHICH DDL invariants
 # are enforced and WHICH reasons are sanctioned grounds for an exception. It does not
