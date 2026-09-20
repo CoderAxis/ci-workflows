@@ -14,8 +14,9 @@
 #   SCHEMA-0001    2  genuinely destructive statements (DELETE then SET NOT NULL)
 #   SCHEMA-0002   49  ADD CONSTRAINT without NOT VALID, in 12 repositories
 #   SCHEMA-0003   26  enum declarations hidden in DO blocks, in 8 repositories
-#   SCHEMA-0004  196  enumerated-shaped columns with no CHECK and no enum type
-# Exactly one repository is clean on all four. The numbers below are that run, not
+#   SCHEMA-0004  196  enumerated-shaped columns with no CHECK and no enum type, 31 repos
+# Exactly one repository is clean on all four: platform-identity-core-postgres. The
+# numbers below are that run, not
 # an estimate; re-running it is how a reviewer checks this file has not gone stale.
 #
 # What this catalog is, and is not. It is the single source of WHICH DDL invariants
@@ -316,7 +317,7 @@ controls:
     status: active
     severity: major
     # warn, not enforce, and not yet promotable. Measured 2026-09-20: 196 columns
-    # across 33 of 34 repositories fail this, and the value-set judgement is a name
+    # across 31 of 34 repositories fail this, and the value-set judgement is a name
     # heuristic that a reviewer must confirm. Enforcing a gate every repository fails
     # is how the destructive-change guard ended up declared-but-absent for a year:
     # `required: true` with nothing behind it. Promote to enforce only once a measured
@@ -330,7 +331,7 @@ controls:
       genuinely open MUST say so with a `free-form` or `provider-vocabulary` marker.
     rationale: >-
       Measured 2026-09-20 - 196 such columns fleet-wide with neither a CHECK nor an enum
-      type, in 33 of 34 repositories. Adversarial verification of the load-bearing ones
+      type, in 31 of 34 repositories. Adversarial verification of the load-bearing ones
       confirmed 84 of 100 checked, of which 19 carry a tenancy or authorization
       decision - chat_threads.channel_type grants a
       caller a thread with no participant row when the literal is 'voice' or 'sms';
