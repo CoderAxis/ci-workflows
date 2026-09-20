@@ -1,0 +1,375 @@
+# Schema-lint control catalog (declarative policy-as-code).
+#
+# The policy this encodes: the Schema Migration Standard §10 requires a
+# destructive-change guard over every migration, and schema-migration-conformance.yaml
+# lists `destructive_change_guard: true` under `required:` as a Level 3 prerequisite
+# that gates staging promotion. Both then record, in their own text, that it does not
+# exist: "STATUS 2026-08-28: TARGET, not implemented — no CI check exists yet" and
+# "no workflow or script in coderaxis/ci-workflows or inboxxhq-infra inspects DDL for
+# destructive statements". This catalog and its checker are that missing inspection.
+#
+# Measured 2026-09-20 by this checker in --mode baseline over all 34
+# *-core-postgres repositories, 286 findings, reproducible with
+# `scripts/check-schema-lint.py --mode baseline --repo-root <repo> --format json`:
+#   SCHEMA-0001    4  destructive DDL with no expand-contract marker,   3 repositories
+#   SCHEMA-0002   49  ADD CONSTRAINT without NOT VALID,                12 repositories
+#   SCHEMA-0003   26  enum declarations hidden inside a DO block,       8 repositories
+#   SCHEMA-0004  207  enumerated columns with no CHECK and no enum,    33 repositories
+# Exactly one repository is clean on all four: platform-identity-core-postgres.
+# These are that run, not an estimate; re-running it is how a reviewer checks this
+# file has not gone stale.
+#
+# What this catalog is, and is not. It is the single source of WHICH DDL invariants
+# are enforced and WHICH reasons are sanctioned grounds for an exception. It does not
+# describe detection: each control's `detector` key binds it to an implementation in
+# scripts/check-schema-lint.py, and that implementation may evolve without a change
+# here.
+#
+# Control IDs (SCHEMA-NNNN) are STABLE and permanent. Never rename or recycle an ID:
+# retire a control by setting `status`, change intent by adding a new ID.
+#
+# Schema (validated by the checker):
+#   required per control: id, title, owner, scope, status, severity, stage,
+#                         policy, rationale, remediation, detector, refs
+#   severity: critical | major | minor
+#   stage:    enforce | warn | observe
+#             enforce -> a finding fails CI
+#             warn    -> a finding is a ::warning:: and does not fail CI
+#             observe -> counted in the summary only
+#   waivable: false means no marker can silence the control.
+#
+# WHY THE DEFAULT MODE IS `diff` AND NOT `baseline`. An applied migration is
+# immutable — check-migration-immutability.py refuses any PR that edits one — so the
+# 49 NOT VALID violations and 207 unconstrained columns already on main CANNOT be
+# fixed in place by anyone. A gate that failed on them would fail every repository
+# forever for a state no developer is permitted to correct, which is how a gate gets
+# switched off. In `diff` mode the controls read only migrations this PR ADDS, where
+# there is no legacy excuse, and enforce from the first day at zero cost. `baseline`
+# mode scans everything, never fails, and exists to produce the inventory that the
+# waiver registry and the remediation backlog are built from.
+#
+# Harness exclusion note: the checker excludes its own checkout dynamically via
+# REPO_ROOT (wherever scripts/check-schema-lint.py lives). That computed path is not
+# listed in `scan.skip_dirs` here because a hardcoded name rots the moment the job is
+# renamed. See excluded_paths() in the script.
+#
+# Policy SSOT (this catalog enforces; it does not decide):
+#   ADR-0062 - Schema migration platform and compatibility contract
+#   RFC-0027 - Database schema migration governance
+#   standards/infrastructure/schema-migration-standard.md section 10
+#   standards/infrastructure/schema-migration-conformance.yaml required.destructive_change_guard
+
+version: 1
+domain: schema-lint
+policy_ssot:
+  - ADR-0062
+  - RFC-0027
+  - standards/infrastructure/schema-migration-standard.md
+  - standards/infrastructure/schema-migration-conformance.yaml
+
+# ---------------------------------------------------------------------------
+# Destructive statement vocabulary: the shapes §10 names, as the scanner sees them
+# ---------------------------------------------------------------------------
+# The standard writes the rule as "DROP/ALTER TYPE/RENAME/NOT NULL-without-default".
+# Those are English; these are the DDL forms that realise them. The list is the
+# scanner's vocabulary rather than the standard's words because a scanner matches
+# statements, and because two of the four have a safe form that must not fire:
+# DROP INDEX is not destructive to data, and SET NOT NULL accompanied by a DEFAULT in
+# the same statement rewrites nothing a reader loses.
+destructive_forms:
+  - name: drop_column
+    kind: data-loss
+    control: SCHEMA-0001
+  - name: drop_table
+    kind: data-loss
+    control: SCHEMA-0001
+  - name: drop_constraint
+    kind: invariant-loss
+    control: SCHEMA-0001
+  - name: alter_column_type
+    kind: rewrite
+    control: SCHEMA-0001
+  - name: rename
+    kind: contract-break
+    control: SCHEMA-0001
+  - name: set_not_null
+    kind: rewrite
+    control: SCHEMA-0001
+  - name: add_column_not_null_without_default
+    kind: write-break
+    control: SCHEMA-0001
+
+# ---------------------------------------------------------------------------
+# Enumerated-column shape: the name suffixes that signal a closed value set
+# ---------------------------------------------------------------------------
+# SCHEMA-0004 fires on a TEXT/VARCHAR column whose NAME matches one of these and
+# which carries no CHECK and no enum type. The list is deliberately conservative.
+# Every token here was confirmed on the 2026-09-20 fleet scan to hold a closed set in
+# at least one repository; tokens that looked enumerated but were not — `slug` on a
+# product, `content_type` carrying a MIME type — are absent, because a gate that
+# fires on free-form text is a gate that gets waived into uselessness.
+enumerated_suffixes:
+  - name: _type
+  - name: _status
+  - name: _kind
+  - name: _state
+  - name: _role
+  - name: _purpose
+  - name: _method
+  - name: _visibility
+  - name: _direction
+  - name: _severity
+  - name: _tier
+# Names that carry an enumerated SHAPE but an open SET. `_type` is in the suffix list
+# because the fleet's _type columns are overwhelmingly closed - channel_type,
+# actor_type, sender_type, provider_type all are, and chat_threads.channel_type is the
+# column an authorization predicate reads - but the MIME-carrying ones genuinely are
+# not, and a gate that demands a CHECK over every IANA media type is a gate nobody
+# keeps. Excluded by exact name rather than by dropping the suffix, so the 40-odd
+# closed _type columns stay covered.
+enumerated_exclusions:
+  - name: content_type
+  - name: mime_type
+  - name: media_type
+
+enumerated_names:
+  - name: status
+  - name: kind
+  - name: state
+  - name: role
+  - name: visibility
+  - name: direction
+  - name: severity
+  - name: purpose
+  - name: method
+  - name: tier
+
+# ---------------------------------------------------------------------------
+# Sanctioned reasons: the closed vocabulary a declaration marker may cite.
+# ---------------------------------------------------------------------------
+# A deviation is admissible only when a marker on the line above it names one of
+# these tokens together with the ADR that sanctions it:
+#
+#     -- schema:allow reason=<token> adr=ADR-0062
+#
+# A token cannot be invented at the call site: adding one is a reviewed PR against
+# this file, which is the point. The marker lives at the CALL SITE rather than in a
+# central allowlist for reviewability — the claim and the DDL it justifies appear in
+# the same diff hunk, in front of the reviewer who can judge it — and because a
+# migration is immutable once applied, so the excuse is as permanent as the statement.
+#
+# The standard §10 words the escape as "unless the PR carries `contract-migration`".
+# A PR label is not used here: the label is not in the repository, is invisible to a
+# local pre-push run, and is gone from the record the moment the PR is merged, while
+# the migration it excused is immutable and forever.
+reasons:
+  # NOTE: destructive DDL is NOT excused through `schema:allow`. It uses the
+  # pre-existing per-file marker `-- expand-contract: <ticket>` that the promotion gate
+  # already enforces (see scan.expand_contract_pattern). One rule, one vocabulary.
+  - token: empty-table
+    adr: ADR-0062
+    description: >-
+      The statement targets a table created earlier in this same migration, so there
+      are no rows to rewrite, lock or lose. Detected automatically for constraints;
+      the marker is for the cases the parser cannot see, such as a table created by a
+      function this migration calls.
+  - token: provider-vocabulary
+    adr: ADR-0062
+    description: >-
+      The column's value set is defined by an external provider (a carrier's call
+      status, a payment processor's event type) and cannot be closed by us without
+      rejecting values the provider may add without notice. The marker MUST name the
+      provider. Does not apply when the service maps provider values onto its own
+      closed set before writing — that set is ours and MUST be constrained.
+  - token: free-form
+    adr: ADR-0062
+    description: >-
+      The column name matches an enumerated shape but the value is genuinely open
+      text authored by a user or an operator. Stops applying if the application ever
+      begins to branch on the value.
+
+# ---------------------------------------------------------------------------
+# Scan scope
+# ---------------------------------------------------------------------------
+scan:
+  # No entry here for this repository's own checkout inside the tree under test: the
+  # job's path is the workflow's choice (`.schema-tools` here) so the checker computes
+  # it instead (check-schema-lint.py excluded_paths).
+  skip_dirs: [vendor, node_modules, .git, dist, build]
+  # Migration fixtures under testdata/ are scanned. A migration is not a test file,
+  # and a *-core-postgres repository keeps none of its real DDL there; excluding it
+  # would only hide a fixture that drifts from the rule it demonstrates.
+  skip_test_files: false
+  include_globs: ['schema/migrations/*.up.sql']
+  marker_pattern: 'schema:allow\s+reason=(?P<reason>[A-Za-z0-9._-]+)\s+adr=(?P<adr>[A-Za-z]+-[0-9]{4})'
+  # SCHEMA-0001 reads the marker that ALREADY governs destructive DDL rather than a
+  # second spelling of it. inboxxhq-infra/scripts/check-destructive-ddl.py has enforced
+  # `-- expand-contract: <ticket>` at the promotion gate since 2026-08-29, on the
+  # dev->staging and preprod hops, both `enforce` in scripts/qualification-policy.json.
+  # Inventing `schema:allow reason=contract-migration` beside it would have given one
+  # rule two vocabularies and made a migration that satisfies the promotion gate fail
+  # this one - which is the drift this catalog exists to stop.
+  expand_contract_pattern: '--\s*expand-contract:\s*(?P<ticket>[A-Za-z][A-Za-z0-9_-]*-?[0-9]+)\b'
+
+controls:
+  - id: SCHEMA-0001
+    title: A destructive migration names the expand release that made it safe
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: critical
+    stage: enforce
+    waivable: true
+    policy: >-
+      A migration MUST NOT DROP a column, table or constraint, ALTER a column's TYPE,
+      RENAME a column or table, or SET NOT NULL without a DEFAULT in the same
+      statement, unless the FILE carries `-- expand-contract: <ticket>` naming the
+      ticket that tracks the contract half. A statement targeting a table created in
+      the same migration is exempt and needs no marker.
+    rationale: >-
+      THE RULE ALREADY EXISTS AND THIS MOVES IT EARLIER. Standard §10.1 records the
+      guard as "Not implemented" and states that "no workflow or script in
+      coderaxis/ci-workflows or inboxxhq-infra inspects DDL for destructive statements".
+      That is out of date: inboxxhq-infra/scripts/check-destructive-ddl.py has existed
+      since 2026-08-29 and runs from scripts/qualify.d/migration-compat.sh at the
+      dev->staging and preprod promotion hops, both `enforce`. What is missing is not
+      the rule but its TIMING - it fires at promotion, by which point the migration is
+      merged and immutable, so the only remedy is another forward migration. At PR time
+      the author can simply fix the statement.
+      Because delivery promotes one image digest across environments (ADR-0050), a
+      migration always runs against a mix of old and new pods, so a column dropped in
+      the same release that stopped writing it is read by pods that have not yet rolled.
+      Measured 2026-09-20 - 2 such statements on main, both DELETE-then-SET NOT NULL
+      (order-core-postgres 000003:37, product-core-postgres 000004:312), neither
+      carrying a marker, both already promoted.
+    remediation: >-
+      Split the change into an expand release that stops using the object and a later
+      contract migration that removes it, then add `-- expand-contract: <TICKET-123>`
+      to the migration file - the same marker the promotion gate already accepts.
+    detector: destructive_statement
+    refs: [ADR-0062, RFC-0027, standards/infrastructure/schema-migration-standard.md]
+
+  - id: SCHEMA-0002
+    title: A constraint added to a populated table validates without holding the table
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: critical
+    stage: enforce
+    waivable: true
+    policy: >-
+      ALTER TABLE ... ADD CONSTRAINT ... CHECK or FOREIGN KEY MUST carry NOT VALID
+      unless the target table is created in the same migration. Promotion to a
+      validated constraint is a separate VALIDATE CONSTRAINT statement, which takes
+      SHARE UPDATE EXCLUSIVE and does not block writes.
+    rationale: >-
+      ADD CONSTRAINT without NOT VALID takes ACCESS EXCLUSIVE and scans the whole table
+      to validate, blocking every read and write for the duration. Migrations run from
+      the Argo CD PreSync gate while the previous release is still serving, so this is a
+      write outage in the middle of a deploy, and its length grows with the table.
+      Measured 2026-09-20 across 34 repositories - 49 violations in 12 repositories
+      against exactly 1 compliant statement (communication-core-postgres 000004).
+      chat-core-postgres alone carries 13, org-core-postgres 10, ledger and
+      notification 7 each. The single compliant one shows the team already knows the
+      form; nothing asked for it. A fleet grep for "NOT VALID" reports four, because
+      three of the four are prose in comments - which is why this control parses.
+    remediation: >-
+      Append NOT VALID to the ADD CONSTRAINT statement, then add VALIDATE CONSTRAINT in
+      a later migration once any backfill has run.
+    detector: add_constraint_not_valid
+    refs: [ADR-0062, standards/infrastructure/schema-migration-standard.md]
+
+  - id: SCHEMA-0003
+    title: An enum type is declared where the code generator can see it
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: critical
+    stage: enforce
+    waivable: false
+    policy: >-
+      CREATE TYPE ... AS ENUM MUST NOT appear inside a DO $$ ... $$ block. Use the
+      guarded form that leaves the statement at top level, or accept the error from a
+      re-run, but do not hide the declaration from the parser.
+    rationale: >-
+      sqlc parses migrations statically and cannot see through a DO block. A column
+      typed by an enum it cannot find is generated as `interface{}`, which compiles and
+      then fails at RUNTIME with pgx "cannot scan unknown type into *interface{}".
+      Verified 2026-09-20 by running sqlc v1.30.0 against four controlled schema
+      variants - identical config, only the enum declaration style differing. Measured on
+      the fleet the same day - 26 enum declarations inside DO blocks across 8 of the 10
+      repositories that declare any. The trap is already known: the warning is
+      copy-pasted verbatim into ai-core-postgres/sqlc.yaml and
+      voice-ai-agent-core-postgres/sqlc.yaml, where it is a comment and not a gate.
+      Unwaivable because there is no case where hiding a type from the generator is the
+      right call - the guarded form is always available.
+    remediation: >-
+      Move CREATE TYPE ... AS ENUM to the top level of the migration. Where idempotency
+      is needed, guard the whole migration rather than the statement, or drop the type
+      first in the same file.
+    detector: enum_hidden_from_codegen
+    refs: [ADR-0062, RFC-0027]
+
+  - id: SCHEMA-0004
+    title: A column holding a closed set of values says so in the schema
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    # warn, not enforce, and not yet promotable. Measured 2026-09-20: 196 columns
+    # across 33 of 34 repositories fail this, and the value-set judgement is a name
+    # heuristic that a reviewer must confirm. Enforcing a gate every repository fails
+    # is how the destructive-change guard ended up declared-but-absent for a year:
+    # `required: true` with nothing behind it. Promote to enforce only once a measured
+    # fleet run in diff mode reports zero findings over a full release cycle.
+    stage: warn
+    waivable: true
+    policy: >-
+      A TEXT or VARCHAR column whose name carries an enumerated shape (from
+      `enumerated_suffixes` or `enumerated_names` in this file) SHOULD carry a CHECK
+      constraint naming its values, or be typed by an enum. A column whose value set is
+      genuinely open MUST say so with a `free-form` or `provider-vocabulary` marker.
+    rationale: >-
+      Measured 2026-09-20 - 207 such columns fleet-wide with neither a CHECK nor an enum
+      type, in 33 of 34 repositories. Adversarial verification of the load-bearing ones
+      confirmed 84 of 100 checked, of which 19 carry a tenancy or authorization
+      decision - chat_threads.channel_type grants a
+      caller a thread with no participant row when the literal is 'voice' or 'sms';
+      provider_configs.provider is the partial-index predicate that stops two orgs
+      binding one Twilio account; platform_permissions.slug IS the authorization
+      vocabulary. The same fleet constrains 217 columns and declares 32 enum types, so
+      the rule is already the house norm - 10 repositories use both mechanisms and 34
+      leave some columns bare, which is drift rather than a decision.
+    remediation: >-
+      Add CHECK (col IN (...)) in the same migration that adds the column, or mark the
+      line with `-- schema:allow reason=free-form adr=ADR-0062` (or
+      `reason=provider-vocabulary`, naming the provider) when the set is genuinely open.
+    detector: unconstrained_enumerated_column
+    refs: [ADR-0062, standards/infrastructure/schema-migration-standard.md]
+
+  - id: SCHEMA-0005
+    title: A declaration marker does not outlive the statement it excused
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: major
+    stage: enforce
+    waivable: false
+    policy: >-
+      A `schema:allow` marker that no longer sits adjacent to a statement any control
+      would have reported is a violation, as is a marker citing a reason token absent
+      from `reasons` in this file.
+    rationale: >-
+      Staleness is the failure mode that kills allowlist mechanisms. Pairing every
+      marker with the site it covers makes staleness locally decidable at zero cost -
+      when the statement is deleted or moved, the orphaned excuse fails CI in the same
+      diff instead of silently authorising the next one. The fleet already carries the
+      live version of this defect in prose - product-core-postgres 000004 line 322
+      explains at length why a constraint is NOT VALID, and the constraint it describes
+      does not carry NOT VALID. A comment nothing checks drifts from the DDL it claims
+      to describe.
+    remediation: >-
+      Delete the marker, or move it back beside the statement it describes. If the
+      reason token is unknown, add it to `reasons` in this file in a reviewed PR.
+    detector: orphan_marker
+    refs: [ADR-0062]
