@@ -228,6 +228,82 @@ jobs:
   # its risk is that a stage bug makes it block (it shipped once exiting non-zero at stage: warn).
   # ORG-0002 is narrow and meant to reach `enforce`, so its risk is the opposite: a pattern that
   # re-flags prose would put an error on 92 repositories for the name of a markdown file.
+  schema-lint:
+    name: Schema lint - precision on the conformant tree, recall by control and line
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install guard dependencies
+        run: python3 -m pip install --upgrade PyYAML
+
+      # Precision at ZERO on the conformant fixture and recall pinned by (control,
+      # file, line) on the violating one. A count would pass while one rule stopped
+      # matching and another over-matched, which is how a gate rots into a rubber stamp.
+      - name: Fixtures pin both detection and the false-positive rate
+        run: python3 scripts/test_schema_lint.py
+
+      # A checker that stops matching must not read as a pass. The violating fixture is
+      # known dirty, so a zero exit here means a detector broke, and the specific
+      # control ids prove it is still the RIGHT detector rather than something else
+      # failing the tree.
+      - name: Mutation test - the checker still fails a dirty tree
+        run: |
+          set -euo pipefail
+          set +e
+          out=$(python3 scripts/check-schema-lint.py \
+            --repo-root fixtures/schema-lint-violating --mode baseline 2>&1)
+          code=$?
+          set -e
+          printf '%s\n' "$out"
+          if [[ $code -ne 0 ]]; then
+            echo "::error::baseline mode must never fail; it is the inventory pass"
+            exit 1
+          fi
+          for id in SCHEMA-0001 SCHEMA-0002 SCHEMA-0003 SCHEMA-0004 SCHEMA-0005; do
+            grep -q "\[$id\]" <<<"$out" || {
+              echo "::error::$id no longer fires on the violating fixture"; exit 1; }
+          done
+
+      # The gate itself, in the mode CI actually runs it in. A violating tree reached
+      # through --mode diff must exit 1, or the step wired into schema-compatibility
+      # would annotate findings and still go green.
+      - name: Mutation test - diff mode fails a dirty branch
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "${work}"' EXIT
+          git init -q "${work}"
+          git -C "${work}" config user.email ci@example.com
+          git -C "${work}" config user.name CI
+          mkdir -p "${work}/schema/migrations"
+          echo "-- +goose Up" > "${work}/schema/migrations/000001_init.up.sql"
+          git -C "${work}" add -A
+          git -C "${work}" commit -qm baseline
+          git -C "${work}" branch -M main
+          git -C "${work}" checkout -qb feature
+          cp fixtures/schema-lint-violating/schema/migrations/000002_forward.up.sql \
+            "${work}/schema/migrations/"
+          git -C "${work}" add -A
+          git -C "${work}" commit -qm "add a violating migration"
+          set +e
+          out=$(python3 scripts/check-schema-lint.py --repo-root "${work}" \
+            --control controls/schema-lint.yaml --mode diff --base-ref main 2>&1)
+          code=$?
+          set -e
+          printf '%s\n' "$out"
+          if [[ $code -eq 0 ]]; then
+            echo "::error::diff mode passed a branch that adds a violating migration"
+            exit 1
+          fi
+
   org-vocabulary:
     name: Org vocabulary - stage behaviour, exception precision, identifier scope
     runs-on: ubuntu-latest
