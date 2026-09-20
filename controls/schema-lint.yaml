@@ -9,12 +9,12 @@
 # destructive statements". This catalog and its checker are that missing inspection.
 #
 # Measured 2026-09-20 by this checker in --mode baseline over all 34
-# *-core-postgres repositories, 275 findings, reproducible with
+# *-core-postgres repositories, 286 findings, reproducible with
 # `scripts/check-schema-lint.py --mode baseline --repo-root <repo> --format json`:
 #   SCHEMA-0001    4  destructive DDL with no expand-contract marker,   3 repositories
 #   SCHEMA-0002   49  ADD CONSTRAINT without NOT VALID,                12 repositories
 #   SCHEMA-0003   26  enum declarations hidden inside a DO block,       8 repositories
-#   SCHEMA-0004  196  enumerated columns with no CHECK and no enum,    31 repositories
+#   SCHEMA-0004  207  enumerated columns with no CHECK and no enum,    33 repositories
 # Exactly one repository is clean on all four: platform-identity-core-postgres.
 # These are that run, not an estimate; re-running it is how a reviewer checks this
 # file has not gone stale.
@@ -40,7 +40,7 @@
 #
 # WHY THE DEFAULT MODE IS `diff` AND NOT `baseline`. An applied migration is
 # immutable — check-migration-immutability.py refuses any PR that edits one — so the
-# 49 NOT VALID violations and 270 unconstrained columns already on main CANNOT be
+# 49 NOT VALID violations and 207 unconstrained columns already on main CANNOT be
 # fixed in place by anyone. A gate that failed on them would fail every repository
 # forever for a state no developer is permitted to correct, which is how a gate gets
 # switched off. In `diff` mode the controls read only migrations this PR ADDS, where
@@ -317,7 +317,7 @@ controls:
     status: active
     severity: major
     # warn, not enforce, and not yet promotable. Measured 2026-09-20: 196 columns
-    # across 31 of 34 repositories fail this, and the value-set judgement is a name
+    # across 33 of 34 repositories fail this, and the value-set judgement is a name
     # heuristic that a reviewer must confirm. Enforcing a gate every repository fails
     # is how the destructive-change guard ended up declared-but-absent for a year:
     # `required: true` with nothing behind it. Promote to enforce only once a measured
@@ -330,8 +330,8 @@ controls:
       constraint naming its values, or be typed by an enum. A column whose value set is
       genuinely open MUST say so with a `free-form` or `provider-vocabulary` marker.
     rationale: >-
-      Measured 2026-09-20 - 196 such columns fleet-wide with neither a CHECK nor an enum
-      type, in 31 of 34 repositories. Adversarial verification of the load-bearing ones
+      Measured 2026-09-20 - 207 such columns fleet-wide with neither a CHECK nor an enum
+      type, in 33 of 34 repositories. Adversarial verification of the load-bearing ones
       confirmed 84 of 100 checked, of which 19 carry a tenancy or authorization
       decision - chat_threads.channel_type grants a
       caller a thread with no participant row when the literal is 'voice' or 'sms';

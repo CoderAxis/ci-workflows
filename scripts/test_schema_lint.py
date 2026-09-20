@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -38,6 +39,10 @@ EXPECTED = {
     ("SCHEMA-0002", "schema/migrations/000002_forward.up.sql", 11),
     ("SCHEMA-0001", "schema/migrations/000002_forward.up.sql", 15),
     ("SCHEMA-0005", "schema/migrations/000002_forward.up.sql", 18),
+    # These two pin fixes from the SUPPRESSION side. Recall on its own cannot: a rule
+    # that quietly stops reporting reads exactly like a repository that got cleaner.
+    ("SCHEMA-0004", "schema/migrations/000002_forward.up.sql", 31),
+    ("SCHEMA-0004", "schema/migrations/000002_forward.up.sql", 39),
 }
 
 
@@ -79,7 +84,7 @@ def main() -> int:
                         "code generator has no sanctioned case")
     if by_id["SCHEMA-0004"]["stage"] != "warn":
         failures.append("SCHEMA-0004 may not be promoted to enforce until a measured "
-                        "fleet run in diff mode reports zero findings (2026-09-20: 196)")
+                        "fleet run in diff mode reports zero findings (2026-09-20: 207)")
     sanctioned = {r["token"] for r in doc["reasons"]}
     if "because-i-said-so" in sanctioned:
         failures.append("the violating fixture's bogus reason token leaked into the catalog")
@@ -88,6 +93,66 @@ def main() -> int:
     rc_baseline, _ = run(VIOLATING)
     if rc_baseline != 0:
         failures.append(f"baseline mode must never fail; got exit {rc_baseline}")
+
+    # A checker that cannot run must say so with exit 2, never exit 1. Exit 1 is
+    # "a control found a violation", so a broken runner reporting 1 accuses the
+    # repository of a defect that is the checker's own. Both paths below did exactly
+    # that before this assertion existed: a shallow clone raised CalledProcessError out
+    # of git() and Python exited 1 with a traceback, and a missing PyYAML used
+    # `raise SystemExit("...")`, which is also 1.
+    proc = subprocess.run(
+        [sys.executable, str(CHECKER), "--repo-root", str(VIOLATING),
+         "--control", str(CATALOG), "--mode", "diff", "--base-ref", "refs/nonexistent"],
+        capture_output=True, text=True)
+    if proc.returncode != 2:
+        failures.append(
+            f"an unresolvable base ref must exit 2 (cannot run), got {proc.returncode}: "
+            f"{(proc.stdout + proc.stderr).strip()[:200]}")
+    if "Traceback" in proc.stdout + proc.stderr:
+        failures.append("a git failure surfaced as a Python traceback rather than ::error::")
+
+    proc = subprocess.run(
+        [sys.executable, "-S", "-s", str(CHECKER), "--repo-root", str(CONFORMANT),
+         "--control", str(CATALOG), "--mode", "baseline"],
+        capture_output=True, text=True)
+    if proc.returncode not in (0, 2):
+        failures.append(
+            f"a missing PyYAML must exit 2, got {proc.returncode}")
+
+    # A genuinely SHALLOW clone, which is the case that actually happens in CI when a
+    # job forgets fetch-depth: 0. The base ref resolves, so the guard before the git
+    # calls passes, and `merge-base` is what fails - which used to raise
+    # CalledProcessError out of git() and exit 1 with a traceback, accusing the
+    # repository of a violation that was the checker's own inability to run.
+    with tempfile.TemporaryDirectory() as tmp:
+        src, clone = Path(tmp) / "src", Path(tmp) / "clone"
+        mig = src / "schema" / "migrations"
+        mig.mkdir(parents=True)
+        (mig / "000001_init.up.sql").write_text("-- base\n", encoding="utf-8")
+        g = ["-c", "user.email=t@e.com", "-c", "user.name=t"]
+        for args in (["init", "-q", str(src)], [*g, "-C", str(src), "add", "-A"],
+                     [*g, "-C", str(src), "commit", "-qm", "base"],
+                     ["-C", str(src), "branch", "-M", "main"],
+                     [*g, "-C", str(src), "checkout", "-qb", "feature"]):
+            subprocess.run(["git", *args], capture_output=True, check=True)
+        (mig / "000002_f.up.sql").write_text(
+            "ALTER TABLE t ADD COLUMN x text;\n", encoding="utf-8")
+        for args in ([*g, "-C", str(src), "add", "-A"],
+                     [*g, "-C", str(src), "commit", "-qm", "f"],
+                     ["clone", "-q", "--depth", "1", "--branch", "feature",
+                      f"file://{src}", str(clone)],
+                     ["-C", str(clone), "fetch", "-q", "--depth", "1", "origin",
+                      "main:refs/remotes/origin/main"]):
+            subprocess.run(["git", *args], capture_output=True)
+        proc = subprocess.run(
+            [sys.executable, str(CHECKER), "--repo-root", str(clone),
+             "--control", str(CATALOG), "--mode", "diff", "--base-ref", "origin/main"],
+            capture_output=True, text=True)
+        if proc.returncode != 2:
+            failures.append(
+                f"a shallow clone must exit 2 (cannot run), got {proc.returncode}")
+        if "Traceback" in proc.stdout + proc.stderr:
+            failures.append("a shallow clone produced a Python traceback")
 
     if failures:
         for f in failures:

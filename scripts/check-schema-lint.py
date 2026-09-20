@@ -54,8 +54,12 @@ from pathlib import Path
 
 try:
     import yaml
-except ModuleNotFoundError as exc:  # pragma: no cover
-    raise SystemExit("PyYAML required: python3 -m pip install PyYAML") from exc
+except ModuleNotFoundError:  # pragma: no cover
+    # Exit 2, not 1. `raise SystemExit("...")` exits 1, which is this gate's code for
+    # "a control found a violation" - so a runner whose dependency step was skipped
+    # reported every repository as non-conformant instead of reporting itself broken.
+    print("::error::PyYAML required: python3 -m pip install PyYAML")
+    sys.exit(2)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONTROL = REPO_ROOT / "controls" / "schema-lint.yaml"
@@ -81,7 +85,15 @@ VALID_STATUS = {"active", "deprecated", "superseded"}
 # provider-vocabulary marker two lines above was covering content_type as well as the
 # column it was written for. An excuse that reaches further than the reviewer's eye is
 # an excuse nobody audited.
-MARKER_REACH_STATEMENT = 3
+# Four, not three. The preamble this constant exists for is FOUR lines, not three:
+#     -- schema:allow ...
+#     -- +goose StatementBegin
+#     DO $$
+#     BEGIN
+#         ALTER TABLE ...
+# so a marker written where the comment says to write it fell one line short of the
+# statement it excused, and the excuse was refused as an orphan.
+MARKER_REACH_STATEMENT = 4
 MARKER_REACH_COLUMN = 1
 
 
@@ -174,36 +186,84 @@ def controls_by_id(doc: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def strip_comments(sql: str) -> str:
-    """Blank out -- and /* */ comments, preserving the line count.
+    """Blank comments AND the contents of single-quoted literals, keeping line numbers.
 
-    Line numbers are the whole value of this gate's output, so a comment is replaced
-    by whitespace of the same shape rather than removed.
+    One scanner rather than two passes, because the two interleave: `--` inside a
+    string is data, and an apostrophe inside a comment ("-- it's fine") is not a
+    string. Stripping either one first corrupts the other.
+
+    Blanking string CONTENTS matters because without it the rules match DDL keywords
+    inside DATA. A seed migration writing
+    `INSERT INTO change_log (note) VALUES ('drop column legacy_note in the contract
+    release')` was reported as destructive DDL, and so was
+    `COMMENT ON COLUMN orders.note IS 'we will drop column legacy soon'` - a comment
+    ABOUT a drop, read as a drop.
+
+    Dollar-quoted bodies are deliberately left intact: a `DO $$ ... $$` block holds
+    real statements this gate must still see, which is why statements() tracks
+    dollar-quoting rather than splitting on it.
+
+    Line numbers are this gate's whole output, so everything removed is replaced by
+    whitespace of the same shape rather than deleted.
     """
     out: list[str] = []
-    in_block = False
-    for line in sql.split("\n"):
-        if in_block:
-            i = line.find("*/")
-            if i < 0:
-                out.append("")
+    i, n = 0, len(sql)
+    in_str = in_block = False
+    dollar: str | None = None
+    tag = re.compile(r"\$[A-Za-z_]*\$")
+    while i < n:
+        ch = sql[i]
+        if dollar:
+            if sql.startswith(dollar, i):
+                out.append(dollar)
+                i += len(dollar)
+                dollar = None
                 continue
-            line = " " * (i + 2) + line[i + 2:]
-            in_block = False
-        while True:
-            b = line.find("/*")
-            if b < 0:
-                break
-            e = line.find("*/", b + 2)
-            if e < 0:
-                line = line[:b]
-                in_block = True
-                break
-            line = line[:b] + " " * (e + 2 - b) + line[e + 2:]
-        i = line.find("--")
-        if i >= 0:
-            line = line[:i]
-        out.append(line)
-    return "\n".join(out)
+            out.append(ch)
+            i += 1
+            continue
+        if in_block:
+            if sql.startswith("*/", i):
+                out.append("  ")
+                i += 2
+                in_block = False
+                continue
+            out.append("\n" if ch == "\n" else " ")
+            i += 1
+            continue
+        if in_str:
+            if ch == "'":
+                if sql.startswith("''", i):
+                    out.append("  ")
+                    i += 2
+                    continue
+                in_str = False
+                out.append("'")
+            else:
+                out.append("\n" if ch == "\n" else " ")
+            i += 1
+            continue
+        if sql.startswith("--", i):
+            while i < n and sql[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        if sql.startswith("/*", i):
+            in_block = True
+            out.append("  ")
+            i += 2
+            continue
+        m = tag.match(sql, i)
+        if m:
+            dollar = m.group(0)
+            out.append(dollar)
+            i += len(dollar)
+            continue
+        if ch == "'":
+            in_str = True
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def statements(sql: str) -> list[tuple[str, int]]:
@@ -360,9 +420,19 @@ DESTRUCTIVE = (
     ("add_column_not_null_without_default", re.compile(
         # (?!CONSTRAINT\b) because `ADD CONSTRAINT x CHECK (col IS NOT NULL)` carries
         # the words NOT NULL inside the expression and is not a column addition at all.
-        r"\bADD\s+(?!CONSTRAINT\b)(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+[^;,]*?\bNOT\s+NULL\b"
-        r"(?![^;]*\bDEFAULT\b)(?![^;]*\bGENERATED\b)", re.I)),
+        #
+        # No DEFAULT lookahead here, deliberately. A trailing (?![^;]*DEFAULT) only sees
+        # text AFTER "NOT NULL", so it passed `ADD COLUMN x bool NOT NULL DEFAULT false`
+        # and refused `ADD COLUMN x bool DEFAULT false NOT NULL` - the same migration,
+        # written the more common way round, and the SAFE form in both orders. The
+        # clause is checked for DEFAULT as a whole in collect() instead.
+        r"\bADD\s+(?!CONSTRAINT\b)(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+[^;,]*?\bNOT\s+NULL\b",
+        re.I)),
 )
+
+# The clause a single ADD COLUMN introduces: from the ADD to the next top-level comma
+# or the end of the statement. Read whole so DEFAULT is found wherever it sits.
+RE_DROP_TABLE_NAME = re.compile(r"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\w.]+)", re.I)
 
 TEXTY = re.compile(r"^(TEXT|VARCHAR|CHARACTER\s+VARYING|CHAR)$", re.I)
 
@@ -419,9 +489,21 @@ def discover(root: Path, doc: dict, exclude: list[Path]) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 def git(root: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
-    ).stdout.strip()
+    """Run git, or exit 2. Never let a git failure surface as a finding.
+
+    check=True raised CalledProcessError out of this function and Python printed a
+    traceback and exited 1 - this gate's code for "a control found a violation". A
+    SHALLOW clone hit it every time: `rev-parse --verify origin/main` succeeds on the
+    ref, and `merge-base` then fails because the history is not there, so the guard
+    above this passed and the crash was reported as a non-conformant repository.
+    """
+    res = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    if res.returncode != 0:
+        cannot_run(
+            f"git {' '.join(args)} failed in {root}: "
+            f"{(res.stderr or res.stdout).strip().splitlines()[0] if (res.stderr or res.stdout).strip() else 'no output'}. "
+            f"A shallow clone is the usual cause - the checkout needs fetch-depth: 0")
+    return res.stdout.strip()
 
 
 def git_ok(root: Path, *args: str) -> bool:
@@ -485,6 +567,7 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
 
     sites: list[dict] = []
     markers: list[dict] = []
+    stmt_spans: list[dict] = []
     files_scanned = 0
     parse_errors: list[str] = []
 
@@ -525,6 +608,13 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
 
         for stmt, sline in stmts:
             span = (sline, sline + stmt.count("\n"))
+            # Every DDL statement's span, whatever this pass decides about it. Only
+            # SCHEMA-0005 reads these: a marker is stale when the code it excused has
+            # MOVED OR GONE, and a marker sitting beside a statement the parser happens
+            # to auto-exempt has not gone stale - it is a defensive declaration that
+            # agrees with the parser. Judging orphanhood against findings alone failed
+            # the build for writing one.
+            stmt_spans.append({"file": rel, "span": span})
 
             for name, pat in DESTRUCTIVE:
                 for m in pat.finditer(stmt):
@@ -532,6 +622,25 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                     tbl = t.group(1).split(".")[-1].lower() if t else ""
                     if tbl and tbl in created_here:
                         continue
+                    if name == "drop_table":
+                        # A table this migration created is one it may drop: the
+                        # scratch/backfill idiom is CREATE TABLE tmp_x, populate from
+                        # it, DROP TABLE tmp_x, and nothing outside the migration ever
+                        # saw it. tbl is "" for DROP TABLE because there is no ALTER
+                        # TABLE to read it from, so the same-migration check above
+                        # could not fire.
+                        dt = RE_DROP_TABLE_NAME.search(stmt[m.start():])
+                        if dt and dt.group(1).split(".")[-1].lower() in created_here:
+                            continue
+                        if dt:
+                            tbl = dt.group(1).split(".")[-1].lower()
+                    if name == "add_column_not_null_without_default":
+                        # DEFAULT anywhere in this column's clause makes the addition
+                        # safe, whichever side of NOT NULL it is written on.
+                        tail = stmt[m.start():]
+                        clause = split_top(tail)[0] if split_top(tail) else tail
+                        if re.search(r"\bDEFAULT\b|\bGENERATED\b", clause, re.I):
+                            continue
                     if name == "drop_constraint":
                         dm = re.search(r"\bDROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(\w+)",
                                        stmt[m.start():], re.I)
@@ -565,6 +674,7 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                               "column": col})
 
     return {"files_scanned": files_scanned, "sites": sites, "markers": markers,
+            "stmt_spans": stmt_spans,
             "expand_contract_files": expand_contract_files,
             "enum_types": enum_types, "check_bodies": check_bodies,
             "objects_scanned": len(sites), "parse_errors": parse_errors}
@@ -618,14 +728,27 @@ def excused(site: dict, markers: list[dict], tokens: set[str]) -> bool:
     for mk in markers:
         if mk["file"] != site["file"] or mk["reason"] not in tokens:
             continue
-        if 0 < site["line"] - mk["line"] <= reach:
+        # `<=` at the lower bound, so a marker written as a TRAILING comment on the
+        # line it excuses counts. Requiring it strictly above refused the most natural
+        # placement for a column: `note_kind text, -- schema:allow reason=free-form ...`
+        if 0 <= site["line"] - mk["line"] <= reach:
             return True
-        # A marker inside the statement's own span covers it, but only for statement
-        # sites: a CREATE TABLE spans every column it declares, so span containment
-        # would hand one marker the whole table.
         lo, hi = site["span"]
-        if site["rule"] != "column" and lo <= mk["line"] <= hi:
-            return True
+        if site["rule"] != "column":
+            # Within reach of where the STATEMENT begins, not of where the finding
+            # landed. Counting to the finding meant the reach had to absorb the
+            # statement's own internal layout: a goose-guarded constraint puts
+            # `ALTER TABLE` on one line and `ADD CONSTRAINT` on the next, so the
+            # distance depended on how the author wrapped their SQL. Anchoring to the
+            # statement start is what "the marker sits above this statement" actually
+            # means, and it does not change with formatting.
+            if 0 <= lo - mk["line"] <= reach:
+                return True
+            # A marker inside the statement's own span covers it, but only for
+            # statement sites: a CREATE TABLE spans every column it declares, so span
+            # containment would hand one marker the whole table.
+            if lo <= mk["line"] <= hi:
+                return True
     return False
 
 
@@ -723,9 +846,18 @@ def rule_orphan_marker(facts: dict, doc: dict, ctl: dict) -> list[Finding]:
             continue
         covers = any(
             s["file"] == mk["file"]
-            and (0 < s["line"] - mk["line"] <= reach_for(s)
+            and (0 <= s["line"] - mk["line"] <= reach_for(s)
                  or (s["rule"] != "column" and s["span"][0] <= mk["line"] <= s["span"][1]))
             for s in facts["sites"])
+        # Or any DDL statement at all within reach. See stmt_spans in collect(): a
+        # marker beside a statement the parser auto-exempts is a declaration that
+        # agrees with the parser, not an excuse that outlived its code.
+        if not covers:
+            covers = any(
+                s["file"] == mk["file"]
+                and (0 <= s["span"][0] - mk["line"] <= MARKER_REACH_STATEMENT
+                     or s["span"][0] <= mk["line"] <= s["span"][1])
+                for s in facts.get("stmt_spans") or [])
         if not covers:
             out.append(Finding(
                 control=c["id"], severity=c["severity"], stage=c["stage"],
