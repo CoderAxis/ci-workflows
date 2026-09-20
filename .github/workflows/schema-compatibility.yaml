@@ -145,6 +145,43 @@ jobs:
           python3 .coderaxis-ci/scripts/check-migration-immutability.py \
             --base-ref "origin/${{ github.base_ref }}"
 
+      - name: Install guard dependencies
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: python3 -m pip install --upgrade PyYAML
+
+      # Beside the immutability guard, and for the same reason: it needs neither
+      # Postgres nor Go, and a migration that will hold a table under ACCESS EXCLUSIVE
+      # is not worth a schema round-trip to discover.
+      #
+      # --mode diff, so only the migrations this PR ADDS are judged. Every finding in
+      # an already-applied migration is in a file the step above forbids anyone to
+      # edit, so enforcing on the baseline would fail all 34 repositories forever for
+      # a state no developer is permitted to correct. The baseline is inventoried
+      # separately (scripts/check-schema-lint.py --mode baseline) and waived with an
+      # expiry in core-docs governance/standard-waivers.yaml.
+      #
+      # The control catalog is resolved from the checker's own checkout by default
+      # (.coderaxis-ci/controls/schema-lint.yaml), and the checker excludes that
+      # checkout from its own scan by computing the path rather than matching a name.
+      - name: Schema lint (DDL conventions)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          python3 .coderaxis-ci/scripts/check-schema-lint.py \
+            --repo-root . \
+            --mode diff \
+            --base-ref "origin/${{ github.base_ref }}" \
+            --report schema-lint-report.json
+
+      - name: Upload the schema-lint report
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-lint-report
+          path: schema-lint-report.json
+          if-no-files-found: ignore
+
       - name: Resolve Postgres connection URL
         shell: bash
         run: |
