@@ -345,7 +345,23 @@ DESTRUCTIVE = (
     ("drop_constraint", re.compile(r"\bDROP\s+CONSTRAINT\b", re.I)),
     ("alter_column_type", re.compile(r"\bALTER\s+(?:COLUMN\s+)?\w+\s+(?:SET\s+DATA\s+)?TYPE\b", re.I)),
     ("rename", re.compile(r"\bRENAME\s+(?:COLUMN\s+|TO\b|CONSTRAINT\s+)", re.I)),
-    ("set_not_null_without_default", re.compile(r"\bSET\s+NOT\s+NULL\b", re.I)),
+    # SET NOT NULL on an EXISTING column, with no DEFAULT exemption. A default does
+    # not backfill existing NULLs, so `ALTER COLUMN x SET NOT NULL, ALTER COLUMN x SET
+    # DEFAULT y` still scans the whole table and still fails on the first NULL row.
+    # Exempting it because DEFAULT appeared somewhere in the statement made this gate
+    # pass ledger-core-postgres 000003, which the promotion gate refuses.
+    ("set_not_null", re.compile(r"\bSET\s+NOT\s+NULL\b", re.I)),
+    # ADD COLUMN x TYPE NOT NULL with no DEFAULT. A distinct shape from SET NOT NULL
+    # and the one this gate originally missed: the promotion gate
+    # (inboxxhq-infra/scripts/check-destructive-ddl.py) flags it, and omitting it made
+    # the two gates disagree on communication, ledger and org-core-postgres - a PR
+    # would pass here and the promotion be refused later, which is worse than either
+    # gate alone. The lookaheads mirror that script's, including GENERATED.
+    ("add_column_not_null_without_default", re.compile(
+        # (?!CONSTRAINT\b) because `ADD CONSTRAINT x CHECK (col IS NOT NULL)` carries
+        # the words NOT NULL inside the expression and is not a column addition at all.
+        r"\bADD\s+(?!CONSTRAINT\b)(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+[^;,]*?\bNOT\s+NULL\b"
+        r"(?![^;]*\bDEFAULT\b)(?![^;]*\bGENERATED\b)", re.I)),
 )
 
 TEXTY = re.compile(r"^(TEXT|VARCHAR|CHARACTER\s+VARYING|CHAR)$", re.I)
@@ -445,6 +461,12 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
     properly typed column.
     """
     marker_re = re.compile((doc.get("scan") or {}).get("marker_pattern", ""), re.I)
+    # Per FILE, not per line, and deliberately so: that is the semantics
+    # inboxxhq-infra/scripts/check-destructive-ddl.py has enforced at the promotion
+    # gate since 2026-08-29. A file this gate failed but the promotion gate passed
+    # would be a rule with two answers.
+    expand_re = re.compile((doc.get("scan") or {}).get("expand_contract_pattern", ""), re.I)
+    expand_contract_files: set[str] = set()
     enum_types: set[str] = set()
     check_bodies: list[str] = []
 
@@ -481,6 +503,8 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                 if m:
                     markers.append({"file": rel, "line": ln,
                                     "reason": m.group("reason"), "adr": m.group("adr")})
+        if expand_re.pattern and expand_re.search(raw):
+            expand_contract_files.add(rel)
 
         sql = strip_comments(raw)
         stmts = statements(sql)
@@ -504,9 +528,6 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
 
             for name, pat in DESTRUCTIVE:
                 for m in pat.finditer(stmt):
-                    if name == "set_not_null_without_default" and re.search(
-                            r"\bDEFAULT\b", stmt, re.I):
-                        continue
                     t = RE_ALT_TBL.search(stmt)
                     tbl = t.group(1).split(".")[-1].lower() if t else ""
                     if tbl and tbl in created_here:
@@ -544,6 +565,7 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                               "column": col})
 
     return {"files_scanned": files_scanned, "sites": sites, "markers": markers,
+            "expand_contract_files": expand_contract_files,
             "enum_types": enum_types, "check_bodies": check_bodies,
             "objects_scanned": len(sites), "parse_errors": parse_errors}
 
@@ -621,17 +643,20 @@ def rule_destructive_statement(facts: dict, doc: dict, ctl: dict) -> list[Findin
     c = ctl["SCHEMA-0001"]
     if c["status"] != "active":
         return []
-    tokens = {"contract-migration", "empty-table"}
-    return [_mk(c, s, f"destructive DDL without an expand release: {s['detail']}")
+    # The file-level `-- expand-contract: <ticket>` marker, as the promotion gate reads
+    # it; `schema:allow reason=empty-table` remains for the cases the parser cannot see.
+    exp = facts.get("expand_contract_files") or set()
+    return [_mk(c, s, f"destructive DDL with no expand-contract marker: {s['detail']}")
             for s in facts["sites"] if s["rule"] == "destructive"
-            and not excused(s, facts["markers"], tokens)]
+            and s["file"] not in exp
+            and not excused(s, facts["markers"], {"empty-table"})]
 
 
 def rule_add_constraint_not_valid(facts: dict, doc: dict, ctl: dict) -> list[Finding]:
     c = ctl["SCHEMA-0002"]
     if c["status"] != "active":
         return []
-    tokens = {"empty-table", "contract-migration"}
+    tokens = {"empty-table"}
     return [_mk(c, s, f"ADD CONSTRAINT without NOT VALID takes ACCESS EXCLUSIVE and "
                       f"scans the table: {s['detail']}")
             for s in facts["sites"] if s["rule"] == "not_valid"

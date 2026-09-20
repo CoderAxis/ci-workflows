@@ -91,8 +91,11 @@ destructive_forms:
   - name: rename
     kind: contract-break
     control: SCHEMA-0001
-  - name: set_not_null_without_default
+  - name: set_not_null
     kind: rewrite
+    control: SCHEMA-0001
+  - name: add_column_not_null_without_default
+    kind: write-break
     control: SCHEMA-0001
 
 # ---------------------------------------------------------------------------
@@ -159,14 +162,9 @@ enumerated_names:
 # local pre-push run, and is gone from the record the moment the PR is merged, while
 # the migration it excused is immutable and forever.
 reasons:
-  - token: contract-migration
-    adr: ADR-0062
-    description: >-
-      The contract half of an expand/contract pair. The expand release has shipped,
-      every consumer has crossed the compatibility window, and this migration removes
-      what the expand release made unused. The marker MUST cite the expand release in
-      the same comment. Stops applying the moment a consumer is found still reading
-      the removed object.
+  # NOTE: destructive DDL is NOT excused through `schema:allow`. It uses the
+  # pre-existing per-file marker `-- expand-contract: <ticket>` that the promotion gate
+  # already enforces (see scan.expand_contract_pattern). One rule, one vocabulary.
   - token: empty-table
     adr: ADR-0062
     description: >-
@@ -203,6 +201,14 @@ scan:
   skip_test_files: false
   include_globs: ['schema/migrations/*.up.sql']
   marker_pattern: 'schema:allow\s+reason=(?P<reason>[A-Za-z0-9._-]+)\s+adr=(?P<adr>[A-Za-z]+-[0-9]{4})'
+  # SCHEMA-0001 reads the marker that ALREADY governs destructive DDL rather than a
+  # second spelling of it. inboxxhq-infra/scripts/check-destructive-ddl.py has enforced
+  # `-- expand-contract: <ticket>` at the promotion gate since 2026-08-29, on the
+  # dev->staging and preprod hops, both `enforce` in scripts/qualification-policy.json.
+  # Inventing `schema:allow reason=contract-migration` beside it would have given one
+  # rule two vocabularies and made a migration that satisfies the promotion gate fail
+  # this one - which is the drift this catalog exists to stop.
+  expand_contract_pattern: '--\s*expand-contract:\s*(?P<ticket>[A-Za-z][A-Za-z0-9_-]*-?[0-9]+)\b'
 
 controls:
   - id: SCHEMA-0001
@@ -216,23 +222,29 @@ controls:
     policy: >-
       A migration MUST NOT DROP a column, table or constraint, ALTER a column's TYPE,
       RENAME a column or table, or SET NOT NULL without a DEFAULT in the same
-      statement, unless the statement carries a `schema:allow reason=contract-migration`
-      marker citing the expand release whose compatibility window has closed. A
-      statement targeting a table created in the same migration is exempt and needs no
-      marker.
+      statement, unless the FILE carries `-- expand-contract: <ticket>` naming the
+      ticket that tracks the contract half. A statement targeting a table created in
+      the same migration is exempt and needs no marker.
     rationale: >-
-      This is the guard the Schema Migration Standard §10 requires and its own §10.1
-      records as "Not implemented": "no workflow or script in coderaxis/ci-workflows or
-      inboxxhq-infra inspects DDL for destructive statements". Because delivery promotes
-      one image digest across environments (ADR-0050), a migration always runs against a
-      mix of old and new pods, so a column dropped in the same release that stopped
-      writing it is read by pods that have not yet rolled. schema-migration-conformance.yaml
-      lists this capability under `required:` and Level 3 gates staging promotion on it,
-      so today every core is assessed against a capability nothing measures.
+      THE RULE ALREADY EXISTS AND THIS MOVES IT EARLIER. Standard §10.1 records the
+      guard as "Not implemented" and states that "no workflow or script in
+      coderaxis/ci-workflows or inboxxhq-infra inspects DDL for destructive statements".
+      That is out of date: inboxxhq-infra/scripts/check-destructive-ddl.py has existed
+      since 2026-08-29 and runs from scripts/qualify.d/migration-compat.sh at the
+      dev->staging and preprod promotion hops, both `enforce`. What is missing is not
+      the rule but its TIMING - it fires at promotion, by which point the migration is
+      merged and immutable, so the only remedy is another forward migration. At PR time
+      the author can simply fix the statement.
+      Because delivery promotes one image digest across environments (ADR-0050), a
+      migration always runs against a mix of old and new pods, so a column dropped in
+      the same release that stopped writing it is read by pods that have not yet rolled.
+      Measured 2026-09-20 - 2 such statements on main, both DELETE-then-SET NOT NULL
+      (order-core-postgres 000003:37, product-core-postgres 000004:312), neither
+      carrying a marker, both already promoted.
     remediation: >-
       Split the change into an expand release that stops using the object and a later
-      contract migration that removes it, then mark the contract statement with
-      `-- schema:allow reason=contract-migration adr=ADR-0062` naming the expand release.
+      contract migration that removes it, then add `-- expand-contract: <TICKET-123>`
+      to the migration file - the same marker the promotion gate already accepts.
     detector: destructive_statement
     refs: [ADR-0062, RFC-0027, standards/infrastructure/schema-migration-standard.md]
 
