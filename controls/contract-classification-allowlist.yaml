@@ -79,14 +79,11 @@ allow:
   # ── declare-rest: a real HTTP surface the catalog fails to declare ──────────────────────
   # Blocked on the generator repair described above. Route counts are from the service's own
   # sources (deployable plus core), not from the spec, because the spec is the thing in doubt.
-
-  - service: voice-ai-agent-service
-    disposition: declare-rest
-    reason: >-
-      Sixteen mounted API routes and a 22-path spec, so the surface is real and substantial.
-      Highest-risk of the nine: the sources carry no route annotations at all, so a
-      regeneration produces a near-empty document. The spec must be reconciled against the
-      mounted routes before interfaces.rest is declared.
+  #
+  # voice-ai-agent-service left this list on 2026-09-09: its spec was reconciled against the
+  # mounted routes (17 operations, both directions, tests/contracts route coverage), the swag
+  # generator was replaced by an `openapi-contract-check` make target, and core-docs declares
+  # interfaces.rest for it. The invariant now holds for that repo without an exemption.
 
   - service: platform-identity-service
     disposition: declare-rest
