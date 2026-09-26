@@ -193,9 +193,15 @@ def logical(path: Path, root: Path, prefix: str) -> str:
 
     In monorepo layout that is simply the path from the root, which is what the control file
     records. In repo layout the checkout has been stripped of everything above it, so the
-    repository's own directory name is put back: `actions/checkout` names it after the repository,
-    which restores the one component that makes `internal/adapters/.../webhook_handler.go`
-    attributable to a service rather than to six of them.
+    repository's own name is put back, which restores the one component that makes
+    `internal/adapters/.../webhook_handler.go` attributable to a service rather than to six of
+    them.
+
+    That name defaults to the checkout directory's, because `actions/checkout` names the directory
+    after the repository. A linked git worktree does not: `git worktree add ../<repo>-wt-topic`
+    checks the same repository out under a name taken from the branch, and then every allowlist
+    entry misses and a conforming repository fails this gate for a reason that is not about its
+    code. Callers that know better say so with --repo-name; `ihq git guard` passes it.
     """
     try:
         rel = str(path.relative_to(root))
@@ -374,6 +380,11 @@ def main() -> None:
     parser.add_argument("--control", default=None, help=f"path to {CONTROL_PATH.name}")
     parser.add_argument("--layout", choices=("auto", "monorepo", "repo"), default="auto",
                         help="whether the tree holds many repositories or one (default: detect)")
+    parser.add_argument("--repo-name", default="",
+                        help="the repository's own name, under `repo` layout. Defaults to the "
+                             "checkout directory's name, which is what actions/checkout gives CI. "
+                             "Pass it when the checkout is a linked git worktree, whose directory "
+                             "is named after the branch rather than the repository.")
     args = parser.parse_args()
 
     root = Path(args.repo_root).resolve() if args.repo_root else Path(__file__).resolve().parents[2]
@@ -382,6 +393,9 @@ def main() -> None:
         cannot_run(f"--repo-root is not a directory: {root}")
 
     layout = detect_layout(root) if args.layout == "auto" else args.layout
+    if args.repo_name and layout == "monorepo":
+        cannot_run("--repo-name names one repository, and monorepo layout scans many; there the "
+                   "name of each comes from its own directory")
     control = load_control(control_path)
     paths = go_files(root, layout)
 
@@ -394,7 +408,7 @@ def main() -> None:
                    f"not be indistinguishable from a gate that found nothing - check --repo-root "
                    f"and --layout")
 
-    prefix = "" if layout == "monorepo" else root.name
+    prefix = "" if layout == "monorepo" else (args.repo_name or root.name)
     corpus: list[tuple[str, str]] = []
     for path in paths:
         try:
