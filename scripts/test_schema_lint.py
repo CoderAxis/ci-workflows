@@ -33,8 +33,14 @@ VIOLATING = REPO_ROOT / "fixtures" / "schema-lint-violating"
 #   SCHEMA-0003  chat-core-postgres 000001:490 (CREATE TYPE inside DO)
 #   SCHEMA-0004  chat_threads.channel_type, read by an authorization predicate
 #   SCHEMA-0005  an excuse citing a reason nobody sanctioned
+#   SCHEMA-0006  194 tables fleet-wide with no COMMENT ON TABLE (measured 2026-09-30)
 EXPECTED = {
     ("SCHEMA-0003", "schema/migrations/000001_init.up.sql", 18),
+    # Both tables the violating fixture creates are undescribed. Pinned at the
+    # CREATE TABLE line rather than at the end of the migration, because that is where
+    # the author is standing when they read the finding.
+    ("SCHEMA-0006", "schema/migrations/000001_init.up.sql", 7),
+    ("SCHEMA-0006", "schema/migrations/000002_forward.up.sql", 28),
     ("SCHEMA-0004", "schema/migrations/000002_forward.up.sql", 7),
     ("SCHEMA-0002", "schema/migrations/000002_forward.up.sql", 11),
     ("SCHEMA-0001", "schema/migrations/000002_forward.up.sql", 15),

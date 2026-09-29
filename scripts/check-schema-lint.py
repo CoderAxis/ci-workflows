@@ -433,6 +433,11 @@ DESTRUCTIVE = (
 # The clause a single ADD COLUMN introduces: from the ADD to the next top-level comma
 # or the end of the statement. Read whole so DEFAULT is found wherever it sits.
 RE_DROP_TABLE_NAME = re.compile(r"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\w.]+)", re.I)
+# strip_comments() blanks the CONTENTS of the quoted body but leaves the statement,
+# so presence is readable here and wording is not. That is the right split: this gate
+# asks whether a table was described, never whether the description is any good.
+RE_COMMENT_TBL = re.compile(r"\bCOMMENT\s+ON\s+TABLE\s+([\w.]+)\s+IS\b", re.I)
+RE_PARTITION_OF = re.compile(r"\bPARTITION\s+OF\b", re.I)
 
 TEXTY = re.compile(r"^(TEXT|VARCHAR|CHARACTER\s+VARYING|CHAR)$", re.I)
 
@@ -551,9 +556,13 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
     expand_contract_files: set[str] = set()
     enum_types: set[str] = set()
     check_bodies: list[str] = []
+    described_tables: set[str] = set()
 
     # Pass 1 over the WHOLE repository: enum types and every CHECK body, so a
     # constraint declared in an earlier migration still counts for a later column.
+    # Table comments are gathered here for the same reason: a table created in the
+    # baseline and described by a later migration IS described, and in diff mode
+    # only that later migration is a target.
     for f in all_files:
         try:
             sql = strip_comments(f.read_text(encoding="utf-8", errors="replace"))
@@ -564,6 +573,8 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                 enum_types.add(m.group(1).split(".")[-1].lower())
             for m in re.finditer(r"\bCHECK\s*\(", stmt, re.I):
                 check_bodies.append(balanced(stmt, m.end() - 1))
+            for m in RE_COMMENT_TBL.finditer(stmt):
+                described_tables.add(m.group(1).split(".")[-1].lower())
 
     sites: list[dict] = []
     markers: list[dict] = []
@@ -668,6 +679,16 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                                   "line": line_of(stmt, sline, m.start()), "span": span,
                                   "detail": m.group(1)})
 
+            # A partition child is excluded: it carries no identity of its own and
+            # inherits the parent description, so demanding one would add a comment
+            # per month of retention.
+            cm = RE_CRE_TBL.search(stmt)
+            if cm and not RE_PARTITION_OF.search(stmt):
+                sites.append({"rule": "table", "file": rel,
+                              "line": line_of(stmt, sline, cm.start()), "span": span,
+                              "detail": cm.group(1).split(".")[-1].lower(),
+                              "table": cm.group(1).split(".")[-1].lower()})
+
             for col in _columns(stmt, sline, enum_types):
                 sites.append({"rule": "column", "file": rel, "line": col["line"],
                               "span": span, "detail": f"{col['table']}.{col['column']}",
@@ -677,6 +698,7 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
             "stmt_spans": stmt_spans,
             "expand_contract_files": expand_contract_files,
             "enum_types": enum_types, "check_bodies": check_bodies,
+            "described_tables": described_tables,
             "objects_scanned": len(sites), "parse_errors": parse_errors}
 
 
@@ -829,6 +851,29 @@ def rule_unconstrained_enumerated_column(facts: dict, doc: dict, ctl: dict) -> l
     return out
 
 
+def rule_table_without_comment(facts: dict, doc: dict, ctl: dict) -> list[Finding]:
+    """SCHEMA-0006: a table this PR creates carries no COMMENT ON TABLE.
+
+    Presence only. What a good description says is a review question, and a gate
+    that tried to judge wording would be a gate people learn to satisfy with one
+    word. The point is that the answer lives in pg_description rather than in a
+    `--` banner no tool, BI client or `\\d+` can read.
+
+    Satisfied by a comment anywhere in the repository, not just in the same
+    migration, because a migration is immutable once applied: describing an older
+    table means adding a new migration that comments it, and that must count.
+    """
+    c = ctl.get("SCHEMA-0006")
+    if not c or c["status"] != "active":
+        return []
+    described = facts.get("described_tables") or set()
+    return [_mk(c, s, f"table created with no COMMENT ON TABLE: {s['detail']}")
+            for s in facts["sites"]
+            if s["rule"] == "table"
+            and s["table"] not in described
+            and not excused(s, facts["markers"], {"scratch-table"})]
+
+
 def rule_orphan_marker(facts: dict, doc: dict, ctl: dict) -> list[Finding]:
     c = ctl["SCHEMA-0005"]
     if c["status"] != "active":
@@ -873,6 +918,7 @@ def evaluate(facts: dict, doc: dict) -> list[Finding]:
     findings += rule_add_constraint_not_valid(facts, doc, ctl)
     findings += rule_enum_hidden_from_codegen(facts, doc, ctl)
     findings += rule_unconstrained_enumerated_column(facts, doc, ctl)
+    findings += rule_table_without_comment(facts, doc, ctl)
     findings += rule_orphan_marker(facts, doc, ctl)
     # One finding per control per site: a reviewer needs the site once, not once per
     # rule that happened to reach it.
