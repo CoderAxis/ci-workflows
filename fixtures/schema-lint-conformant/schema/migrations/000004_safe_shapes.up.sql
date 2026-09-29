@@ -25,6 +25,9 @@ COMMENT ON COLUMN fixture_threads.body IS 'we will drop column legacy soon';
 --    the migration ever saw it, so dropping it loses nothing and needs no expand
 --    release. DROP TABLE carries no ALTER TABLE to read the name from, which is why
 --    the same-migration check had to learn to read it from the DROP itself.
+--    It also needs no description: nothing outside the migration can look it up, so
+--    SCHEMA-0006 is declined rather than satisfied.
+-- schema:allow reason=scratch-table adr=ADR-0062
 CREATE TABLE fixture_tmp_backfill (id uuid PRIMARY KEY, v text);
 UPDATE fixture_threads SET body = 'x' WHERE id IS NOT NULL;
 DROP TABLE fixture_tmp_backfill;

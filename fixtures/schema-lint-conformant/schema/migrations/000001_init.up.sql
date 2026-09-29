@@ -29,3 +29,11 @@ CREATE TABLE IF NOT EXISTS fixture_threads (
 ALTER TABLE fixture_threads
     ADD CONSTRAINT chk_fixture_threads_org_not_zero
     CHECK (org_id <> '00000000-0000-0000-0000-000000000000');
+
+-- The table says what it is, in the database rather than in a banner above it
+-- (SCHEMA-0006). One sentence, and it lands in pg_description where \d+ and a BI
+-- client can read it. Note the `--` inside the body: a description is prose and may
+-- contain anything, which is why strip_comments() blanks literal CONTENTS instead of
+-- truncating the line at the first dash.
+COMMENT ON TABLE fixture_threads IS
+    'A thread of messages on one channel -- the fixture stand-in for a real aggregate root.';
