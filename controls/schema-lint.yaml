@@ -187,6 +187,14 @@ reasons:
       The column name matches an enumerated shape but the value is genuinely open
       text authored by a user or an operator. Stops applying if the application ever
       begins to branch on the value.
+  - token: scratch-table
+    adr: ADR-0062
+    description: >-
+      The table exists only for the duration of the migration that creates it - a
+      backfill staging table populated from the write model and dropped before the
+      migration ends. It is never part of the end-state schema, so there is nothing
+      for a reader of the database to look up. Does not apply to a table that
+      survives the migration, however internal it is.
 
 # ---------------------------------------------------------------------------
 # Scan scope
@@ -373,3 +381,45 @@ controls:
       reason token is unknown, add it to `reasons` in this file in a reviewed PR.
     detector: orphan_marker
     refs: [ADR-0062]
+
+  - id: SCHEMA-0006
+    title: A table says what it is, in the database
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: minor
+    # enforce, and in diff mode that costs the fleet nothing today: the rule reads only
+    # migrations a PR ADDS, and a new table is commented in the same file that creates
+    # it. Unlike SCHEMA-0004 this is not a name heuristic, and unlike SCHEMA-0002 the
+    # legacy state IS repairable - a migration is immutable, but COMMENT ON is additive,
+    # so an older table is described by a NEW migration rather than by editing an
+    # applied one. That is what makes `enforce` honest here and `warn` unnecessary.
+    stage: enforce
+    waivable: true
+    policy: >-
+      A CREATE TABLE MUST be accompanied by a COMMENT ON TABLE for it, somewhere in the
+      repository. Partition children are exempt - they carry no identity of their own.
+      A table that exists only inside the migration that creates it MUST say so with a
+      `scratch-table` marker.
+    rationale: >-
+      Measured 2026-09-30 by this checker in --mode baseline over 33 *-core-postgres
+      repositories: 194 tables carry no COMMENT ON TABLE, and exactly 3 repositories are
+      clean - twilio-adapter, media and product. Reproducible with
+      `scripts/check-schema-lint.py --mode baseline --repo-root <repo> --format json`.
+      The gap is not that the schema is undocumented. It is documented, often carefully:
+      product-core-postgres 000001 alone carries 195 lines of `--` banner comments
+      explaining what each table is for. But a `--` comment is invisible to psql's \d+,
+      to pg_description, to a BI client and to anyone holding a connection rather than a
+      checkout - the knowledge was written down in the one place nothing can query.
+      SCHEMA-0005 already records the general form of this defect: a comment nothing
+      checks drifts from the DDL it claims to describe. A COMMENT ON cannot drift,
+      because it sits in the same hunk as the column and ships in the same migration.
+      product-core-postgres #50 is the worked example - 19 tables and 100 columns moved
+      from banners into pg_description with no schema change.
+    remediation: >-
+      Add `COMMENT ON TABLE <table> IS '...'` to the migration that creates it. For a
+      table already on main, add a new migration that comments it - COMMENT ON is not
+      destructive DDL and needs no expand-contract marker. Say what the table is for
+      and what a reader cannot infer from its columns; one sentence is enough.
+    detector: table_without_comment
+    refs: [ADR-0062, RFC-0027]
