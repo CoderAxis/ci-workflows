@@ -2353,6 +2353,81 @@ jobs:
 
           echo "present=true" >> "${GITHUB_OUTPUT}"
 
+      # A GitHub-hosted runner hands this job about 12 GiB of free disk: a 72 GiB root that the
+      # image fills to 60, and no second volume. The suite needs most of that. Measured on
+      # edge-gateway (its pull request 139 samples the disk from inside the suite; ubuntu-24.04
+      # image 20260927.320.1, 2 vCPU): three image builds, the cache they export and the running
+      # stack peak 8.8 GiB above where the suite started, 6.7 of it the builder's own state.
+      # Whatever the cache restore brought comes on top.
+      #
+      # So the job ran on a margin of 3 GiB at best, and the layer cache grew into it (see the
+      # restore step). edge-gateway's last green run ended with 0.8 GiB free. The nine after it
+      # ran out of disk inside the image build, and a red suite skips the image build and the
+      # GitOps pin, so the service stopped deploying on 2026-10-04.
+      #
+      # The room is on the image. It carries a toolchain for every ecosystem GitHub supports and
+      # this job uses git, Go, Docker and python3. .NET is 5.7 GiB and GHC 3.7, nothing here opens
+      # either, and removing both took 9 seconds. With them gone the suite's lowest point was
+      # 13.1 GiB free on an exact cache hit, and the same sums give 12.6 on a miss. The Android
+      # SDK is another 11.0 GiB and the CodeQL bundle 1.3, but those took 83 and 8 seconds to
+      # remove, so they stay where they are; they are the next place to look if a stack outgrows
+      # this.
+      #
+      # Named directories, never a pattern: setup-go, the next step, installs the one toolchain
+      # this job does use under /opt/hostedtoolcache.
+      #
+      # It is a step of its own, ahead of the builder and the cache restore, so it can touch
+      # neither and everything after it gets the room. "Free disk before saving the layer cache"
+      # at the end of this job cannot be moved up to do this: it removes the builder and every
+      # image, which is what the suite is about to use.
+      - name: Reclaim runner disk the suite builds into
+        if: steps.selection.outputs.present == 'true'
+        shell: bash
+        run: |
+          # No -e (the runner's bash starts with it): nothing in this step may fail the job. A
+          # path that is absent, or a runner with no passwordless sudo, leaves the disk as the
+          # image shipped it, which is the state this job ran in before this step existed.
+          set +e -uo pipefail
+          free_bytes() {
+            local avail
+            avail="$(df -B1 --output=avail "${RUNNER_TEMP}" 2>/dev/null | tail -n 1 | tr -d ' ')"
+            [[ "${avail}" =~ ^[0-9]+$ ]] || avail=0
+            echo "${avail}"
+          }
+          gib() { awk -v b="$1" 'BEGIN { printf "%.1f GiB", b / 1073741824 }'; }
+
+          start="$(free_bytes)"
+          echo "free before: $(gib "${start}")"
+          if ! sudo -n true 2>/dev/null; then
+            echo "::notice::no passwordless sudo on this runner, so nothing was reclaimed; the suite runs in $(gib "${start}")"
+            exit 0
+          fi
+          removed=0
+          for path in \
+            /usr/share/dotnet \
+            /usr/local/.ghcup; do
+            if [[ ! -e "${path}" ]]; then
+              echo "not on this image: ${path}"
+              continue
+            fi
+            was="$(free_bytes)"
+            began="${SECONDS}"
+            if sudo -n rm -rf -- "${path}"; then
+              removed=$(( removed + 1 ))
+              echo "removed ${path}: $(gib "$(( $(free_bytes) - was ))") in $(( SECONDS - began ))s"
+            else
+              echo "::warning::could not remove ${path}; the suite runs with less room"
+            fi
+          done
+          end="$(free_bytes)"
+          echo "free after: $(gib "${end}") ($(gib "$(( end - start ))") reclaimed)"
+          # The list above is a description of one runner image. When the image moves these
+          # directories, this step keeps passing and reclaims nothing, which is how a suite ends
+          # up back on the disk it started with and nobody is told. So say it.
+          if (( removed == 0 )); then
+            echo "::warning::End-to-end reclaimed no disk: none of the directories this step removes could be removed on this runner image, so the suite runs in $(gib "${end}"). The path list in service-ci.yaml needs revisiting."
+          fi
+
       - uses: actions/setup-go@v5
         if: steps.selection.outputs.present == 'true'
         with:
@@ -2386,6 +2461,36 @@ jobs:
       # just changed, so it misses by definition. That is expected, and it is why the cached
       # build is ~42s rather than ~0s.
       #
+      # An exact key or nothing. There used to be a `restore-keys` prefix here, and it is what
+      # stopped edge-gateway deploying on 2026-10-04.
+      #
+      # The prefix restored the newest older cache whenever go.sum had changed, and a changed
+      # go.sum is exactly what invalidates the layer this cache exists for. What it did carry over
+      # was every blob any earlier run had written. The suite exports with `type=local,mode=max`
+      # into the directory it imported from, and BuildKit's local exporter never removes a blob the
+      # new index stops referencing (reproduced with buildx 0.37.1: three exports of one changed
+      # 20 MB layer leave 60 MB on disk and 20 MB referenced). The save then wrote old and new
+      # together under the new key, and the next go.sum change inherited the lot.
+      #
+      # On edge-gateway main three saves from 2026-09-29 to 2026-10-04 took the archive from
+      # 1.90 GB to 3.21, 4.53 and 5.84, and the free space the suite finished with went 2.1 GiB,
+      # 0.9, 0.8. The step that guards the save let each one through, and was right to: it asks
+      # whether the archive fits on this runner now, not whether the next run can restore it and
+      # still build. Every run after the 5.84 GB save restored it and ran out of disk inside the
+      # image build, and a failed suite saves nothing, so the entry could never be replaced by a
+      # smaller one. auth-service's stopped at 6.49 GB only because its saves stopped fitting; each
+      # of its five main runs from 2026-10-01 to 2026-10-05 restored that for no cached step at
+      # all and finished with 1.2 to 1.3 GiB free.
+      #
+      # With an exact key, a saved cache was built from an empty directory by the one run that
+      # saved it, so it is one generation however often go.sum changes. A run that restores it
+      # adds its own changed layers on top, and that sum is never saved, because an exact hit
+      # skips the save.
+      #
+      # `v2` orphans every entry saved before this change, so a grown one cannot come back through
+      # an exact match on a branch that still has the old go.sum. GitHub evicts an entry nothing
+      # has read for seven days.
+      #
       # Restore and save are separate steps rather than one `actions/cache`, so that disk can be
       # freed between the suite and the save. See "Free disk before saving the layer cache".
       - name: Restore the image layer cache
@@ -2394,9 +2499,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/e2e-build-cache
-          key: e2e-build-${{ runner.os }}-${{ hashFiles('go.sum', 'Dockerfile') }}
-          restore-keys: |
-            e2e-build-${{ runner.os }}-
+          key: e2e-build-v2-${{ runner.os }}-${{ hashFiles('go.sum', 'Dockerfile') }}
 
       # Two owners, because an end-to-end stack spans two kinds of input. The images resolve
       # private Go modules from `coderaxis`, and the sibling services the stack builds from source
@@ -2453,6 +2556,10 @@ jobs:
       #
       # Then the save goes ahead only if the archive can fit with headroom to spare. A skipped
       # save costs the next run a slower build. A save that fills the disk costs a passed suite.
+      #
+      # What this step cannot do is protect the next run. It asks whether the archive fits here,
+      # now. Whether a later run can restore it and still build is decided by what that run
+      # restores, which is why the restore above takes an exact key and nothing else.
       - name: Free disk before saving the layer cache
         id: cachefit
         if: >-
