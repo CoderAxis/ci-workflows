@@ -383,6 +383,27 @@ jobs:
           }
           echo "assembled ${PLANNED} repositories"
 
+      # The C4 container views draw dependencies.synchronous, and until 2026-10-06 nothing compared
+      # that field with the code: it declared 19 edges while the fleet dialled 137, and every
+      # diagram gate was green. This reads every grpcx.Client/grpcx.Stub call site in the
+      # assembled fleet and fails on an undeclared or stale edge, on an upstream it cannot
+      # resolve, and on a gRPC connection opened outside grpcx. It needs nothing but the
+      # sources, so it runs before the module cache and the event gate: a step placed after a
+      # failing one is skipped, and that is how the gates below have sat unrun.
+      - name: Every cross-service gRPC call is declared in the caller's catalog entry
+        shell: bash
+        run: |
+          set -euo pipefail
+          checker="${DOCS_PATH}/scripts/check_sync_dependencies.py"
+          if [ ! -f "${checker}" ]; then
+            echo "::error::${checker} is not in this checkout. It is a required gate, so its" \
+                 "absence fails the job rather than skipping it."
+            exit 1
+          fi
+          python3 "${checker}" \
+            --root "${GITHUB_WORKSPACE}" \
+            --require-fleet
+
       # check_grpc_grants.py reads the generated *_grpc.pb.go of the contracts module out of the
       # Go module cache, at the version each repository pins, and that is how it knows which
       # method names belong to which interface. On a fresh runner the cache is empty, and an
