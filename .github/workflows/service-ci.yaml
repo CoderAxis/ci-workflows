@@ -1268,6 +1268,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
+          # cache: false like every other lane here: setup-go's post step uploads the Go caches, and on
+          # the self-hosted inboxxhq-ci pool that upload intermittently hangs until the job's timeout,
+          # cancelling a lane whose real work had passed (UUID policy and SQLC drift, 2026-10-08, three
+          # times in one day; each stalled a release or a dev deploy until rerun).
+          cache: false
 
       - name: Check out the central checker and control catalog
         uses: actions/checkout@v4
@@ -1370,7 +1375,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          # cache: false like every other lane here: setup-go's post step uploads the Go caches, and on
+          # the self-hosted inboxxhq-ci pool that upload intermittently hangs until the job's timeout,
+          # cancelling a lane whose real work had passed (UUID policy and SQLC drift, 2026-10-08, three
+          # times in one day; each stalled a release or a dev deploy until rerun).
+          cache: false
 
       - name: Mint module-read token
         id: modauth

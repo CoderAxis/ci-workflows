@@ -576,7 +576,12 @@ jobs:
         if: steps.ver.outputs.releasable == 'true'
         with:
           go-version-file: go.mod
-          cache: true
+          # cache: false like every other lane here: setup-go's post step uploads the Go caches, and on
+          # the self-hosted inboxxhq-ci pool that upload intermittently hangs until the job's timeout,
+          # cancelling a lane whose real work had passed (UUID policy and SQLC drift, 2026-10-08, three
+          # times in one day; each stalled a release or a dev deploy until rerun). A hang here would
+          # strand a computed version untagged.
+          cache: false
 
       # ── the runner must be able to run the race detector ──────────────────────────────────
       # The Test step below runs `go test -race`, and the race detector needs cgo. Go does not
