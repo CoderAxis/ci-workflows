@@ -414,7 +414,13 @@ jobs:
     # that passes in one and was never checked by the other.
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres:18
+        # docker.io, not public.ecr.aws, on purpose. This job runs on a GitHub-hosted runner, and
+        # GitHub does not apply Docker Hub's rate limit to public-image pulls from hosted runners.
+        # ECR Public caps anonymous pulls at 500 GB a month, hosted runners share egress addresses,
+        # and on 2026-10-12 jobs died in "Initialize containers" with "toomanyrequests: Data limit
+        # exceeded" before a test ran. Both registries serve the same digest for this tag. If the
+        # job moves to the self-hosted pool, revisit: from AWS the trade-off is the reverse.
+        image: docker.io/library/postgres:18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -1604,7 +1610,8 @@ jobs:
       id-token: write
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres:18
+        # docker.io on purpose: see the comment on the Build and test job's Postgres image.
+        image: docker.io/library/postgres:18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -1617,7 +1624,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       redis:
-        image: public.ecr.aws/docker/library/redis:7
+        image: docker.io/library/redis:7
         ports:
           - 6379/tcp
         options: >-
