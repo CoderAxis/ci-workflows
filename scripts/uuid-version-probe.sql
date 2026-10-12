@@ -20,7 +20,7 @@
 --
 -- POSTGRES VERSION. uuid_extract_version(uuid) is built in from PostgreSQL 18,
 -- which is what the fleet's schema-compatibility job pins
--- (public.ecr.aws/docker/library/postgres:18) and what the DDL's DEFAULT uuidv7()
+-- (docker.io/library/postgres:18) and what the DDL's DEFAULT uuidv7()
 -- already requires. Verified on 18.4: uuidv7() -> 7, gen_random_uuid() -> 4, a
 -- v5 value -> 5. On an older server, substitute the bit-masking form, which
 -- reads the version nibble straight out of the hex text and needs no builtin:

@@ -108,7 +108,8 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres:18
+        # docker.io on purpose: see the comment on service-ci.yaml's Build and test Postgres image.
+        image: docker.io/library/postgres:18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
