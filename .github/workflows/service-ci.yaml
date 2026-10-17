@@ -420,7 +420,15 @@ jobs:
         # and on 2026-10-12 jobs died in "Initialize containers" with "toomanyrequests: Data limit
         # exceeded" before a test ran. Both registries serve the same digest for this tag. If the
         # job moves to the self-hosted pool, revisit: from AWS the trade-off is the reverse.
-        image: docker.io/library/postgres:18
+        #
+        # pgvector's image, not the stock one: it is postgres:18 with the vector extension
+        # installed, which is what the managed databases these services run on offer. On the stock
+        # image every test of an embedding column or a vector index skipped ("pgvector is not
+        # installed on this server"), so the vector half of retrieval -- including the proof that
+        # one organization's passages never reach another's -- was reported green without ever
+        # running. A repo that never creates the extension sees exactly the stock server.
+        # The pgvector release is pinned; the Postgres minor floats as it did on postgres:18.
+        image: docker.io/pgvector/pgvector:0.8.7-pg18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -1610,8 +1618,9 @@ jobs:
       id-token: write
     services:
       postgres:
-        # docker.io on purpose: see the comment on the Build and test job's Postgres image.
-        image: docker.io/library/postgres:18
+        # docker.io on purpose, and pgvector's image: see the comment on the Build and test job's
+        # Postgres image.
+        image: docker.io/pgvector/pgvector:0.8.7-pg18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
