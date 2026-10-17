@@ -77,6 +77,21 @@ on:
         required: false
         type: string
         default: integration
+      go_race_packages:
+        description: >-
+          Packages to run again under the race detector, as `go test` takes them
+          (e.g. "./internal/adapters/inbound/http ./internal/adapters/events"), with the same
+          build tags as the coverage run. Empty, the default, runs no race pass.
+
+          Opt-in and per package rather than fleet-wide, because -race multiplies a package's
+          run time by five to ten: a service whose request path shares mutable state across
+          goroutines -- a menu cache read by every search while catalogue events rebuild it --
+          names those packages, and pays for exactly them. It runs in this job, beside the
+          coverage run, so a repo needs no workflow of its own and no second module token to
+          get it.
+        required: false
+        type: string
+        default: ""
 
 # No `secrets:` block, deliberately. Every token this pipeline uses is minted from the job's own
 # OIDC identity via ci-app-token and ci-slack-notify, so a repository forwards nothing: the
@@ -577,6 +592,21 @@ jobs:
           GOWORK=off go test -tags="${GO_TAGS}" -coverpkg="${list}" "${pkgs[@]}" \
             -coverprofile=coverage.out -covermode=atomic
           go tool cover -func=coverage.out | tail -5
+
+      - name: Race detector on the packages the repo names
+        if: inputs.go_race_packages != ''
+        shell: bash
+        env:
+          KUBERNETES_SERVICE_HOST: ""
+          GO_TAGS: ${{ inputs.go_build_tags }}
+          RACE_PACKAGES: ${{ inputs.go_race_packages }}
+        run: |
+          set -euo pipefail
+          # Split on whitespace into an array, never expanded unquoted: a caller's string is a
+          # list of package patterns, not shell.
+          read -r -a race_pkgs <<<"${RACE_PACKAGES}"
+          [[ ${#race_pkgs[@]} -gt 0 ]] || { echo "::error::go_race_packages is set but names no package"; exit 1; }
+          GOWORK=off go test -race -count=1 -timeout 30m -tags="${GO_TAGS}" "${race_pkgs[@]}"
 
       - name: Check out the central checkers
         uses: actions/checkout@v4
