@@ -108,8 +108,10 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        # docker.io on purpose: see the comment on service-ci.yaml's Build and test Postgres image.
-        image: docker.io/library/postgres:18
+        # docker.io on purpose, and pgvector's image: see the comment on service-ci.yaml's Build
+        # and test Postgres image. The same server as the tests, so a migration that creates the
+        # vector extension when it is available is checked down the path production takes.
+        image: docker.io/pgvector/pgvector:0.8.7-pg18
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
