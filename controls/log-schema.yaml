@@ -829,7 +829,8 @@ redaction:
 
   mask:
     email: [email, user_email, admin_email, customer_email, recipient]
-    phone: [phone, phone_number, phone_numbers, phonenumber, from_phone, to_phone, msisdn]
+    phone: [phone, phone_number, phone_numbers, phonenumber, from_phone, to_phone, msisdn,
+            caller_id, caller_number, called_number, from_number, to_number]
     path: [http_target]
     ip: [client_ip]
 
@@ -845,7 +846,16 @@ redaction:
   # not there), a string is masked, and a composite this cannot see into is replaced wholesale.
   mask_suffix:
     email: [_email, _emails]
-    phone: [_phone, _phones]
+    phone: [_phone, _phones, _e164]
+
+  # A phone number is also masked by its shape, under any key and anywhere in a string value,
+  # an error's message, a string slice or the message itself: a plus (or %2B in a query string),
+  # then 8 to 15 digits, kept as ***1234. Keys are not enough on their own. The voice services
+  # wrote callers' numbers under from, to, caller_number and caller_id, in a Twilio error quoting
+  # the number it refused, and in a TwiML URL's query. A bare from, to or caller is not a mask
+  # key, because under it sit breaker states, agent ids and service names; the shape rule finds
+  # the number there without blanking those. A timezone offset (+05:30) is too short to match.
+  # check-log-schema.py does not compare this rule; logging/client.go maskNumbers is its source.
 
   # Keys that end in a masked suffix but do not hold the value. org_id_from_phone is an org id
   # looked up BY a number: masking it would cost a join without hiding anything. phone_sid and
