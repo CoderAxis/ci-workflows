@@ -1523,6 +1523,38 @@ jobs:
             exit 1
           fi
 
+  # ── hub layouts (scripts/hub_layout.py) ──────────────────────────────────────────────────────
+  # The fleet scripts that read many repositories at once - the record-kind ratchet, the contract
+  # classification audit, the log-schema triple, the docs-governance control lookup - run against
+  # the microservices hub, and the hub is moving from category-first paths to core/ plus one
+  # folder per client a few repositories at a time. A moved repository leaves a compat link that
+  # is going away, and Path.rglob never followed one anyway: on the day this job was added, the
+  # ratchet run against the hub skipped 4287 of its 5245 Go files and reported a record kind as
+  # emitted nowhere. Nothing in CI reads the hub, so nothing here would notice that either.
+  #
+  # So each script is pointed at the same synthetic tree laid out four ways - legacy, owner-first,
+  # mixed with compat links, and with a further client folder - and must say exactly what it says
+  # about the legacy one, with every path in the legacy spelling the control files use.
+  # check-service-ports.py's half lives in test_service_ports.py, run by service-ports-controls.
+  hub-layout:
+    name: Hub layouts - fleet scripts read both layouts alike
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependency
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Legacy, owner-first, mixed and multi-client hubs read the same
+        run: python3 scripts/test_hub_layout.py
+
   # ── run triage (a refused job against a gate verdict) ────────────────────────────────────────
   # Asserts that the one signal distinguishing "GitHub would not start this job" from "this gate
   # ran and failed" still works, because for 28 minutes on 2026-08-11 nothing did.

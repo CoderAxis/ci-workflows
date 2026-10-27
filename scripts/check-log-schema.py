@@ -28,6 +28,9 @@ Usage:
     python3 ci-workflows/scripts/check-log-schema.py
     python3 ci-workflows/scripts/check-log-schema.py --repo-root /path/to/monorepo
 
+`--repo-root` is the hub in either layout: each of the three is found at its legacy path or under
+`core/` (see hub_layout.py), and messages name it by its legacy path either way.
+
 The three paths can also be given individually, because in CI the three repositories are checked
 out side by side rather than in the monorepo layout:
 
@@ -45,6 +48,9 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hub_layout  # noqa: E402 - beside this script; see hub_layout.py for the two layouts
 
 try:
     import yaml
@@ -360,10 +366,11 @@ def main() -> None:
                         help="path to the platform-shared-go module root")
     args = parser.parse_args()
 
-    root = Path(args.repo_root).resolve() if args.repo_root else Path(__file__).resolve().parents[2]
-    control_path = Path(args.control).resolve() if args.control else root / CONTROL_PATH
-    standard_path = Path(args.standard).resolve() if args.standard else root / STANDARD_PATH
-    module_path = Path(args.go_module).resolve() if args.go_module else root / GO_MODULE_PATH
+    root = Path(args.repo_root).resolve() if args.repo_root else hub_layout.default_root(__file__)
+    hub = hub_layout.Hub(root)
+    control_path = Path(args.control).resolve() if args.control else hub.resolve(CONTROL_PATH)
+    standard_path = Path(args.standard).resolve() if args.standard else hub.resolve(STANDARD_PATH)
+    module_path = Path(args.go_module).resolve() if args.go_module else hub.resolve(GO_MODULE_PATH)
 
     control = load_control(control_path)
     go = dump_go_registry(module_path)
