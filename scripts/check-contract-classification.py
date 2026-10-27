@@ -38,16 +38,22 @@ cannot appear while the twelve are worked off, and removing an entry is a review
     ./scripts/check-contract-classification.py --catalog docs/core-docs/catalog/services \
         --workspace .                                    # fleet-wide audit, for local use
 
+The fleet audit's --workspace is the hub in either layout: a deployable is looked for at its
+legacy path (services/<domain>/<repo>, gateways/<repo>) and at the same path under core/ and
+under each client folder (see hub_layout.py).
+
 Exit 0 when the invariant holds (or is allowlisted), 1 on a violation, 2 on bad inputs.
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
 import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hub_layout  # noqa: E402 - beside this script; see hub_layout.py for the two layouts
 
 try:
     import yaml
@@ -167,13 +173,18 @@ def deployable_root(workspace: Path, entry: dict) -> Path | None:
     Only used by the fleet-wide audit. In CI the repo under test is $PWD and no search
     happens, which is the point: a search that guesses wrong in CI would judge one service
     by another's files.
+
+    Each shape is looked for in both hub layouts, so a repository that moved to core/ or to its
+    client folder is still found once its compat link is gone. `include_hidden=False` keeps the
+    glob.glob rule this search was written against: a wildcard never matches a dot-directory.
     """
     dep = (entry.get("deployable_repository") or {}).get("name")
     if not dep:
         return None
+    hub = hub_layout.Hub(workspace)
     for pattern in (f"services/*/{dep}", f"gateways/{dep}", f"services/{dep}"):
-        for hit in glob.glob(str(workspace / pattern)):
-            return Path(hit)
+        for hit in hub.glob(pattern, include_hidden=False):
+            return hit
     return None
 
 

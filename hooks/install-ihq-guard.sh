@@ -23,17 +23,33 @@ for arg in "$@"; do
     *) ROOT="${arg}" ;;
   esac
 done
-ROOT="${ROOT:-$(cd "${HERE}/../.." && pwd)}"
+# The hub holds this checkout at ci-workflows/ (category-first) or core/ci-workflows/
+# (owner-first); either way the hub is the directory above the owner folder.
+if [[ -z "${ROOT}" ]]; then
+  ROOT="$(cd "${HERE}/../.." && pwd)"
+  if [[ "$(basename "${ROOT}")" == "core" ]]; then
+    ROOT="$(dirname "${ROOT}")"
+  fi
+fi
+
+# ihq lives in the InboxxHQ client's tools: tools/inboxxhq-cli before the move,
+# inboxxhq/tools/inboxxhq-cli after it.
+CLI_DIRS=("${ROOT}/tools/inboxxhq-cli" "${ROOT}/inboxxhq/tools/inboxxhq-cli")
 
 ihq_bin() {
   if [[ -n "${IHQ_BIN:-}" && -x "${IHQ_BIN}" ]]; then echo "${IHQ_BIN}"; return 0; fi
   if command -v ihq >/dev/null 2>&1; then command -v ihq; return 0; fi
-  if [[ -x "${ROOT}/tools/inboxxhq-cli/ihq" ]]; then echo "${ROOT}/tools/inboxxhq-cli/ihq"; return 0; fi
+  local dir
+  for dir in "${CLI_DIRS[@]}"; do
+    if [[ -x "${dir}/ihq" ]]; then echo "${dir}/ihq"; return 0; fi
+  done
   return 1
 }
 
 if ! BIN="$(ihq_bin)"; then
-  echo "the ihq CLI is required: (cd ${ROOT}/tools/inboxxhq-cli && make install)" >&2
+  cli="${CLI_DIRS[0]}"
+  if [[ -d "${CLI_DIRS[1]}" ]]; then cli="${CLI_DIRS[1]}"; fi
+  echo "the ihq CLI is required: (cd ${cli} && make install)" >&2
   exit 1
 fi
 

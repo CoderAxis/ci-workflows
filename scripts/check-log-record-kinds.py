@@ -53,6 +53,13 @@ repository can answer, and asking it there would fail every service for the kind
 happen to emit. So the ratchet runs where the fleet is visible and announces itself skipped where
 it is not, rather than being quietly approximated.
 
+The fleet-wide tree is the hub in either of its layouts - category-first (`services/`,
+`gateways/`, `shared/`, `tools/` at the root) or owner-first (the same categories under `core/`
+and under each client folder), or a mix of the two while repositories move. `hub_layout.py`
+finds every repository at its real path, and paths are reported and matched in the legacy
+spelling (`services/org/org-core/...`) whichever layout the file was read from, so the control
+file's entries hold in both.
+
 Usage:
 
     python3 ci-workflows/scripts/check-log-record-kinds.py
@@ -67,6 +74,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hub_layout  # noqa: E402 - beside this script; see hub_layout.py for the two layouts
+
 try:
     import yaml
 except ImportError:  # pragma: no cover - CI installs it; local runs get a usable message
@@ -78,7 +88,8 @@ CONTROL_PATH = Path("ci-workflows/controls/log-schema.yaml")
 # event_name is legitimately written, and where the Record implementations live.
 LOGGING_PACKAGE = Path("shared/platform-shared-go/logging")
 
-# Trees that are scanned. Anything outside them is not a platform service.
+# Trees that are scanned. Anything outside them is not a platform service. These are categories:
+# in the owner-first hub each is scanned at the root, under core/ and under every client folder.
 SCAN_ROOTS = ("services", "gateways", "shared", "tools")
 
 # Directories that never contain a platform emitter.
@@ -142,22 +153,30 @@ def load_control(path: Path) -> dict:
 
 
 def detect_layout(root: Path) -> str:
-    """`monorepo` when the tree holds many repositories, `repo` when it is one."""
-    return "monorepo" if any((root / r).is_dir() for r in SCAN_ROOTS) else "repo"
+    """`monorepo` when the tree holds many repositories, `repo` when it is one.
+
+    A scanned category at the root (category-first) or under `core/` (owner-first) makes it the
+    hub; the root-level test is unchanged, so a tree that was `repo` before still is.
+    """
+    return hub_layout.detect_layout(root, SCAN_ROOTS)
 
 
-def go_files(root: Path, layout: str) -> list[Path]:
-    bases = [root / r for r in SCAN_ROOTS if (root / r).is_dir()] if layout == "monorepo" else [root]
-    out: list[Path] = []
-    for base in bases:
-        for path in base.rglob("*.go"):
-            if skipped(path.relative_to(root).parts):
-                continue
-            if path.name.endswith("_test.go"):
-                continue
-            if path.name.endswith(".pb.go") or path.name.endswith("_grpc.pb.go"):
-                continue
-            out.append(path)
+def go_files(root: Path, layout: str) -> list[tuple[Path, str]]:
+    """Each Go file to read, with its path from the root in the legacy spelling."""
+    if layout == "monorepo":
+        hub = hub_layout.Hub(root)
+        found = ((path, hub.logical(path)) for path in hub.rglob(SCAN_ROOTS, "*.go"))
+    else:
+        found = ((path, str(path.relative_to(root))) for path in root.rglob("*.go"))
+    out: list[tuple[Path, str]] = []
+    for path, rel in found:
+        if skipped(Path(rel).parts):
+            continue
+        if path.name.endswith("_test.go"):
+            continue
+        if path.name.endswith(".pb.go") or path.name.endswith("_grpc.pb.go"):
+            continue
+        out.append((path, rel))
     return out
 
 
@@ -188,11 +207,13 @@ def under_package(rel: str, owner: str) -> bool:
     return any(rel == p or rel.startswith(p + "/") for p in package_prefixes(owner))
 
 
-def logical(path: Path, root: Path, prefix: str) -> str:
+def logical(rel: str, prefix: str) -> str:
     """The path to report and to match control-file entries against.
 
-    In monorepo layout that is simply the path from the root, which is what the control file
-    records. In repo layout the checkout has been stripped of everything above it, so the
+    In monorepo layout that is simply the path from the root in the legacy spelling, which is
+    what the control file records: `go_files` has already mapped an owner-first path
+    (`core/services/...`, `inboxxhq/gateways/...`) back to it. In repo layout the checkout has
+    been stripped of everything above it, so the
     repository's own name is put back, which restores the one component that makes
     `internal/adapters/.../webhook_handler.go` attributable to a service rather than to six of
     them.
@@ -203,10 +224,6 @@ def logical(path: Path, root: Path, prefix: str) -> str:
     entry misses and a conforming repository fails this gate for a reason that is not about its
     code. Callers that know better say so with --repo-name; `ihq git guard` passes it.
     """
-    try:
-        rel = str(path.relative_to(root))
-    except ValueError:
-        return str(path)
     return f"{prefix}/{rel}" if prefix else rel
 
 
@@ -387,12 +404,17 @@ def main() -> None:
                              "is named after the branch rather than the repository.")
     args = parser.parse_args()
 
-    root = Path(args.repo_root).resolve() if args.repo_root else Path(__file__).resolve().parents[2]
-    control_path = Path(args.control).resolve() if args.control else root / CONTROL_PATH
+    root = Path(args.repo_root).resolve() if args.repo_root else hub_layout.default_root(__file__)
     if not root.is_dir():
         cannot_run(f"--repo-root is not a directory: {root}")
 
     layout = detect_layout(root) if args.layout == "auto" else args.layout
+    if args.control:
+        control_path = Path(args.control).resolve()
+    elif layout == "monorepo":
+        control_path = hub_layout.Hub(root).resolve(CONTROL_PATH)
+    else:
+        control_path = root / CONTROL_PATH
     if args.repo_name and layout == "monorepo":
         cannot_run("--repo-name names one repository, and monorepo layout scans many; there the "
                    "name of each comes from its own directory")
@@ -410,9 +432,9 @@ def main() -> None:
 
     prefix = "" if layout == "monorepo" else (args.repo_name or root.name)
     corpus: list[tuple[str, str]] = []
-    for path in paths:
+    for path, rel in paths:
         try:
-            corpus.append((logical(path, root, prefix),
+            corpus.append((logical(rel, prefix),
                            path.read_text(encoding="utf-8", errors="replace")))
         except OSError:
             continue

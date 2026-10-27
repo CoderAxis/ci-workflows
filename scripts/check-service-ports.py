@@ -52,6 +52,13 @@ So --workspace names an assembled tree, laid out as platform-governance.yaml ass
     gateways/<repo>/                                             Dockerfile, contract
     shared/platform-shared-go/platform/servicediscovery/ports.generated.go
 
+The microservices hub is also a valid workspace, in either layout: category-first as above, or
+owner-first, where the same trees sit under core/ and under each client folder
+(core/shared/platform-shared-go, inboxxhq/services/<domain>/<repo>, ...), or a mix of the two
+while repositories move. Each tree is looked for in both (hub_layout.py), a repository reached
+through a compat link and at its real path counts once, and every path reported keeps the
+legacy spelling above, so findings, baselines and evidence read the same in every layout.
+
 ports.generated.go holds TWO tables since the RFC-0007 §4 split: clusterPorts, generated from
 the manifests, and localPorts, the per-service allocation §4.2 retains for a workstation. They
 have the same shape, so each is located by name -- collecting entries from both would leave
@@ -92,6 +99,9 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hub_layout  # noqa: E402 - beside this script; see hub_layout.py for the two layouts
 
 try:
     import yaml
@@ -221,11 +231,12 @@ class Workspace:
 
     def __init__(self, root: Path):
         self.root = root
-        self.infra = root / "infra" / "inboxxhq-infra"
-        self.registry_path = (root / "shared" / "platform-shared-go" / "platform" /
-                              "servicediscovery" / "ports.generated.go")
-        self.alloc_path = (root / "shared" / "platform-shared-go" / "platform" /
-                           "servicediscovery" / "localports.yaml")
+        # Every tree below is found in either hub layout; see hub_layout.py.
+        self.hub = hub_layout.Hub(root)
+        self.infra = self.hub.resolve("infra/inboxxhq-infra")
+        shared_go = self.hub.resolve("shared/platform-shared-go")
+        self.registry_path = shared_go / "platform" / "servicediscovery" / "ports.generated.go"
+        self.alloc_path = shared_go / "platform" / "servicediscovery" / "localports.yaml"
         self.registry: dict[str, tuple[int, int]] = {}       # clusterPorts: what a Pod answers on
         self.local_registry: dict[str, tuple[int, int]] = {}  # localPorts: what a laptop binds
         # localports.yaml, the SOURCE the local half is generated from. ports.generated.go is
@@ -347,8 +358,9 @@ class Workspace:
                                              "local entries")
 
     def _rel(self, path: Path) -> str:
+        """A path as reports name it: from the root, in the legacy spelling in either layout."""
         try:
-            return str(path.relative_to(self.root))
+            return self.hub.logical(path)
         except ValueError:
             return str(path)
 
@@ -371,7 +383,8 @@ class Workspace:
     # repository into an SP-0004 finding about a port it legitimately owns.
     def _load_repos(self) -> None:
         for pattern in ("services/*/*", "gateways/*"):
-            for path in sorted(self.root.glob(pattern)):
+            # Both layouts, each repository once, in legacy-path order (hub_layout.Hub.glob).
+            for path in self.hub.glob(pattern):
                 if not path.is_dir():
                     continue
                 name = self._service_name_of(path)
@@ -726,7 +739,7 @@ def _catalog_ports(ws: Workspace) -> dict[str, int]:
     rollout reads it. An unread copy that is right is one deploy away from being an unread
     copy that is wrong.
     """
-    catalog = ws.root / "docs" / "core-docs" / "catalog" / "services"
+    catalog = ws.hub.resolve("docs/core-docs/catalog/services")
     if not catalog.is_dir():
         return {}
     found: dict[str, int] = {}
@@ -1265,7 +1278,7 @@ ROUTING_PORT_KEYS = ("port", "grpc_port", "metrics_port", "http_port")
 
 def routing_config_holds_no_ports(ws: Workspace) -> Finding:
     violations = []
-    for gateway in sorted((ws.root / "gateways").glob("*")):
+    for gateway in ws.hub.glob("gateways/*"):
         if not gateway.is_dir():
             continue
         for path in sorted(gateway.rglob("service-registry.yaml")):
@@ -1299,7 +1312,7 @@ def routing_config_holds_no_ports(ws: Workspace) -> Finding:
 # A gateway's own bind port, as written in its committed config, per environment.
 def gateway_bind_port_is_right_for_its_environment(ws: Workspace) -> Finding:
     violations, checked = [], 0
-    for gateway in sorted((ws.root / "gateways").glob("*")):
+    for gateway in ws.hub.glob("gateways/*"):
         env_dir = gateway / "config" / "environments"
         if not env_dir.is_dir():
             continue

@@ -822,6 +822,12 @@ python3 scripts/check-service-ports.py --write-docs README.md
 python3 scripts/test_service_ports.py
 ```
 
+`--workspace` may also be the microservices hub itself, in its category-first layout, its owner-first
+one (`core/` plus one folder per client) or anywhere in between. [`scripts/hub_layout.py`](scripts/hub_layout.py)
+finds each tree in either, counts a repository and its compat link once, and keeps every reported path
+in the legacy spelling the baseline uses. The record-kind, contract-classification and log-schema
+checkers read the hub the same way; `scripts/test_hub_layout.py` holds all of them to it.
+
 Two things it deliberately does **not** do.
 
 **SP-0007 does not enforce the `*_SERVICE_URL` prohibition, it only counts it.** The two existing
