@@ -49,6 +49,9 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hub_layout  # noqa: E402 - beside this script; see hub_layout.py for the two layouts
+
 try:
     import yaml
 except ModuleNotFoundError as exc:  # pragma: no cover
@@ -628,9 +631,14 @@ class DocsRepo:
         others, so the control is looked for at the root and then upwards. Returning None
         rather than [] keeps "I could not find the file" distinguishable from "the file
         declares no homes"; the first is a skip, the second is a broken control.
+
+        An ancestor that is the hub is asked in both of its layouts, because ci-workflows sits
+        at `core/ci-workflows` once it has moved and its legacy link is gone (hub_layout.py).
         """
         for base in (self.root, *self.root.resolve().parents):
             control = base / LOG_SCHEMA_CONTROL_PATH
+            if not control.exists() and hub_layout.is_hub(base):
+                control = hub_layout.Hub(base).resolve(LOG_SCHEMA_CONTROL_PATH)
             if not control.exists():
                 control = base / LOG_SCHEMA_CONTROL_PATH.name
                 if base.name != "controls" or not control.exists():

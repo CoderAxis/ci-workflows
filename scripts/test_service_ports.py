@@ -10,6 +10,7 @@ cannot fail, which is the failure RFC-0007 §10 records about the previous Docke
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 import sys
 import tempfile
@@ -755,6 +756,155 @@ expect(any(r["control"] == "SP-0005" and r["result"] == "fail" for r in tightene
 loosened = m.evaluate(run(), catalog["controls"], {"SP-0005": 3})
 expect(any(r["control"] == "SP-0005" and r["result"] == "improved" for r in loosened),
        "wiring: a count below the baseline must report as improved")
+
+
+# --- hub layouts (hub_layout.py) --------------------------------------------------------------
+#
+# --workspace may be the microservices hub itself, and the hub is moving from category-first paths
+# to core/ plus one folder per client, a few repositories at a time, each leaving a compat link at
+# its old path until the links are removed. The checker has to read the same workspace in every
+# one of those states - same repositories, same services, same verdicts - and name every path the
+# legacy way, because that is what baselines, reports and CI's assembled workspace all use. A
+# compat link and the repository it points at are one repository: counting both would make
+# SP-0018 report every moved service as claimed twice.
+
+# Where each legacy tree lives once it has moved: the cores in core/, InboxxHQ's repos in inboxxhq/.
+OWNER_OF = {"shared": "core", "docs": "core", "infra": "inboxxhq",
+            "services": "inboxxhq", "gateways": "inboxxhq"}
+# In the mixed hub these three have moved and left a link; everything else is still unmoved.
+MOVED = {"shared/platform-shared-go", "services/alpha/inboxxhq-alpha-service",
+         "gateways/inboxxhq-gamma-gateway"}
+
+
+def repo_of(rel: str) -> str:
+    parts = rel.split("/")
+    return "/".join(parts[:3] if parts[0] == "services" else parts[:2])
+
+
+def owner_first(rel: str) -> str:
+    return f"{OWNER_OF[rel.split('/')[0]]}/{rel}"
+
+
+def run_hub(layout: str, overrides: dict[str, str] | None = None,
+            extra: dict[str, str] | None = None):
+    """BASE_TREE plus `overrides` (both legacy-spelled) laid out as `layout`; `extra` verbatim."""
+    holder = tempfile.TemporaryDirectory()
+    _TREES.append(holder)
+    root = pathlib.Path(holder.name)
+    tree = dict(BASE_TREE)
+    tree.update(overrides or {})
+    links = set()
+    for rel, text in tree.items():
+        moved = layout == "owner-first" or (layout == "mixed" and repo_of(rel) in MOVED)
+        if moved and layout == "mixed":
+            links.add(repo_of(rel))
+        path = root / (owner_first(rel) if moved else rel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    for repo in sorted(links):
+        link = root / repo
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(os.path.relpath(root / owner_first(repo), link.parent),
+                        target_is_directory=True)
+    for rel, text in (extra or {}).items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return m.Workspace(root)
+
+
+def fingerprint(ws) -> dict:
+    """Everything a layout must not change: the model, and every detector's verdict and wording."""
+    return {
+        "repos": {name: [ws._rel(p) for p in paths]
+                  for name, paths in sorted(ws.repo_service_names.items())},
+        "primary": {name: ws._rel(p) for name, p in sorted(ws.repos_by_service.items())},
+        "services": sorted(ws.services),
+        "registry": sorted(ws.registry.items()),
+        "local": sorted(ws.local_registry.items()),
+        "alloc": sorted(ws.alloc.items()),
+        "errors": (ws.registry_error, ws.local_registry_error, ws.alloc_error),
+        "findings": {name: (f.count, f.indeterminate, f.evidence, tuple(f.details))
+                     for name, f in ((n, d(ws)) for n, d in sorted(m.DETECTORS.items()))},
+    }
+
+
+# Defects whose findings name a file, one per tree a repository can live in, so a path that leaked
+# out in its owner-first spelling would change the fingerprint rather than pass unnoticed.
+HUB_DEFECTS = {
+    "gateways/inboxxhq-gamma-gateway/config/environments/prod.yaml":
+        "environment: prod\nserver:\n  port: 80\n",
+    "gateways/inboxxhq-gamma-gateway/config/base/service-registry.yaml":
+        yaml.safe_dump({"service_registry": {"domain_services": [
+            {"name": "inboxxhq-alpha-service", "port": 4002, "resources": ["alpha"]}]}}),
+    "services/alpha/inboxxhq-alpha-service/env.example":
+        "ENVIRONMENT=local\nPORT=8080\nGRPC_PORT=50051\nMETRICS_PORT=9464\n",
+    "docs/core-docs/catalog/services/alpha-service.yaml":
+        "name: alpha-service\ncanonical_port: 4031\n",
+    "infra/inboxxhq-infra/services/alpha-service/base/servicemonitor.yaml":
+        monitor_yaml("alpha-service", 9464),
+}
+
+for label, overrides in (("conformant", None), ("defective", HUB_DEFECTS)):
+    legacy = fingerprint(run_hub("legacy", overrides))
+    expect(legacy == fingerprint(run(overrides)),
+           f"hub layouts ({label}): run_hub('legacy') must build the same workspace as run()")
+    for layout in ("owner-first", "mixed"):
+        got = fingerprint(run_hub(layout, overrides))
+        for key in legacy:
+            expect(got[key] == legacy[key],
+                   f"hub layouts ({label}): the {layout} hub reads {key} differently from the "
+                   f"legacy one:\n    legacy:      {legacy[key]}\n    {layout}: {got[key]}")
+
+ws = run_hub("owner-first", HUB_DEFECTS)
+expect(ws._rel(ws.registry_path)
+       == "shared/platform-shared-go/platform/servicediscovery/ports.generated.go",
+       f"hub layouts: core/shared/... must be reported by its legacy path; got "
+       f"{ws._rel(ws.registry_path)}")
+details = " ".join(m.gateway_bind_port_is_right_for_its_environment(ws).details)
+expect("(gateways/inboxxhq-gamma-gateway/config/environments/prod.yaml)" in details
+       and "inboxxhq/gateways" not in details,
+       f"hub layouts: an owner-first gateway's finding must name its legacy path; got {details}")
+expect(m.contract_ports_match_service(ws).count == 1,
+       "hub layouts: the core-docs catalog must be read from core/docs/core-docs")
+
+ws = run_hub("mixed")
+finding = m.one_repository_per_service(ws)
+expect(finding.count == 0 and len(ws.repo_service_names["alpha-service"]) == 1,
+       f"hub layouts: a compat link and its target are one repository, not two; got "
+       f"{ws.repo_service_names['alpha-service']} - {finding.details}")
+
+# A further client folder is read like any other, in every layout, and a repository in it that
+# claims an InboxxHQ service name is a second claimant - the defect SP-0018 exists for, now
+# possible across two owners instead of within one.
+CODERAXIS = {
+    "coderaxis/gateways/coderaxis-zeta-gateway/config/environments/prod.yaml":
+        "environment: prod\nserver:\n  port: 80\n",
+    "coderaxis/services/alpha/coderaxis-alpha-copy/service.contract.yaml":
+        "service:\n  name: alpha-service\n  ports:\n    http: 8080\n",
+    "coderaxis/services/alpha/coderaxis-alpha-copy/Dockerfile":
+        "FROM alpine:3.24\nEXPOSE 4009\n",
+    # Not owners: an archive and a hidden worktree folder holding the same shape are not read.
+    "_archive/services/alpha/inboxxhq-alpha-old/service.contract.yaml":
+        "service:\n  name: alpha-service\n",
+    ".worktrees/services/alpha/inboxxhq-alpha-wt/service.contract.yaml":
+        "service:\n  name: alpha-service\n",
+}
+for layout in ("legacy", "owner-first", "mixed"):
+    ws = run_hub(layout, extra=CODERAXIS)
+    details = " ".join(m.gateway_bind_port_is_right_for_its_environment(ws).details)
+    expect("RESERVED" in details
+           and "(gateways/coderaxis-zeta-gateway/config/environments/prod.yaml)" in details,
+           f"hub layouts ({layout}): a gateway in coderaxis/ must be read and named by its "
+           f"legacy path; got {details}")
+    finding = m.one_repository_per_service(ws)
+    expect(finding.count == 1
+           and "services/alpha/coderaxis-alpha-copy, services/alpha/inboxxhq-alpha-service"
+           in " ".join(finding.details),
+           f"hub layouts ({layout}): a second claimant in coderaxis/ must be caught, and nothing "
+           f"from _archive/ or .worktrees/ counted; got {finding.details}")
+    expect(m.dockerfile_ports_are_own(ws).count == 1,
+           f"hub layouts ({layout}): the coderaxis/ copy's Dockerfile must be read")
 
 
 if FAILURES:
