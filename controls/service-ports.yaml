@@ -152,7 +152,7 @@ controls:
       Set EXPOSE and HEALTHCHECK to this service's own ports, taken from its Kubernetes
       Service. During the port migration they move in the same commit as the manifests.
     detector: dockerfile_ports_are_own
-    refs: [RFC-0007, ADR-0072]
+    refs: [RFC-0007, ADR-0073]
 
   - id: SP-0005
     title: A service's declared ports match what its Kubernetes Service publishes
