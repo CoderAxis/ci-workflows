@@ -2,7 +2,7 @@
 """Enterprise Dockerfile Standard guard (CI). Run from a service/gateway repo root.
 
 Executable, data-driven policy-as-code for the platform's single canonical Dockerfile
-pattern (docs/core-docs/standards/infrastructure/dockerfile-standard.md, ADR-0072). This is
+pattern (docs/core-docs/standards/infrastructure/dockerfile-standard.md, ADR-0073). This is
 the Dockerfile-domain analogue of check-delivery-model.py / check-seed-contract.py /
 event-compliance.sh: the control catalog (controls/dockerfile-standard.yaml) defines POLICY
 ONLY; this file provides DETECTOR implementations bound to it by name.
@@ -780,7 +780,7 @@ def verify_docs(doc: dict, path: Path) -> int:
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description="Enterprise Dockerfile Standard guard (ADR-0072).")
+    ap = argparse.ArgumentParser(description="Enterprise Dockerfile Standard guard (ADR-0073).")
     ap.add_argument("dockerfile", nargs="?", default=DEFAULT_TARGET, help="Dockerfile to check")
     ap.add_argument("--repo-root", default=".", help="repo root (for go.mod/cmd/* structural checks)")
     ap.add_argument("--capabilities", default="", help="comma-separated declared capabilities")

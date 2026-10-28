@@ -16,7 +16,7 @@
 # for the full ID/lifecycle discipline; it applies identically here.
 #
 # Policy SSOT (architecture is owned by the ADR; this catalog only enforces it):
-#   ADR-0072 - Enterprise Dockerfile Standard
+#   ADR-0073 - Enterprise Dockerfile Standard
 #   Standard - docs/core-docs/standards/infrastructure/dockerfile-standard.md
 #   Version matrix  - docs/core-docs/standards/infrastructure/dockerfile-version-matrix.yaml
 #   Capability matrix - docs/core-docs/standards/infrastructure/dockerfile-capability-matrix.yaml
@@ -29,7 +29,7 @@
 version: 1
 domain: dockerfile-standard
 policy_ssot:
-  - ADR-0072
+  - ADR-0073
 
 # Runtime packages allowed beyond the fleet allow-list, for ONE named repository each
 # (DS-0018; ADR-0073 Amendment 1). Mirrors `runtime_package_exceptions` in
@@ -62,7 +62,7 @@ controls:
       Collapse to `FROM ... AS builder` + one final `FROM ...` runtime stage. Move any
       codegen/test step out of the Dockerfile and into CI, committing its output.
     detector: two_stage_layout
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0002
     title: Builder cross-compiles FROM the build platform, never QEMU-emulated
@@ -82,7 +82,7 @@ controls:
       Add `--platform=$BUILDPLATFORM` to the builder `FROM` and build with
       `GOARCH=${TARGETARCH}`.
     detector: cross_compile_builder
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0003
     title: Base image versions match the centrally pinned version matrix
@@ -118,7 +118,7 @@ controls:
       verify the tag actually resolves in the registry first - that single unmade check is
       what put this control in an impossible state.
     detector: version_matrix_pinned
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0004
     title: No floating/no latest tags anywhere in the Dockerfile
@@ -136,7 +136,7 @@ controls:
     remediation: >-
       Pin an explicit, version-matrix-sourced tag on every FROM.
     detector: no_latest_tag
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0005
     title: Runtime stage runs as a numeric, pinned non-root UID:GID
@@ -160,7 +160,7 @@ controls:
       addgroup -g ${RUNTIME_GID} -S appuser && adduser -u ${RUNTIME_UID} -S -G appuser ...;
       then `USER ${RUNTIME_UID}:${RUNTIME_GID}`.
     detector: numeric_nonroot_user
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0006
     title: HEALTHCHECK required for http-api / gateway capability
@@ -179,7 +179,7 @@ controls:
     remediation: >-
       Add the standard HEALTHCHECK block targeting the same port as EXPOSE.
     detector: healthcheck_present_and_consistent
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0007
     title: worker capability MUST NOT assume an HTTP HEALTHCHECK
@@ -199,7 +199,7 @@ controls:
       Add a non-HTTP HEALTHCHECK (e.g. a liveness file touched on each successful poll
       loop, checked via `test -f`/`find -mmin`).
     detector: worker_healthcheck_not_http
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0008
     title: Required OCI labels present on the runtime stage
@@ -219,7 +219,7 @@ controls:
       Copy the LABEL block from templates/Dockerfile.service verbatim, filling in the
       per-repo values.
     detector: required_oci_labels
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0009
     title: Exec-form CMD/ENTRYPOINT; exactly one foreground process
@@ -240,7 +240,7 @@ controls:
       Use `CMD ["./service-binary"]`. If startup logic is needed, put it in the Go binary's
       own `main()`, not a shell script.
     detector: exec_form_cmd
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0010
     title: STOPSIGNAL declared explicitly
@@ -258,7 +258,7 @@ controls:
     remediation: >-
       Add `STOPSIGNAL SIGTERM`.
     detector: stopsignal_declared
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0011
     title: db-owner capability ships a dbtool binary
@@ -279,7 +279,7 @@ controls:
     remediation: >-
       Add the dbtool build/COPY block from templates/Dockerfile.service.
     detector: dbowner_ships_dbtool
-    refs: [ADR-0072, ADR-0062]
+    refs: [ADR-0073, ADR-0062]
 
   - id: DS-0012
     title: seed capability ships a seed binary (advisory cross-check only)
@@ -302,7 +302,7 @@ controls:
       Run seed-contract-check.yaml for the authoritative fix; this control's finding is
       informational.
     detector: seed_ships_seed_binary
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0013
     title: Declared capability set matches structural reality
@@ -324,7 +324,7 @@ controls:
       Update the `capabilities:` input in .github/workflows/dockerfile-standard.yaml (this
       repo) AND dockerfile-capability-matrix.yaml (coderaxis/microservices) in the same PR.
     detector: capability_declaration_matches_reality
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0014
     title: No build-time code generation in the Dockerfile
@@ -343,7 +343,7 @@ controls:
       Remove the codegen step from the Dockerfile; run it in CI (or locally) and commit the
       output.
     detector: no_build_time_codegen
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0015
     title: No ADD instruction (COPY only)
@@ -361,7 +361,7 @@ controls:
     remediation: >-
       Replace `ADD` with `COPY`.
     detector: no_add_instruction
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0016
     title: No freeform version-bearing build ARGs
@@ -382,7 +382,7 @@ controls:
       Use the named ARGs from templates/Dockerfile.service; add a new one to the version
       matrix (with an ADR) before introducing it in any Dockerfile.
     detector: no_freeform_version_args
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0017
     title: BuildKit secret mount for private-module credentials; no baked token
@@ -401,7 +401,7 @@ controls:
     remediation: >-
       Use the `--mount=type=secret,id=gh_token` RUN block from templates/Dockerfile.service.
     detector: secret_mount_for_credentials
-    refs: [ADR-0072]
+    refs: [ADR-0073]
 
   - id: DS-0018
     title: Package installs are pinned to the approved allow-list
@@ -422,4 +422,4 @@ controls:
     remediation: >-
       Remove the unlisted package, or get an ADR amendment adding it to the allow-list.
     detector: package_allowlist
-    refs: [ADR-0072]
+    refs: [ADR-0073]
