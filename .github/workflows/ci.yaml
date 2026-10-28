@@ -531,7 +531,7 @@ jobs:
   # keeps the checker's control docs in sync, and dry-runs the checker against its own canonical
   # template so a catalog/checker change that breaks the template is caught here, not fleet-wide.
   #
-  # Policy SSOT: ADR-0072 (Enterprise Dockerfile Standard).
+  # Policy SSOT: ADR-0073 (Enterprise Dockerfile Standard).
   dockerfile-standard:
     name: Dockerfile standard - catalog + template self-check
     runs-on: ubuntu-latest
