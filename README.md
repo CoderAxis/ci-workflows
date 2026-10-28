@@ -400,7 +400,7 @@ _Generated from `controls/dockerfile-standard.yaml` by `scripts/check-dockerfile
 | DS-0015 | Use `COPY`, never `ADD` (ADD's implicit remote-URL-fetch and auto-extract behavior is unpinned, unaudited functionality this standard does not permit). | minor | all | platform-security | active |
 | DS-0016 | A Dockerfile MUST NOT declare an ARG outside the set named in dockerfile-version-matrix.yaml `dockerfile_args` for anything that pins a tool/image/language version. | major | all | platform-infrastructure | active |
 | DS-0017 | Private Go module credentials MUST be supplied via `--mount=type=secret,id=gh_token` and MUST NOT appear as a plain `ARG`/`ENV` or be baked into any layer. | critical | all | platform-security | active |
-| DS-0018 | `apk add` in the builder stage installs only from {ca-certificates, git, tzdata}; in the runtime stage, only from {ca-certificates, tzdata, wget}. Any other package requires an ADR amendment (recorded in the version matrix). | minor | all | platform-security | active |
+| DS-0018 | `apk add` in the builder stage installs only from {ca-certificates, git, tzdata}; in the runtime stage, only from {ca-certificates, tzdata, wget}, plus the packages runtime_package_exceptions lists for the caller's own repository. Any other package requires an ADR amendment (recorded in the version matrix and mirrored in this catalog's runtime_package_exceptions). | minor | all | platform-security | active |
 
 <!-- END dockerfile-standard-controls -->
 

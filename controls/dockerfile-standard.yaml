@@ -31,6 +31,18 @@ domain: dockerfile-standard
 policy_ssot:
   - ADR-0072
 
+# Runtime packages allowed beyond the fleet allow-list, for ONE named repository each
+# (DS-0018; ADR-0073 Amendment 1). Mirrors `runtime_package_exceptions` in
+# docs/core-docs/standards/infrastructure/dockerfile-version-matrix.yaml, which is the
+# policy SSOT and records the reason, image size and licence review: the checker runs with
+# no network and no sibling checkout. Change both together. Keyed by repository name,
+# without the owner; an entry allows nothing in the builder stage.
+runtime_package_exceptions:
+  inboxxhq-product-service:
+    packages: [tesseract-ocr, tesseract-ocr-data-eng]
+    adr: ADR-0073
+    reason: Menu import OCR coverage audit for pages with no text layer (child process; binaries stay CGO_ENABLED=0).
+
 controls:
   - id: DS-0001
     title: Dockerfile declares the canonical two-stage layout
@@ -400,8 +412,10 @@ controls:
     applies_to_capabilities: []
     policy: >-
       `apk add` in the builder stage installs only from {ca-certificates, git, tzdata}; in
-      the runtime stage, only from {ca-certificates, tzdata, wget}. Any other package
-      requires an ADR amendment (recorded in the version matrix).
+      the runtime stage, only from {ca-certificates, tzdata, wget}, plus the packages
+      runtime_package_exceptions lists for the caller's own repository. Any other package
+      requires an ADR amendment (recorded in the version matrix and mirrored in this
+      catalog's runtime_package_exceptions).
     rationale: >-
       An unreviewed package addition is attack-surface creep by a thousand small PRs; an
       explicit allow-list makes every addition a deliberate, reviewed decision.

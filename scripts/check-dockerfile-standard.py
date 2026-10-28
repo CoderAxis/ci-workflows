@@ -105,9 +105,15 @@ class Instr:
 class Dockerfile:
     """Parsed view of the target Dockerfile shared by all detectors."""
 
-    def __init__(self, path: Path, repo_root: Path):
+    def __init__(self, path: Path, repo_root: Path, repository: str = "",
+                 package_exceptions: dict[str, set[str]] | None = None):
         self.path = path
         self.repo_root = repo_root
+        # The caller's repository name ("inboxxhq-product-service", no owner) and the
+        # runtime packages the catalog allows each named repository beyond the fleet
+        # allow-list (runtime_package_exceptions; DS-0018).
+        self.repository = repository
+        self.package_exceptions = package_exceptions or {}
         self.text = path.read_text(encoding="utf-8")
         self.instructions = _parse_instructions(self.text)
         self.stage_froms = [i for i in self.instructions if i.op == "FROM"]
@@ -524,19 +530,59 @@ def secret_mount_for_credentials(df: Dockerfile) -> Finding:
 
 
 def package_allowlist(df: Dockerfile) -> Finding:
+    """DS-0018. The fleet allow-lists, plus, in the runtime stage only, the packages the
+    catalog's runtime_package_exceptions lists for THIS repository (ADR-0073 Amendment 1).
+    An exception for one repository allows nothing for any other, and nothing in the
+    builder stage."""
     bad = []
+    excepted: set[str] = set()
+    granted = df.package_exceptions.get(df.repository, set()) if df.repository else set()
     for i in df.instrs("RUN"):
         m = re.search(r"apk add\s+(?:--no-cache\s+)?([\w\s.-]+?)(?:;|&&|$)", i.args)
         if not m:
             continue
         pkgs = set(m.group(1).split())
-        allow = BUILDER_APK_ALLOWLIST if i.stage == 0 else RUNTIME_APK_ALLOWLIST
+        if i.stage == 0:
+            allow = BUILDER_APK_ALLOWLIST
+        else:
+            allow = RUNTIME_APK_ALLOWLIST | granted
+            excepted |= pkgs & (granted - RUNTIME_APK_ALLOWLIST)
         extra = pkgs - allow
         if extra:
             bad.append(f"line {i.lineno} (stage {i.stage}): {sorted(extra)}")
     if bad:
         return Finding(False, "package(s) outside the approved allow-list: " + "; ".join(bad))
+    if excepted:
+        return Finding(True, "all apk add packages are within the approved allow-list, with "
+                             f"{sorted(excepted)} allowed for {df.repository} by its "
+                             "runtime_package_exceptions entry (ADR-0073 Amendment 1)")
     return Finding(True, "all apk add packages are within the approved allow-list")
+
+
+def load_package_exceptions(doc: dict, path: Path) -> dict[str, set[str]]:
+    """The catalog's runtime_package_exceptions: repository name -> packages. Each entry
+    must name its packages and the ADR that allows them, so an exception cannot be added
+    without the reason it exists."""
+    raw = doc.get("runtime_package_exceptions") or {}
+    if not isinstance(raw, dict):
+        raise SystemExit(f"::error::{path}: runtime_package_exceptions must be a mapping")
+    out: dict[str, set[str]] = {}
+    errors = []
+    for repo, entry in raw.items():
+        pkgs = (entry or {}).get("packages") if isinstance(entry, dict) else None
+        if not isinstance(pkgs, list) or not pkgs or not all(isinstance(p, str) and p for p in pkgs):
+            errors.append(f"{repo}: packages must be a non-empty list of package names")
+            continue
+        if not str((entry or {}).get("adr") or "").startswith("ADR-"):
+            errors.append(f"{repo}: adr must name the ADR that allows the exception")
+            continue
+        if "/" in str(repo):
+            errors.append(f"{repo}: key by repository name, without the owner")
+            continue
+        out[str(repo)] = set(pkgs)
+    if errors:
+        raise SystemExit(f"::error::{path}: invalid runtime_package_exceptions: " + "; ".join(errors))
+    return out
 
 
 DETECTORS = {
@@ -738,6 +784,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("dockerfile", nargs="?", default=DEFAULT_TARGET, help="Dockerfile to check")
     ap.add_argument("--repo-root", default=".", help="repo root (for go.mod/cmd/* structural checks)")
     ap.add_argument("--capabilities", default="", help="comma-separated declared capabilities")
+    ap.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", ""),
+                    help="the caller's repository (owner/name or name; default $GITHUB_REPOSITORY), "
+                         "for its runtime_package_exceptions entry")
     ap.add_argument("--controls", default=str(DEFAULT_CONTROLS), help="control catalog YAML")
     ap.add_argument("--format", choices=("text", "json", "markdown"), default="text")
     ap.add_argument("--fail-on", choices=("critical", "major", "minor"), default="major")
@@ -775,7 +824,9 @@ def main(argv: list[str]) -> int:
         print("::warning::dockerfile-standard: --capabilities is empty; only capability-"
               "agnostic controls will be meaningfully evaluated")
 
-    df = Dockerfile(target, Path(args.repo_root))
+    repository = args.repository.strip().rsplit("/", 1)[-1]
+    df = Dockerfile(target, Path(args.repo_root), repository,
+                    load_package_exceptions(doc, controls_path))
     results = evaluate(df, doc["controls"], capabilities)
     threshold = SEVERITY_ORDER[args.fail_on]
     report = build_report(df, results, doc.get("policy_ssot", []), capabilities, args.fail_on, threshold)
