@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 #
 # CANONICAL Dockerfile template — Enterprise Dockerfile Standard
-# (docs/core-docs/standards/infrastructure/dockerfile-standard.md, ADR-0072).
+# (docs/core-docs/standards/infrastructure/dockerfile-standard.md, ADR-0073).
 #
 # HOW TO INSTANTIATE THIS TEMPLATE:
 # Copy this file into a service repo as `Dockerfile`, then do a ONE-TIME literal

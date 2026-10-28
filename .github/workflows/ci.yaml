@@ -531,7 +531,7 @@ jobs:
   # keeps the checker's control docs in sync, and dry-runs the checker against its own canonical
   # template so a catalog/checker change that breaks the template is caught here, not fleet-wide.
   #
-  # Policy SSOT: ADR-0072 (Enterprise Dockerfile Standard).
+  # Policy SSOT: ADR-0073 (Enterprise Dockerfile Standard).
   dockerfile-standard:
     name: Dockerfile standard - catalog + template self-check
     runs-on: ubuntu-latest
@@ -631,6 +631,15 @@ jobs:
           sed "s|golang:\${BUILDER_IMAGE_TAG}|golang:1.21-alpine3.15|" \
             /tmp/Dockerfile.instantiated > /tmp/Dockerfile.literal
           assert_ds0003_fails "a literal non-matrix tag (1.21-alpine3.15)" /tmp/Dockerfile.literal
+
+      # DS-0018's runtime package exceptions (ADR-0073 Amendment 1) allow named packages for
+      # ONE named repository. An exception that leaked to every repository, or to packages
+      # it does not list, would read as a pinned allow-list while pinning nothing, so the
+      # self-test asserts both directions: the listed repository passes with exactly its
+      # listed packages, and the same Dockerfile fails under any other repository, with an
+      # extra package, or with the packages moved into the builder stage.
+      - name: DS-0018 runtime package exceptions hold in both directions
+        run: python3 scripts/test_dockerfile_package_exceptions.py
 
       # Capability gates must read INSTRUCTIONS, not the file as text. DS-0012 used to grep
       # df.all_text() for `cmd/seed`, and all_text() includes comments — so a Dockerfile that

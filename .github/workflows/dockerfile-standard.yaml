@@ -1,7 +1,7 @@
 name: Dockerfile Standard
 
 # Reusable workflow — the executable form of the Enterprise Dockerfile Standard
-# (docs/core-docs/standards/infrastructure/dockerfile-standard.md, ADR-0072).
+# (docs/core-docs/standards/infrastructure/dockerfile-standard.md, ADR-0073).
 #
 # Every caller declares its `capabilities` (comma-separated, from
 # dockerfile-capability-matrix.yaml: http-api, db-owner, seed, backfill, canary,
@@ -64,12 +64,13 @@ jobs:
       - name: Install checker dependency
         run: python3 -m pip install --upgrade PyYAML
 
-      - name: Enforce Dockerfile standard (ADR-0072)
+      - name: Enforce Dockerfile standard (ADR-0073)
         run: |
           python3 .dockerfile-standard-tools/scripts/check-dockerfile-standard.py \
             "${{ inputs.dockerfile }}" \
             --repo-root . \
             --capabilities "${{ inputs.capabilities }}" \
+            --repository "${{ github.repository }}" \
             --controls .dockerfile-standard-tools/controls/dockerfile-standard.yaml \
             --fail-on "${{ inputs.fail_on }}" \
             --report dockerfile-standard-report.json
