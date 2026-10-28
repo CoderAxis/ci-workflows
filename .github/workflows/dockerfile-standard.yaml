@@ -70,6 +70,7 @@ jobs:
             "${{ inputs.dockerfile }}" \
             --repo-root . \
             --capabilities "${{ inputs.capabilities }}" \
+            --repository "${{ github.repository }}" \
             --controls .dockerfile-standard-tools/controls/dockerfile-standard.yaml \
             --fail-on "${{ inputs.fail_on }}" \
             --report dockerfile-standard-report.json
