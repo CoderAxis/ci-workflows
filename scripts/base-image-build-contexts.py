@@ -43,6 +43,12 @@ official single-name images; every other ECR Public repository belongs to its ow
 has no Docker Hub twin, so it is left alone. A reference this script cannot resolve (an ARG it has
 no value for) is reported as a warning and left alone too, which builds exactly as it did before.
 
+service-ci.yaml's End-to-end job needs the same redirect but cannot run this script: its images
+are built by compose from inside the suite's TestMain. coderaxis/platform-testing-go's stack
+package holds a Go port of this reading for that job (E2E_BASE_IMAGES=docker-hub), and copies the
+fixtures under scripts/testdata/base-image-build-contexts/ with their expected output. A change to
+what this script reads belongs in both, with the fixtures updated in both.
+
 Exit 0 with the pairs on stdout (possibly none), 2 on a bad invocation or an unreadable file.
 """
 

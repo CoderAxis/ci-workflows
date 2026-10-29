@@ -2587,6 +2587,20 @@ jobs:
           # states the location and nothing else - it does not know that a cache becomes
           # cache_from, or that compose is involved at all.
           E2E_BUILD_CACHE: local:${{ runner.temp }}/e2e-build-cache
+          # Where the stack's base images come from, the same choice frontend-image-ci.yaml makes
+          # for its builds. Service Dockerfiles and compose files name official images as
+          # public.ecr.aws/docker/library/<name>, which is right for the deploy lane in AWS. From
+          # a GitHub-hosted runner ECR Public's anonymous allowance (500 GB a month per source
+          # address, shared by every hosted runner behind it) runs out, and on 2026-10-28 and
+          # 2026-10-29 every edge-gateway run of this job died at its first `load metadata` with
+          # "429 Too Many Requests ... toomanyrequests: Data limit exceeded", which blocked its
+          # deploy. GitHub does not apply Docker Hub's rate limit to public-image pulls from hosted
+          # runners, and both registries serve the same digests. With this set, TestMain
+          # (platform-testing-go releases after v0.2.1) gives each built service a BuildKit named
+          # context per base image and each pulled image its docker.io twin; the suite's files
+          # stay as they are. An older harness ignores it. On a self-hosted runner it is empty and
+          # images are pulled as written, because from AWS the trade-off reverses.
+          E2E_BASE_IMAGES: ${{ runner.environment == 'github-hosted' && 'docker-hub' || '' }}
         run: |
           set -euo pipefail
           # The identical command `ihq e2e` runs. The stack is brought up and torn down by

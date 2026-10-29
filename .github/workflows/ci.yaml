@@ -207,7 +207,7 @@ jobs:
       - name: Install guard dependencies
         run: python3 -m pip install --upgrade PyYAML
 
-      - name: Fixtures, BuildKit edge cases and the frontend-image-ci.yaml wiring
+      - name: Fixtures, BuildKit edge cases, and the frontend-image-ci.yaml and service-ci.yaml wiring
         run: python3 scripts/test_base_image_build_contexts.py
 
       # The same builder frontend-image-ci.yaml uses (docker-container), so the proof is about
