@@ -874,9 +874,11 @@ expect(finding.count == 0 and len(ws.repo_service_names["alpha-service"]) == 1,
        f"hub layouts: a compat link and its target are one repository, not two; got "
        f"{ws.repo_service_names['alpha-service']} - {finding.details}")
 
-# A further client folder is read like any other, in every layout, and a repository in it that
-# claims an InboxxHQ service name is a second claimant - the defect SP-0018 exists for, now
-# possible across two owners instead of within one.
+# A further client folder holds another client's fleet, and clients never mix. Where the manifests
+# sit in a client folder (owner-first), the fleet is that client's repositories plus the cores -
+# what CI assembles from the catalog - so coderaxis/'s copies are neither read nor blamed. Where
+# the manifests are at their legacy spelling (legacy, mixed) no client is named and every folder
+# is read, so a copy claiming an InboxxHQ service name is caught as a second claimant (SP-0018).
 CODERAXIS = {
     "coderaxis/gateways/coderaxis-zeta-gateway/config/environments/prod.yaml":
         "environment: prod\nserver:\n  port: 80\n",
@@ -890,7 +892,7 @@ CODERAXIS = {
     ".worktrees/services/alpha/inboxxhq-alpha-wt/service.contract.yaml":
         "service:\n  name: alpha-service\n",
 }
-for layout in ("legacy", "owner-first", "mixed"):
+for layout in ("legacy", "mixed"):
     ws = run_hub(layout, extra=CODERAXIS)
     details = " ".join(m.gateway_bind_port_is_right_for_its_environment(ws).details)
     expect("RESERVED" in details
@@ -906,6 +908,14 @@ for layout in ("legacy", "owner-first", "mixed"):
     expect(m.dockerfile_ports_are_own(ws).count == 1,
            f"hub layouts ({layout}): the coderaxis/ copy's Dockerfile must be read")
 
+alone = fingerprint(run_hub("owner-first"))
+with_other = run_hub("owner-first", extra=CODERAXIS)
+expect(fingerprint(with_other) == alone,
+       "hub layouts (owner-first): the manifests are in inboxxhq/, so the fleet is inboxxhq/ plus "
+       "core/, and coderaxis/'s copies must change nothing")
+expect([o.name for o in with_other.hub.owners] == ["core", "inboxxhq"],
+       f"hub layouts (owner-first): the hub must be narrowed to core/ and inboxxhq/; got "
+       f"{[o.name for o in with_other.hub.owners]}")
 
 if FAILURES:
     print(f"service-ports tests: {len(FAILURES)} FAILURE(S)")
