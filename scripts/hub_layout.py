@@ -31,6 +31,12 @@ and `Hub.logical` names them `frontend/frontend-core` and `frontend/<app>` as be
 relative path between an app and frontend-core is load-bearing for the frontend build
 (tsconfig, the pnpm workspace, each Dockerfile), so frontend-core's own manifest and
 check-shared-package-topology.mjs use the real paths rather than the logical ones.
+
+A hub can hold more than one client, and clients never mix: one client's fleet is its own
+repositories plus the cores, never another client's copies of the same services. A checker that
+judges one client's fleet narrows the hub with `Hub.for_client_of(path)` - the cores and the
+client folder holding `path` - which is what CI assembles for it from the catalog. A path at its
+legacy spelling or in core/ names no client, and the hub stays whole.
 """
 
 from __future__ import annotations
@@ -144,17 +150,48 @@ class Hub:
     path given explicitly) never scans the root.
     """
 
-    def __init__(self, root: Path | str):
+    def __init__(self, root: Path | str, *, clients: Iterable[str] | None = None):
         self.root = Path(root)
+        # None reads every client folder; a set reads core/ and only those clients.
+        self._clients = None if clients is None else frozenset(clients)
         self._owners: list[Path] | None = None
         self._owner_names: frozenset[str] = frozenset()
 
     @property
     def owners(self) -> list[Path]:
         if self._owners is None:
-            self._owners = owner_folders(self.root)
+            owners = owner_folders(self.root)
+            if self._clients is not None:
+                owners = [o for o in owners if o.name == CORE or o.name in self._clients]
+            self._owners = owners
             self._owner_names = frozenset(owner.name for owner in self._owners)
         return self._owners
+
+    def owner_of(self, path: Path | str) -> str | None:
+        """The owner folder `path` really lives in: `core`, a client's name, or None.
+
+        By real path, so a repository reached through a compat link belongs to the owner it was
+        moved to. None for a path at its legacy spelling, or outside every owner folder.
+        """
+        real = Path(_real(path))
+        for owner in self.owners:
+            try:
+                real.relative_to(_real(owner))
+            except ValueError:
+                continue
+            return owner.name
+        return None
+
+    def for_client_of(self, path: Path | str) -> "Hub":
+        """This hub narrowed to core/ and the one client folder `path` lives in.
+
+        Unchanged when `path` names no client - it is in core/, at its legacy spelling, or the
+        tree is a workspace CI assembled - because then there is no second client to leave out.
+        """
+        owner = self.owner_of(path)
+        if owner is None or owner == CORE:
+            return self
+        return Hub(self.root, clients=(owner,))
 
     def spellings(self, rel: str | Path) -> list[Path]:
         """A legacy relative path at its legacy spelling, then under core/ and each client."""

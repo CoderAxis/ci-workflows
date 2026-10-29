@@ -57,7 +57,9 @@ owner-first, where the same trees sit under core/ and under each client folder
 (core/shared/platform-shared-go, inboxxhq/services/<domain>/<repo>, ...), or a mix of the two
 while repositories move. Each tree is looked for in both (hub_layout.py), a repository reached
 through a compat link and at its real path counts once, and every path reported keeps the
-legacy spelling above, so findings, baselines and evidence read the same in every layout.
+legacy spelling above, so findings, baselines and evidence read the same in every layout. A hub
+holding several clients is read as core/ plus the client folder holding inboxxhq-infra: that is
+the fleet CI assembles from the catalog, and clients never mix.
 
 ports.generated.go holds TWO tables since the RFC-0007 §4 split: clusterPorts, generated from
 the manifests, and localPorts, the per-service allocation §4.2 retains for a workstation. They
@@ -231,8 +233,12 @@ class Workspace:
 
     def __init__(self, root: Path):
         self.root = root
-        # Every tree below is found in either hub layout; see hub_layout.py.
-        self.hub = hub_layout.Hub(root)
+        # Every tree below is found in either hub layout; see hub_layout.py. The fleet is one
+        # client's - the deployables these manifests run, plus the cores - so on a hub holding
+        # several clients it is read from core/ and the client folder holding the manifests,
+        # and another client's copies of the same services are neither read nor blamed.
+        hub = hub_layout.Hub(root)
+        self.hub = hub.for_client_of(hub.resolve("infra/inboxxhq-infra"))
         self.infra = self.hub.resolve("infra/inboxxhq-infra")
         shared_go = self.hub.resolve("shared/platform-shared-go")
         self.registry_path = shared_go / "platform" / "servicediscovery" / "ports.generated.go"
