@@ -25,7 +25,12 @@ wherever the repo sits.
 A client folder is a top-level directory that is not a category and directly holds one.
 Dot- and underscore-prefixed directories (`.worktrees`, `_archive`, `_work`) are never
 owners, and neither is a symlink or the top-level `ci-workflows` checkout, which holds a
-`tools/` of its own. `frontend/` is still category-first and needs nothing here.
+`tools/` of its own. `frontend/` moves the same way and needs nothing special here:
+frontend-core to `core/frontend/frontend-core`, a client's apps to `<client>/frontend/<app>`,
+and `Hub.logical` names them `frontend/frontend-core` and `frontend/<app>` as before. The
+relative path between an app and frontend-core is load-bearing for the frontend build
+(tsconfig, the pnpm workspace, each Dockerfile), so frontend-core's own manifest and
+check-shared-package-topology.mjs use the real paths rather than the logical ones.
 """
 
 from __future__ import annotations

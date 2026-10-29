@@ -2,11 +2,12 @@
 //
 // Make a freshly cloned tree buildable.
 //
-// The frontend is a set of sibling clones that share three packages living in
-// frontend-core, joined to the apps by symlinks. A symlink from one clone into
-// another is not a file either clone can track, so cloning every repo is not
-// enough to produce a working tree -- and until this script existed the links
-// were made by hand and written down nowhere (G-38). The setup therefore existed
+// The frontend is a set of clones that share three packages living in
+// frontend-core, joined to the apps through a pnpm workspace whose definition
+// is a symlink into frontend-core. A symlink from one clone into another is not
+// a file either clone can track, so cloning every repo is not enough to produce
+// a working tree -- and until this script existed the links were made by hand
+// and written down nowhere (G-38). The setup therefore existed
 // only on whichever machine had already done it, and a new checkout failed in
 // ways that read like code bugs rather than missing setup: pnpm resolving a
 // different directory than tsc, or an app build reporting a file "missing from
@@ -37,21 +38,32 @@ const FIX = process.argv.includes('--fix');
 // ci-workflows sits at <hub>/ci-workflows in the category-first hub and at
 // <hub>/core/ci-workflows in the owner-first one, and Node hands this module its
 // real path either way -- so the hub is one level further up when the parent is
-// core/. Same rule as default_root in hub_layout.py. frontend/ itself is still
-// category-first, at the hub root.
+// core/. Same rule as default_root in hub_layout.py.
+//
+// The frontend follows the same split: frontend-core is a core, at
+// core/frontend/frontend-core, and each client's apps sit in <client>/frontend/,
+// which is that client's workspace root. The legacy tree had both under frontend/.
+// The manifest is looked for in that order, and every path it declares is
+// relative to the hub.
 const CI_WORKFLOWS = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_ROOT =
   basename(dirname(CI_WORKFLOWS)) === 'core'
     ? resolve(CI_WORKFLOWS, '..', '..')
     : resolve(CI_WORKFLOWS, '..');
-const MANIFEST = join(REPO_ROOT, 'frontend/frontend-core/shared-packages.manifest.json');
+const MANIFEST_SPELLINGS = [
+  'core/frontend/frontend-core/shared-packages.manifest.json',
+  'frontend/frontend-core/shared-packages.manifest.json',
+];
+const MANIFEST =
+  MANIFEST_SPELLINGS.map((spelling) => join(REPO_ROOT, spelling)).find(existsSync) ??
+  join(REPO_ROOT, MANIFEST_SPELLINGS[0]);
 
 if (!existsSync(MANIFEST)) {
   console.error(
     `Cannot bootstrap: ${MANIFEST} is not there.\n\n` +
       `That file comes from frontend-core, which owns the shared packages, so it has\n` +
       `to be cloned first:\n\n` +
-      `  git clone git@github.com:coderaxis/frontend-core.git ${join(REPO_ROOT, 'frontend/frontend-core')}\n`,
+      `  git clone git@github.com:coderaxis/frontend-core.git ${join(REPO_ROOT, 'core/frontend/frontend-core')}\n`,
   );
   process.exit(1);
 }
@@ -165,8 +177,16 @@ if (!FIX && created.length > 0) {
   process.exit(1);
 }
 
+// Each workspace root is the folder holding a declared app (<client>/frontend/, or
+// frontend/ in the legacy tree); a manifest that declares no app yet means the
+// legacy root.
+const workspaceRoots = [
+  ...new Set(Object.values(manifest.apps ?? {}).map((app) => dirname(app.path))),
+];
+if (workspaceRoots.length === 0) workspaceRoots.push('frontend');
+
 console.log(
   `\nfrontend tree ready — ${links.length} declared link(s) in place.\n` +
-    `Next: (cd ${join(REPO_ROOT, 'frontend')} && pnpm install), then\n` +
-    `      node ${join(CI_WORKFLOWS, 'scripts/check-shared-package-topology.mjs')}`,
+    workspaceRoots.map((root) => `Next: (cd ${join(REPO_ROOT, root)} && pnpm install)`).join('\n') +
+    `, then\n      node ${join(CI_WORKFLOWS, 'scripts/check-shared-package-topology.mjs')}`,
 );
