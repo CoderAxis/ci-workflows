@@ -3,7 +3,7 @@
 
     python3 scripts/test_base_image_build_contexts.py
 
-Three halves.
+Four parts.
 
 THE FIXTURES, through the command line exactly as frontend-image-ci.yaml calls it. Each fixture
 directory under scripts/testdata/base-image-build-contexts/ holds a Dockerfile and the complete
@@ -21,6 +21,10 @@ the two builds is the failure this lane would actually have: the image build pas
 test build dies on the same 429. So every `docker buildx build` in the workflow must consume the
 redirect, the redirect must be confined to GitHub-hosted runners, and the script must be given
 the same --build-arg names as the builds.
+
+THE E2E SWITCH, against service-ci.yaml. Its End-to-end job builds inside the suite's TestMain,
+which applies the same redirect itself when E2E_BASE_IMAGES=docker-hub, so the job must set that
+on GitHub-hosted runners and on nothing else.
 
 The bias under test is toward leaving an image alone. A missed redirect builds exactly as the
 lane did before; a wrong one names an image that does not exist, or one the Dockerfile never
@@ -223,6 +227,27 @@ for s in builds:
     expect(build_args <= producer_args,
            f"{name!r} gives the script every --build-arg it gives the build",
            f"build {sorted(build_args)} vs script {sorted(producer_args)}")
+
+
+# ---------------------------------------------------------------------------
+# Wiring, against service-ci.yaml's End-to-end job
+# ---------------------------------------------------------------------------
+# That job builds its images inside the suite's TestMain (platform-testing-go), through compose,
+# so it cannot take the named contexts from a step here. TestMain computes the same redirect, with
+# a port of this script held to the same fixtures, when E2E_BASE_IMAGES=docker-hub. Losing that
+# variable brings the 429 back on every service with a suite, and setting it on a self-hosted
+# runner would move AWS-side pulls onto Docker Hub's anonymous quota, so both are pinned here.
+
+print("service-ci e2e wiring:")
+SERVICE_CI = REPO / ".github" / "workflows" / "service-ci.yaml"
+e2e_steps = yaml.safe_load(SERVICE_CI.read_text(encoding="utf-8"))["jobs"]["e2e"]["steps"]
+suites = [s for s in e2e_steps if "go test -tags e2e" in s.get("run", "")]
+expect(len(suites) == 1, "exactly one step runs the end-to-end suite", str(len(suites)))
+suite_env = (suites[0].get("env") or {}) if suites else {}
+expect(re.fullmatch(r"\$\{\{\s*runner\.environment\s*==\s*'github-hosted'\s*&&\s*'docker-hub'\s*\|\|\s*''\s*\}\}",
+                    str(suite_env.get("E2E_BASE_IMAGES", ""))) is not None,
+       "the suite step sets E2E_BASE_IMAGES=docker-hub on GitHub-hosted runners only",
+       str(suite_env.get("E2E_BASE_IMAGES")))
 
 
 def main() -> int:
