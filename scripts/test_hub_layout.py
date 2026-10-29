@@ -204,6 +204,35 @@ try:
 except ValueError:
     pass
 
+# Clients never mix: a checker judging one client's fleet narrows the hub to core/ and that client.
+root = write(tmpdir(), {
+    "core/shared/platform-shared-go/go.mod": "",
+    "inboxxhq/infra/inboxxhq-infra/services/a/base/service.yaml": "",
+    "inboxxhq/services/a/inboxxhq-a-service/go.mod": "",
+    "coderaxis/services/a/coderaxis-a-service/go.mod": "",
+    "infra/legacy-infra/x": "",
+})
+link(root, "services/a/inboxxhq-a-service", "inboxxhq/services/a/inboxxhq-a-service")
+h = hub_layout.Hub(root)
+for path, want in ((root / "inboxxhq/infra/inboxxhq-infra", "inboxxhq"),
+                   (root / "services/a/inboxxhq-a-service", "inboxxhq"),   # through its compat link
+                   (root / "core/shared/platform-shared-go", "core"),
+                   (root / "infra/legacy-infra", None),
+                   (root / "coderaxis/services/a/coderaxis-a-service", "coderaxis")):
+    expect(h.owner_of(path) == want,
+           f"Hub.owner_of({path.relative_to(root)}): want {want}, got {h.owner_of(path)}")
+narrowed = h.for_client_of(h.resolve("infra/inboxxhq-infra"))
+expect([o.name for o in narrowed.owners] == ["core", "inboxxhq"],
+       f"Hub.for_client_of: core/ and the client holding the path only; got "
+       f"{[o.name for o in narrowed.owners]}")
+repos = [narrowed.logical(p) for p in narrowed.glob("services/*/*")]
+expect(repos == ["services/a/inboxxhq-a-service"],
+       f"Hub.for_client_of: another client's copy of a service must not be read; got {repos}")
+for path in (root / "core/shared/platform-shared-go", root / "infra/legacy-infra"):
+    expect(h.for_client_of(path) is h,
+           f"Hub.for_client_of({path.relative_to(root)}): a path naming no client keeps the hub "
+           f"whole")
+
 root = write(tmpdir(), {"core/ci-workflows/scripts/x.py": "", "core/services/org/org-core/x": "",
                         ".generated-sources/ci-workflows/scripts/x.py": ""})
 link(root, "ci-workflows", "core/ci-workflows")
