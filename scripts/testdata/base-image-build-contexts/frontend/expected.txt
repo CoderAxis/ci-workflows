@@ -1,0 +1,2 @@
+public.ecr.aws/docker/library/nginx:1.27-alpine=docker-image://docker.io/library/nginx:1.27-alpine
+public.ecr.aws/docker/library/node:22-alpine=docker-image://docker.io/library/node:22-alpine

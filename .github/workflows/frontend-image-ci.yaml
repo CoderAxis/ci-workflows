@@ -127,18 +127,68 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # WHERE THE BASE IMAGES COME FROM ON A HOSTED RUNNER. The Dockerfile names
+      # public.ecr.aws/docker/library/..., and the check above keeps it that way, because the
+      # deploy lane builds in CodeBuild, where Docker Hub's anonymous quota is the one that runs
+      # out. From a GitHub-hosted runner it is the other way round. ECR Public caps anonymous
+      # pulls at 500 GB a month per source address, hosted runners share egress addresses, and
+      # on 2026-10-28 and 2026-10-29 every frontend build here died on its first pull with
+      # "429 Too Many Requests ... toomanyrequests: Data limit exceeded" before a step of the
+      # Dockerfile ran (inboxxhq-web-app's main failed six attempts in a row). GitHub does not
+      # apply Docker Hub's rate limit to public-image pulls from hosted runners, which is why
+      # service-ci.yaml already takes its Postgres service from docker.io, and docker/library on
+      # ECR Public is a mirror of Docker Hub's official images that serves the same digests.
+      #
+      # So the Dockerfile stays exactly as the deploy lane reads it, and each base image is
+      # swapped at build time for its docker.io twin through a BuildKit named context
+      # (--build-context <ecr ref>=docker-image://docker.io/library/...): a named context whose
+      # name matches a FROM reference replaces that image. The script reads the Dockerfile the
+      # way BuildKit does (stage references, ARG-defaulted images, digests), so give it the same
+      # --build-arg values as the builds below. On a self-hosted runner (runs_on) this step is
+      # skipped and both builds pull from ECR Public as before; from AWS the trade-off reverses.
+      - name: Pull base images from Docker Hub on a GitHub-hosted runner
+        id: base_images
+        if: runner.environment == 'github-hosted'
+        shell: bash
+        env:
+          CORE_REF: ${{ steps.core.outputs.ref }}
+        run: |
+          set -euo pipefail
+          contexts="$(python3 .coderaxis-ci/scripts/base-image-build-contexts.py \
+            --build-arg TARGETARCH=amd64 \
+            --build-arg CORE_REF="${CORE_REF}" \
+            Dockerfile)"
+          if [[ -n "${contexts}" ]]; then
+            echo "base images pulled from Docker Hub for this build:"
+            while IFS= read -r pair; do echo "  ${pair}"; done <<<"${contexts}"
+          else
+            echo "the Dockerfile pulls nothing from public.ecr.aws/docker/library; nothing to redirect"
+          fi
+          {
+            echo "contexts<<BASE_IMAGE_CONTEXTS_EOF"
+            if [[ -n "${contexts}" ]]; then printf '%s\n' "${contexts}"; fi
+            echo "BASE_IMAGE_CONTEXTS_EOF"
+          } >> "${GITHUB_OUTPUT}"
+
       - name: Build image (no push)
         shell: bash
         env:
           GH_TOKEN_VALUE: ${{ steps.core_token.outputs.token }}
           IMAGE_NAME: ${{ inputs.image_name }}
           CORE_REF: ${{ steps.core.outputs.ref }}
+          # Empty on a self-hosted runner, where the step above does not run.
+          BASE_IMAGE_CONTEXTS: ${{ steps.base_images.outputs.contexts }}
         run: |
           set -euo pipefail
           TOKEN_FILE="$(mktemp)"
           printf '%s' "${GH_TOKEN_VALUE}" > "${TOKEN_FILE}"
           trap 'rm -f "${TOKEN_FILE}"' EXIT
+          build_contexts=()
+          while IFS= read -r pair; do
+            if [[ -n "${pair}" ]]; then build_contexts+=(--build-context "${pair}"); fi
+          done <<<"${BASE_IMAGE_CONTEXTS}"
           docker buildx build \
+            "${build_contexts[@]}" \
             --secret "id=gh_token,src=${TOKEN_FILE}" \
             --build-arg TARGETARCH=amd64 \
             --build-arg CORE_REF="${CORE_REF}" \
@@ -160,12 +210,19 @@ jobs:
         env:
           GH_TOKEN_VALUE: ${{ steps.core_token.outputs.token }}
           CORE_REF: ${{ steps.core.outputs.ref }}
+          # The same redirect as the image build: this stage starts FROM the same base images.
+          BASE_IMAGE_CONTEXTS: ${{ steps.base_images.outputs.contexts }}
         run: |
           set -euo pipefail
           TOKEN_FILE="$(mktemp)"
           printf '%s' "${GH_TOKEN_VALUE}" > "${TOKEN_FILE}"
           trap 'rm -f "${TOKEN_FILE}"' EXIT
+          build_contexts=()
+          while IFS= read -r pair; do
+            if [[ -n "${pair}" ]]; then build_contexts+=(--build-context "${pair}"); fi
+          done <<<"${BASE_IMAGE_CONTEXTS}"
           docker buildx build \
+            "${build_contexts[@]}" \
             --secret "id=gh_token,src=${TOKEN_FILE}" \
             --build-arg TARGETARCH=amd64 \
             --build-arg CORE_REF="${CORE_REF}" \

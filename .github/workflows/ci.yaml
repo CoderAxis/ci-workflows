@@ -178,6 +178,87 @@ jobs:
       - name: A vendored checker checkout must not be mistaken for the caller's image
         run: python3 scripts/check-base-image-registry.py --root scripts/testdata/base-image-registry/vendored
 
+  # ── base-image build contexts (frontend-image-ci.yaml's hosted-runner redirect) ─────────────
+  # On a GitHub-hosted runner frontend-image-ci.yaml takes each public.ecr.aws/docker/library base
+  # image from docker.io instead, through BuildKit named contexts that
+  # scripts/base-image-build-contexts.py computes from the caller's Dockerfile. The comment on
+  # that step says why: ECR Public's anonymous allowance is shared by every hosted runner behind
+  # the same egress address, and once it is spent every build dies on its first pull.
+  #
+  # The redirect can stop working in two ways, and both are silent. The script can stop reading a
+  # Dockerfile shape, or one of the two builds can stop consuming its output; and BuildKit can stop
+  # matching a named context to the FROM it should replace. Either way every build still passes,
+  # pulling from ECR Public again, until the allowance runs out and the 429 is back on every
+  # frontend. So one step pins the script and the wiring, and the other builds a fixture for real
+  # and fails if any base image was resolved from public.ecr.aws.
+  base-image-build-contexts:
+    name: Base-image build contexts - parser, wiring, and a real redirected build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install guard dependencies
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Fixtures, BuildKit edge cases and the frontend-image-ci.yaml wiring
+        run: python3 scripts/test_base_image_build_contexts.py
+
+      # The same builder frontend-image-ci.yaml uses (docker-container), so the proof is about
+      # the resolver the frontends actually build with.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Both builds frontend-image-ci.yaml runs: the image, and the unit-tests target. Every
+      # pair must show up as a `[context <ecr ref>] load metadata for docker.io/...` line in the
+      # image build, and neither build may log `load metadata for public.ecr.aws/`, which is
+      # what BuildKit prints when it resolves a FROM from the registry the Dockerfile names.
+      - name: A real build takes every base image from docker.io and none from public.ecr.aws
+        shell: bash
+        working-directory: scripts/testdata/base-image-build-contexts/buildable
+        run: |
+          set -euo pipefail
+          mapfile -t pairs < <(python3 "${GITHUB_WORKSPACE}/scripts/base-image-build-contexts.py" \
+            --build-arg TARGETARCH=amd64 Dockerfile)
+          if (( ${#pairs[@]} == 0 )); then
+            echo "::error::the script found no base image to redirect in the buildable fixture"
+            exit 1
+          fi
+          build_contexts=()
+          for pair in "${pairs[@]}"; do build_contexts+=(--build-context "${pair}"); done
+
+          build() {
+            local label="$1"
+            shift
+            docker buildx build "${build_contexts[@]}" --build-arg TARGETARCH=amd64 \
+              --progress plain "$@" . 2>&1 | tee "${RUNNER_TEMP}/${label}.log"
+          }
+          build image
+          build unit-tests --target unit-tests
+
+          bad=0
+          for label in image unit-tests; do
+            if grep -n 'load metadata for public\.ecr\.aws/' "${RUNNER_TEMP}/${label}.log"; then
+              echo "::error::the ${label} build resolved a base image from public.ecr.aws despite its named contexts"
+              bad=1
+            fi
+          done
+          for pair in "${pairs[@]}"; do
+            name="${pair%%=docker-image://*}"
+            if ! grep -qF "[context ${name}] load metadata for docker.io/library/" "${RUNNER_TEMP}/image.log"; then
+              echo "::error::the image build did not resolve ${name} through its named context"
+              bad=1
+            fi
+          done
+          if (( bad )); then exit 1; fi
+          echo "both builds took all ${#pairs[@]} base image(s) from docker.io"
+
   # ── documentation-only fast path ───────────────────────────────────────────────────────────
   # service-ci.yaml now skips its expensive jobs when a push or pull request changed
   # documentation and nothing else. That decision is made once, by scripts/docs-only-diff.py, and

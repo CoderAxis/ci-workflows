@@ -1,0 +1,10 @@
+public.ecr.aws/docker/library/alpine:3.23=docker-image://docker.io/library/alpine:3.23
+public.ecr.aws/docker/library/busybox@sha256:1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809=docker-image://docker.io/library/busybox@sha256:1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809
+public.ecr.aws/docker/library/caddy:2-alpine=docker-image://docker.io/library/caddy:2-alpine
+public.ecr.aws/docker/library/debian=docker-image://docker.io/library/debian:latest
+public.ecr.aws/docker/library/golang:1.26-alpine3.24=docker-image://docker.io/library/golang:1.26-alpine3.24
+public.ecr.aws/docker/library/node:22-alpine=docker-image://docker.io/library/node:22-alpine
+public.ecr.aws/docker/library/postgres:18-alpine=docker-image://docker.io/library/postgres:18-alpine
+public.ecr.aws/docker/library/python:3.13-slim=docker-image://docker.io/library/python:3.13-slim
+public.ecr.aws/docker/library/redis:7@sha256:4f8d9a8bd0bd4b6c2d1f7e5c9f1b6a2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a=docker-image://docker.io/library/redis:7@sha256:4f8d9a8bd0bd4b6c2d1f7e5c9f1b6a2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a
+public.ecr.aws/docker/library/rust:1-alpine=docker-image://docker.io/library/rust:1-alpine
