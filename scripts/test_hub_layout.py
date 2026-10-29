@@ -14,7 +14,8 @@ compat links, the client repositories not yet), and with a further client folder
 and a script must say exactly the same thing about all of them as it says about the legacy tree.
 Covered: hub_layout.py itself, check-log-record-kinds.py, check-contract-classification.py,
 check-log-schema.py's path resolution, check-docs-governance.py's control lookup,
-hooks/install-ihq-guard.sh and bootstrap-frontend-tree.mjs. check-service-ports.py is covered in
+hooks/install-ihq-guard.sh, bootstrap-frontend-tree.mjs and check-shared-package-topology.mjs
+(which reads the frontend layout from frontend-core's manifest, legacy or split). check-service-ports.py is covered in
 test_service_ports.py, beside the rest of its suite.
 
 Run: python3 scripts/test_hub_layout.py
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import json
 import os
 import pathlib
 import shutil
@@ -466,6 +468,149 @@ else:
         expect(proc.returncode == 0 and f"(cd {root / 'frontend'} &&" in proc.stdout,
                f"bootstrap-frontend-tree.mjs ({layout}): must treat {root} as the tree; got "
                f"{proc.returncode} {proc.stdout} {proc.stderr}")
+
+    # The frontend split: frontend-core at core/frontend/frontend-core, the client's apps in
+    # inboxxhq/frontend/, which is where the workspace is installed from.
+    root = write(tmpdir(), {
+        "core/frontend/frontend-core/shared-packages.manifest.json": json.dumps({
+            "core": {"path": "core/frontend/frontend-core"},
+            "packages": {},
+            "apps": {"inboxxhq-web-app": {"path": "inboxxhq/frontend/inboxxhq-web-app"}},
+            "localDev": {"symlinks": [{
+                "path": "inboxxhq/frontend/pnpm-workspace.yaml",
+                "target": "../../core/frontend/frontend-core/local-dev/pnpm-workspace.yaml"}]},
+        }),
+        "core/frontend/frontend-core/local-dev/pnpm-workspace.yaml": "packages: []\n",
+    })
+    (root / "core/ci-workflows/scripts").mkdir(parents=True)
+    shutil.copy2(HERE / "bootstrap-frontend-tree.mjs", root / "core/ci-workflows/scripts")
+    proc = subprocess.run([node, str(root / "core/ci-workflows/scripts/bootstrap-frontend-tree.mjs"),
+                           "--fix"], capture_output=True, text=True, check=False)
+    workspace_link = root / "inboxxhq/frontend/pnpm-workspace.yaml"
+    expect(proc.returncode == 0 and f"(cd {root / 'inboxxhq/frontend'} &&" in proc.stdout
+           and workspace_link.is_symlink() and workspace_link.resolve()
+           == (root / "core/frontend/frontend-core/local-dev/pnpm-workspace.yaml").resolve(),
+           f"bootstrap-frontend-tree.mjs (frontend split): must link the workspace file in "
+           f"inboxxhq/frontend/ and install from there; got {proc.returncode} {proc.stdout} "
+           f"{proc.stderr}")
+
+
+# --- check-shared-package-topology.mjs ----------------------------------------------------------
+#
+# The checker reads the layout from frontend-core's manifest, so the same checker must pass a
+# correct tree in either layout and name exactly what is wrong in a broken one. The fixtures are
+# the smallest trees the checker reads: a manifest, two packages, one app with its Dockerfile and
+# tsconfigs, and the workspace file linked where the app's workspace root is.
+
+TOPOLOGY_PACKAGES = {"@inboxxhq/web-design": "angular", "@inboxxhq/web-platform": "src"}
+
+
+def topology_tree(layout: str) -> tuple[pathlib.Path, str]:
+    split = layout == "owner-first"
+    core = "core/frontend/frontend-core" if split else "frontend/frontend-core"
+    ws_root = "inboxxhq/frontend" if split else "frontend"
+    app = f"{ws_root}/inboxxhq-web-app"
+    core_from_app = os.path.relpath(core, app)
+    manifest = {
+        "packages": {
+            name: {
+                "ssot": {"kind": "core-package", "repo": "coderaxis/frontend-core",
+                         "path": f"{core}/packages/{name.split('/')[1]}"},
+                "local": {"expect": "real-directory", "path": f"{core}/packages/{name.split('/')[1]}"},
+                "dockerPath": f"{core}/packages/{name.split('/')[1]}",
+                "tsconfigSourceDir": src,
+            }
+            for name, src in TOPOLOGY_PACKAGES.items()
+        },
+        "apps": {"inboxxhq-web-app": {"path": app, "consumes": list(TOPOLOGY_PACKAGES)}},
+    }
+    if split:
+        manifest["core"] = {"path": core, "repo": "coderaxis/frontend-core"}
+    members = [os.path.relpath(f"{core}/packages/{n.split('/')[1]}", ws_root) for n in TOPOLOGY_PACKAGES]
+    members.append("*" if split else "inboxxhq-*")
+    copy = (f"RUN mkdir -p /app/{core} && cp -R /tmp/frontend-core/packages /app/{core}/packages\n"
+            if split else
+            "RUN mkdir -p frontend-core && cp -R /tmp/frontend-core/packages frontend-core/packages\n")
+    files = {
+        f"{core}/shared-packages.manifest.json": json.dumps(manifest),
+        f"{core}/local-dev/pnpm-workspace.yaml":
+            "packages:\n" + "".join(f'  - "{m}"\n' for m in members),
+        f"{app}/Dockerfile": f"FROM node AS builder\nWORKDIR /app/{ws_root}\n{copy}"
+                             f"COPY . inboxxhq-web-app\nWORKDIR /app/{app}\n",
+        f"{app}/tsconfig.app.json": json.dumps({"include": ["src/**/*.ts"] + [
+            f"{core_from_app}/packages/{n.split('/')[1]}/{s}/**/*.ts" for n, s in TOPOLOGY_PACKAGES.items()]}),
+        f"{app}/tsconfig.json": json.dumps({"compilerOptions": {"paths": {
+            n: [f"{core_from_app}/packages/{n.split('/')[1]}/{s}"] for n, s in TOPOLOGY_PACKAGES.items()}}}),
+    }
+    for name, src in TOPOLOGY_PACKAGES.items():
+        files[f"{core}/packages/{name.split('/')[1]}/{src}/index.ts"] = ""
+    root = write(tmpdir(), files)
+    ws_file = root / ws_root / "pnpm-workspace.yaml"
+    ws_file.symlink_to(os.path.relpath(root / core / "local-dev/pnpm-workspace.yaml", ws_file.parent))
+    return root, app
+
+
+def topology(root: pathlib.Path, cwd: pathlib.Path | None = None, *args: str):
+    argv = [node, str(HERE / "check-shared-package-topology.mjs"), *args]
+    if cwd is None:
+        argv += ["--root", str(root)]
+    return subprocess.run(argv, capture_output=True, text=True, check=False, cwd=cwd or root)
+
+
+if node is not None:
+    for layout in ("legacy", "owner-first"):
+        root, app = topology_tree(layout)
+        proc = topology(root)
+        expect(proc.returncode == 0 and "topology OK" in proc.stdout,
+               f"check-shared-package-topology.mjs ({layout}): a correct tree must pass; got "
+               f"{proc.returncode} {proc.stdout} {proc.stderr}")
+
+    # Found from inside an app, with no --root: the tree is the nearest directory holding the
+    # manifest, so a task folder laid out like the hub is checked as itself.
+    root, app = topology_tree("owner-first")
+    proc = topology(root, cwd=root / app)
+    expect(proc.returncode == 0 and f"tree:    {root}" in proc.stdout,
+           f"check-shared-package-topology.mjs: must find the tree from inside an app; got "
+           f"{proc.returncode} {proc.stdout} {proc.stderr}")
+
+    def broken(mutate, needle: str, what: str) -> None:
+        root, app = topology_tree("owner-first")
+        mutate(root, app)
+        proc = topology(root)
+        expect(proc.returncode == 1 and needle in proc.stderr,
+               f"check-shared-package-topology.mjs: {what} must fail naming '{needle}'; got "
+               f"{proc.returncode} {proc.stdout} {proc.stderr}")
+
+    def edit(path: pathlib.Path, old: str, new: str) -> None:
+        path.write_text(path.read_text().replace(old, new))
+
+    broken(lambda r, a: edit(r / a / "Dockerfile", "WORKDIR /app/inboxxhq/frontend\n",
+                             "WORKDIR /app/frontend\n"),
+           "never sets WORKDIR to /app/inboxxhq/frontend", "an image built in the old root")
+    broken(lambda r, a: edit(r / a / "tsconfig.app.json", "../../../core/frontend/frontend-core/",
+                             "../frontend-core/"),
+           "spelled for the old sibling layout", "a tsconfig glob in the old spelling")
+    broken(lambda r, a: edit(r / a / "tsconfig.json", "../../../core/frontend/frontend-core/",
+                             "../frontend-core/"),
+           'maps "@inboxxhq/web-design"', "a path alias in the old spelling")
+    broken(lambda r, a: edit(r / "core/frontend/frontend-core/local-dev/pnpm-workspace.yaml",
+                             "../../core/frontend/frontend-core/packages/web-design",
+                             "frontend-core/packages/web-design"),
+           "does not declare it by its real path", "a workspace member in the old spelling")
+    broken(lambda r, a: edit(r / "core/frontend/frontend-core/local-dev/pnpm-workspace.yaml",
+                             '"*"', '"other-*"'),
+           "has no member matching", "an app the workspace does not include")
+    broken(lambda r, a: write(r, {"frontend/frontend-core/package.json": "{}"}),
+           "a real directory remains at the old path", "a second clone at the old path")
+
+    # A compat link at the old path is what the hub leaves while sessions still stand there:
+    # reported, not failed.
+    root, app = topology_tree("owner-first")
+    link(root, "frontend/frontend-core", "core/frontend/frontend-core")
+    proc = topology(root)
+    expect(proc.returncode == 0 and "compat link" in proc.stdout,
+           f"check-shared-package-topology.mjs: a compat link at the old path is a note; got "
+           f"{proc.returncode} {proc.stdout} {proc.stderr}")
 
 
 if FAILURES:
