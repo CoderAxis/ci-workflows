@@ -1,0 +1,159 @@
+name: Release assets
+
+# Publish a release's built files from a private source repository to its public
+# `<repo>-releases` repository, the only place installers download from.
+#
+# A tool distributed as binaries (an agent a merchant installs with a one-line script) keeps its
+# source private and its downloads public, so every release is two releases: one on the source
+# repository, which its own GITHUB_TOKEN can write, and one on the public `<repo>-releases`
+# repository, which it cannot. The second needs a credential that writes to ANOTHER repository,
+# and the platform's only such credential is the release bot.
+#
+# A caller is thin and declares nothing about where the files go:
+#
+#   jobs:
+#     build:
+#       ...                                 # build, write SHA256SUMS, then:
+#       - uses: actions/upload-artifact@v4
+#         with: { name: release-assets, path: dist/ }
+#     publish:
+#       needs: build
+#       permissions:
+#         contents: read
+#         id-token: write
+#       uses: coderaxis/ci-workflows/.github/workflows/release-assets.yaml@v1
+#       with:
+#         artifact: release-assets
+#
+# WHY THIS IS CENTRAL. The release bot is reachable only from a job DEFINED in a released central
+# workflow (ci-app-token's trust model: the role conditions on job_workflow_ref). A repository that
+# calls ci-app-token with `scope: publish` from its own release workflow is refused at the mint with
+# AccessDenied, by design: a job a repository writes itself could ask the bot for anything. That is
+# what happened to every tag of the first tool to do it - the source release went out, the public one
+# did not, and each version was published by hand.
+#
+# WHAT BOUNDS IT. The target is not an input. It is the caller's own `<owner>/<repo>-releases`,
+# derived from the run, and the token is minted for that one repository. A caller can publish its own
+# files to its own public mirror and nothing else, whatever it passes; the trust policy on the AWS
+# side names which repositories may call this at all, and the App's installation on the owner names
+# which repositories the bot can write there.
+#
+# WHAT IS CHECKED. The files are published only when SHA256SUMS lists exactly the files present
+# and every checksum holds, so an artifact that lost or gained a file between the build and here is
+# refused rather than shipped. A tag already published is not published twice: the same files are a
+# no-op (a rerun of a release that failed after publishing), missing files are added, and a file
+# whose published checksum differs fails the run. A binary a merchant may already have installed is
+# never replaced under the same version.
+
+on:
+  workflow_call:
+    inputs:
+      artifact:
+        description: "Name of the uploaded artifact holding the release's files and its SHA256SUMS."
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  # The OIDC token ci-app-token exchanges for the release bot's key.
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish the release to the public releases repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Two runs of one tag (a rerun beside the original) take turns; the second finds the release
+    # published and checks it rather than racing the first to create it.
+    concurrency:
+      group: release-assets-${{ github.repository }}-${{ github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Only a tag is a release. A branch run would mint a token for nothing (the trust policy admits
+      # tag refs only) and fail at the mint with an error that names the policy, not the mistake.
+      - name: Resolve the release and its public repository
+        id: t
+        env:
+          REF: ${{ github.ref }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          case "$REF" in
+            refs/tags/*) ;;
+            *) echo "::error::release-assets publishes a tag; this run is on $REF"; exit 1 ;;
+          esac
+          owner="${REPO%%/*}"
+          name="${REPO#*/}"
+          {
+            echo "tag=$TAG"
+            echo "owner=$owner"
+            echo "name=$name"
+            echo "target=${name}-releases"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download the built files
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist
+
+      - name: Check SHA256SUMS lists exactly the files and every checksum holds
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          test -f SHA256SUMS || { echo "::error::the artifact has no SHA256SUMS"; exit 1; }
+          listed=$(awk '{sub(/^\*/, "", $2); print $2}' SHA256SUMS | sort)
+          present=$(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
+          if [ "$listed" != "$present" ]; then
+            echo "::error::SHA256SUMS and the files differ"
+            diff <(echo "$listed") <(echo "$present") || true
+            exit 1
+          fi
+          sha256sum -c SHA256SUMS
+
+      - name: Mint a release-bot token for the public repository alone
+        id: bot
+        uses: coderaxis/ci-workflows/ci-app-token@v1
+        with:
+          scope: publish
+          owner: ${{ steps.t.outputs.owner }}
+          repositories: ${{ steps.t.outputs.target }}
+
+      - name: Publish, or complete a release already published with the same files
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          TAG: ${{ steps.t.outputs.tag }}
+          NAME: ${{ steps.t.outputs.name }}
+          TARGET: ${{ steps.t.outputs.owner }}/${{ steps.t.outputs.target }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$TARGET" --json tagName >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$TARGET" \
+              --title "$NAME $TAG" --notes "Binaries and installers for $TAG." ./*
+            echo "published $TAG to $TARGET"
+            exit 0
+          fi
+          # Already published: compare against what is there, never overwrite it.
+          published=$(gh release view "$TAG" --repo "$TARGET" --json assets -q '.assets[].name' | sort)
+          if echo "$published" | grep -qx SHA256SUMS; then
+            gh release download "$TAG" --repo "$TARGET" --pattern SHA256SUMS --output ../published.sums --clobber
+            if ! diff <(sort ../published.sums) <(sort SHA256SUMS); then
+              echo "::error::$TARGET already has $TAG with different files; a published version is never replaced"
+              exit 1
+            fi
+          elif [ -n "$published" ]; then
+            echo "::error::$TARGET already has $TAG without a SHA256SUMS to compare against"
+            exit 1
+          fi
+          missing=$(comm -23 <(find . -maxdepth 1 -type f -printf '%f\n' | sort) <(echo "$published"))
+          if [ -z "$missing" ]; then
+            echo "$TARGET already has $TAG with these files: nothing to do"
+            exit 0
+          fi
+          echo "$missing" | xargs gh release upload "$TAG" --repo "$TARGET"
+          echo "added to $TAG on $TARGET:"; echo "$missing"
