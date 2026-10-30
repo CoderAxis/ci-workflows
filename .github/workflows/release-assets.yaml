@@ -150,7 +150,7 @@ jobs:
             echo "::error::$TARGET already has $TAG without a SHA256SUMS to compare against"
             exit 1
           fi
-          missing=$(comm -23 <(ls -1 | sort) <(echo "$published"))
+          missing=$(comm -23 <(find . -maxdepth 1 -type f -printf '%f\n' | sort) <(echo "$published"))
           if [ -z "$missing" ]; then
             echo "$TARGET already has $TAG with these files: nothing to do"
             exit 0
