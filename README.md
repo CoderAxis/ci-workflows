@@ -21,6 +21,7 @@ credentials as inputs at call time.
 | Action | Purpose |
 | ------ | ------- |
 | [`module-auth`](module-auth/action.yaml) | Mint a short-lived GitHub App installation token (`coderaxis-module-reader`) and configure git for private module reads. Replaces long-lived `CROSS_REPO_TOKEN` / `WORKFLOW_GH_PAT`. |
+| [`go-build-cache/restore`](go-build-cache/restore/action.yaml) + [`go-build-cache/save`](go-build-cache/save/action.yaml) | Persist `GOCACHE` across runs of one lane on **GitHub-hosted** runners (no-ops on the self-hosted pools, whose cache is node-local). Restore by go.sum then Go version; save only on pushes to the default branch, trimmed to the entries this run read, so a cache restored through many generations stays one run's working set. Used by service-ci's Build and test and Integration lanes, where compiling was most of the billed minutes. |
 
 Future actions (e.g. `docker-login`, `slack-notify`, `aws-login`) live as sibling folders.
 
