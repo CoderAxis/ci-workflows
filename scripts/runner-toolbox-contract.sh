@@ -86,6 +86,27 @@ if command -v go >/dev/null 2>&1; then
   need "Go reports cgo enabled (go env CGO_ENABLED = 1)" bash -c '[ "$(go env CGO_ENABLED)" = "1" ]'
 fi
 
+# The test database service-ci's Go lanes start on the runner itself (ci-workflows'
+# test-postgres action): PostgreSQL 18 with pgvector, in the en_US.UTF-8 locale the lanes'
+# container used. Dockerfile.gha says why it is on the image. The probe starts a real server as
+# the current user, because a binary that is present but cannot run unprivileged, a missing
+# locale, or a pgvector built for another major is exactly what a version check would pass.
+need "PostgreSQL 18 server (initdb, pg_ctl, psql)" test -x /usr/lib/postgresql/18/bin/initdb \
+  -a -x /usr/lib/postgresql/18/bin/pg_ctl -a -x /usr/lib/postgresql/18/bin/psql
+# shellcheck disable=SC2016  # the probe is a script for the inner bash; nothing here should expand
+need "PostgreSQL 18 starts as this user in en_US.UTF-8 and creates the vector extension (pgvector)" bash -c '
+  bin=/usr/lib/postgresql/18/bin
+  tmp="$(mktemp -d)" || exit 1
+  "${bin}/initdb" -D "${tmp}/data" -U postgres --auth=trust --encoding=UTF8 --locale=en_US.UTF-8 \
+    && "${bin}/pg_ctl" -D "${tmp}/data" -l "${tmp}/log" -w -o "-c listen_addresses= -k ${tmp}" start \
+    && "${bin}/psql" -h "${tmp}" -U postgres -d postgres -Atqc "CREATE EXTENSION vector" \
+    && [ "$("${bin}/psql" -h "${tmp}" -U postgres -d postgres -Atqc "SHOW default_text_search_config")" = "pg_catalog.english" ]
+  rc=$?
+  "${bin}/pg_ctl" -D "${tmp}/data" -m immediate stop
+  rm -rf "${tmp}"
+  exit "${rc}"
+'
+
 # The gha-runner-scale-set chart starts the runner with /home/runner/run.sh; the
 # summerwind-based image did not have it and every pod died on exec (2026-09-04).
 need "scale-set runner layout (/home/runner/run.sh)" test -x /home/runner/run.sh
