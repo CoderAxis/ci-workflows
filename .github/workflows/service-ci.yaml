@@ -470,6 +470,15 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      # Compiling is most of this lane on a hosted runner: Lint is `go vet`, which is nothing but
+      # compiling, and the coverage and race steps compile the module again with instrumentation.
+      # See go-build-cache/restore for the keys and why a restored cache cannot grow.
+      - name: Restore the Go build cache
+        id: gocache
+        uses: coderaxis/ci-workflows/go-build-cache/restore@v1
+        with:
+          lane: build-test
+
       - name: Mint module-read token
         id: modauth
         uses: coderaxis/ci-workflows/ci-app-token@v1
@@ -652,6 +661,12 @@ jobs:
           name: coverage-${{ github.run_id }}-${{ github.run_attempt }}
           path: coverage.out
           retention-days: 14
+
+      - name: Save the Go build cache
+        uses: coderaxis/ci-workflows/go-build-cache/save@v1
+        with:
+          lane: build-test
+          key: ${{ steps.gocache.outputs.key }}
 
   codeql:
     name: CodeQL
@@ -1735,6 +1750,14 @@ jobs:
         shell: bash
         run: GOWORK=off go mod download
 
+      # The test binaries are most of what this lane compiles; see go-build-cache/restore.
+      - name: Restore the Go build cache
+        id: gocache
+        if: steps.selection.outputs.run == 'true'
+        uses: coderaxis/ci-workflows/go-build-cache/restore@v1
+        with:
+          lane: integration
+
       # Only started for a service the catalog says publishes or consumes events. The old harness
       # paid for a Redpanda broker on every deployable regardless.
       - name: Start Redpanda
@@ -1788,6 +1811,13 @@ jobs:
               | sed 's/.*"Test":"\([^"]*\)".*/  skipped: \1/' | sort -u
             exit 1
           fi
+
+      - name: Save the Go build cache
+        if: steps.selection.outputs.run == 'true'
+        uses: coderaxis/ci-workflows/go-build-cache/save@v1
+        with:
+          lane: integration
+          key: ${{ steps.gocache.outputs.key }}
 
   # ── API contract lifecycle ──────────────────────────────────────────────────────────────────
   # Absorbs contract-check.yml (33 repos) and openapi-contract.yml (5). Those two filenames held
