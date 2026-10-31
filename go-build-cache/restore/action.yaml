@@ -1,0 +1,84 @@
+name: Go build cache (restore)
+description: >-
+  Restore the Go build cache (GOCACHE) a previous run of the same lane saved on the default
+  branch, on a GitHub-hosted runner. Pair with go-build-cache/save at the end of the job.
+
+# WHY. Every Go lane on a GitHub-hosted runner started from an empty GOCACHE (setup-go runs with
+# `cache: false` fleet-wide), so every run compiled the module and all of its dependencies from
+# scratch, sometimes three times: `go vet` for Lint, the coverage build, the race build. On
+# 2026-10-30 the hosted lanes billed ~4,200 minutes across the two orgs, and compilation was most
+# of the short ones: ai-service's Build and test spent 158 s of 287 in Lint alone, which is
+# nothing but compiling, and edge-gateway 216 s of 594. Minutes on a hosted runner are billed;
+# a warm cache turns most of that into reads.
+#
+# ONLY ON GITHUB-HOSTED RUNNERS. The self-hosted pools keep GOCACHE on a node-local hostPath
+# (modules/arc-runners in inboxxhq-infra), which is warmer than any restored archive, and
+# actions/cache's upload intermittently hung there until the job's timeout (2026-10-08, the
+# reason setup-go runs with `cache: false`). On a self-hosted runner both halves do nothing.
+#
+# KEYS. Per lane, because the lanes compile different variants (Build and test builds plain,
+# coverage-instrumented and race objects; Integration only test binaries), and one shared entry
+# would carry all of them to every lane. Per OS, architecture and Go version, because objects
+# from another toolchain never hit. Then go.sum, then the run: each save on the default branch is
+# a new entry, and a run restores the newest entry for its go.sum, else the newest for its Go
+# version. A changed go.sum still restores: GOCACHE is content-addressed, so the dependencies
+# that did not change still hit and the ones that did simply miss.
+#
+# WHY THE PREFIX FALLBACK DOES NOT GROW THE CACHE. The e2e layer cache in service-ci.yaml had a
+# restore-keys prefix and grew by a generation per save until runners ran out of disk
+# (2026-10-04); it went back to an exact key. A Go cache restored by prefix would grow the same
+# way if saved whole, so the save half keeps only what this run used: Go refreshes the mtime of
+# an entry it reads (at most once an hour), so entries that are older than the marker written
+# here and were not refreshed by this run are deleted before the save. A saved cache is
+# therefore one run's working set, however many generations it was restored through.
+
+inputs:
+  lane:
+    description: >-
+      Name of the lane, used in the cache key: lowercase letters, digits and dashes. Use the same
+      value in go-build-cache/save.
+    required: true
+
+outputs:
+  key:
+    description: "The key go-build-cache/save writes under. Pass it through."
+    value: ${{ steps.key.outputs.key }}
+  matched-key:
+    description: "The entry that was restored, empty when none was (also shown in the step log)."
+    value: ${{ steps.restore.outputs.cache-matched-key }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute the cache key
+      id: key
+      shell: bash
+      env:
+        LANE: ${{ inputs.lane }}
+        SUM: ${{ hashFiles('**/go.sum') }}
+      run: |
+        set -euo pipefail
+        [[ "${LANE}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] \
+          || { echo "::error::lane '${LANE}' must be lowercase letters, digits and dashes"; exit 1; }
+        command -v go >/dev/null || { echo "::error::go is not on PATH; run actions/setup-go first"; exit 1; }
+        prefix="go-build-v1-${LANE}-${RUNNER_OS}-${RUNNER_ARCH}-$(go env GOVERSION)-"
+        {
+          echo "dir=$(go env GOCACHE)"
+          echo "prefix=${prefix}"
+          echo "sum-prefix=${prefix}${SUM}-"
+          echo "key=${prefix}${SUM}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        } >> "${GITHUB_OUTPUT}"
+        # Entries older than this and not read by the run are not saved; see the header. 61
+        # minutes, not 0, because Go only refreshes an entry whose mtime is over an hour old.
+        touch -d '-61 minutes' "${RUNNER_TEMP}/go-build-cache-${LANE}.epoch"
+
+    - name: Restore the Go build cache
+      id: restore
+      if: runner.environment == 'github-hosted'
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.key.outputs.dir }}
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: |
+          ${{ steps.key.outputs.sum-prefix }}
+          ${{ steps.key.outputs.prefix }}
