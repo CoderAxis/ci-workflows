@@ -72,12 +72,12 @@ on:
         default: v1
       runs_on:
         description: >-
-          runs-on label for the job. Defaults to a hosted runner because the job declares
-          `services:` (Postgres), which the runner starts through Docker, and the org's scale sets
-          run without a container mode; on the pool it fails before applying a single migration.
+          runs-on label for the job. The self-hosted pool by default: the job's Postgres is started
+          on the runner by the test-postgres action, which needs the pool image's PostgreSQL 18 and
+          pgvector (a GitHub-hosted image does not carry them, and the action says so and stops).
         required: false
         type: string
-        default: ubuntu-latest
+        default: inboxxhq-ci
     # No secrets. This workflow mints its own module-read token from the job's OIDC identity
     # through ci-app-token, which takes no app-id or private-key input at all, so the failure
     # this previously guarded against ("Input required and not supplied: app-id") cannot occur.
@@ -106,23 +106,6 @@ jobs:
       id-token: write
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 30
-    services:
-      postgres:
-        # docker.io on purpose, and pgvector's image: see the comment on service-ci.yaml's Build
-        # and test Postgres image. The same server as the tests, so a migration that creates the
-        # vector extension when it is available is checked down the path production takes.
-        image: docker.io/pgvector/pgvector:0.8.7-pg18
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: schema_compat_test
-        ports:
-          - 5432/tcp
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       # Both accounts, matching every other Go job in service-ci. This job had only
       # coderaxis, which is latent rather than broken today (inboxxhq-coderaxis appears
@@ -195,11 +178,22 @@ jobs:
           path: schema-lint-report.json
           if-no-files-found: ignore
 
+      # The same server as service-ci's Build and test (PostgreSQL 18 + pgvector, same locale and
+      # credentials), so a migration that creates the vector extension when it is available is
+      # checked down the path production takes. It was a `services:` container until 2026-10-31,
+      # which kept this job on GitHub-hosted runners; see the action for what it starts.
+      - name: Start the throwaway database
+        id: postgres
+        uses: coderaxis/ci-workflows/test-postgres@v1
+        with:
+          database: schema_compat_test
+
       - name: Resolve Postgres connection URL
         shell: bash
+        env:
+          PORT: ${{ steps.postgres.outputs.port }}
         run: |
           set -euo pipefail
-          PORT="${{ job.services.postgres.ports['5432'] }}"
           URL="postgres://postgres:postgres@127.0.0.1:${PORT}/schema_compat_test?sslmode=disable"
           {
             echo "DB_HOST=127.0.0.1"

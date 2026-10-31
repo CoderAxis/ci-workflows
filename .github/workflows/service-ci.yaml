@@ -416,45 +416,18 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    # Hosted, not the pool: this job declares `services:` (Postgres, Redis), which the runner
-    # starts through Docker, and the scale sets run container_mode "none" (no daemon). On the
-    # pool it fails before a single test with "Value cannot be null (network)". It moves to the
-    # pool when the pool runs containerMode kubernetes (modules/arc-runners in inboxxhq-infra).
-    runs-on: ubuntu-latest
+    # On the self-hosted heavy pool since 2026-10-31. It was the largest lane on GitHub-hosted
+    # runners (47% of the two orgs' hosted minutes on 2026-10-30), hosted only because its Postgres
+    # was a `services:` container and the scale sets run no Docker daemon. The pool image now
+    # carries PostgreSQL 18 + pgvector, and the test-postgres action starts it as a process in this
+    # job's pod: the same server, locale and credentials the container gave.
+    #
+    # inboxxhq-ci-heavy, not inboxxhq-ci: one job per non-burstable Graviton3 node
+    # (inboxxhq-infra environments/dev/platform/arc-runners.tf). On the shared, burstable
+    # inboxxhq-ci nodes voice-ai-agent's suite took ~38 min against ~27 hosted with a whole node to
+    # itself, and with a busy neighbour its race step would have passed its 30-minute timeout.
+    runs-on: inboxxhq-ci-heavy
     timeout-minutes: 45
-    # Started for every Go repo, not only the ones that need it, because `services:` is resolved
-    # before `needs` is available and so cannot be made conditional. The alternative — a second
-    # coverage job for adapter repos, with the threshold evaluated in whichever ran — puts the gate
-    # in two places. An idle Postgres costs a container start; a gate in two places costs a repo
-    # that passes in one and was never checked by the other.
-    services:
-      postgres:
-        # docker.io, not public.ecr.aws, on purpose. This job runs on a GitHub-hosted runner, and
-        # GitHub does not apply Docker Hub's rate limit to public-image pulls from hosted runners.
-        # ECR Public caps anonymous pulls at 500 GB a month, hosted runners share egress addresses,
-        # and on 2026-10-12 jobs died in "Initialize containers" with "toomanyrequests: Data limit
-        # exceeded" before a test ran. Both registries serve the same digest for this tag. If the
-        # job moves to the self-hosted pool, revisit: from AWS the trade-off is the reverse.
-        #
-        # pgvector's image, not the stock one: it is postgres:18 with the vector extension
-        # installed, which is what the managed databases these services run on offer. On the stock
-        # image every test of an embedding column or a vector index skipped ("pgvector is not
-        # installed on this server"), so the vector half of retrieval -- including the proof that
-        # one organization's passages never reach another's -- was reported green without ever
-        # running. A repo that never creates the extension sees exactly the stock server.
-        # The pgvector release is pinned; the Postgres minor floats as it did on postgres:18.
-        image: docker.io/pgvector/pgvector:0.8.7-pg18
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: service_test
-        ports:
-          - 5432/tcp
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
       GONOSUMDB: github.com/coderaxis/*
@@ -469,15 +442,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-
-      # Compiling is most of this lane on a hosted runner: Lint is `go vet`, which is nothing but
-      # compiling, and the coverage and race steps compile the module again with instrumentation.
-      # See go-build-cache/restore for the keys and why a restored cache cannot grow.
-      - name: Restore the Go build cache
-        id: gocache
-        uses: coderaxis/ci-workflows/go-build-cache/restore@v1
-        with:
-          lane: build-test
 
       - name: Mint module-read token
         id: modauth
@@ -513,10 +477,20 @@ jobs:
           # target is still linted rather than silently skipped.
           if grep -qE '^lint:' Makefile 2>/dev/null; then make lint; else go vet ./...; fi
 
+      # Started for every Go repo, not only the ones that need it. The alternative - a second
+      # coverage job for adapter repos, with the threshold evaluated in whichever ran - puts the
+      # gate in two places. An idle Postgres costs a second of startup; a gate in two places costs
+      # a repo that passes in one and was never checked by the other.
+      - name: Start the throwaway database
+        id: postgres
+        uses: coderaxis/ci-workflows/test-postgres@v1
+        with:
+          database: service_test
+
       - name: Point the tests at the throwaway database
         shell: bash
         env:
-          PG_PORT: ${{ job.services.postgres.ports['5432'] }}
+          PG_PORT: ${{ steps.postgres.outputs.port }}
         run: |
           set -euo pipefail
           # One name, because all 41 integration test files in the fleet read this one. The tests
@@ -598,7 +572,12 @@ jobs:
           # across the set can only add covered statements to a denominator that was already this
           # list, so no repo's number falls.
           list="$(IFS=,; echo "${pkgs[*]}")"
-          GOWORK=off go test -tags="${GO_TAGS}" -coverpkg="${list}" "${pkgs[@]}" \
+          # -timeout 30m, as the race step below has. Without it each test binary gets go test's
+          # default of 10 minutes, which nobody chose: voice-ai-agent's inbound/http package (the
+          # recorded search goldens against Postgres) took 461 s on a 2-vCPU hosted runner, 77% of
+          # that default, and past it on a pool canary where the tests and Postgres shared 1.5
+          # CPUs. The job's timeout-minutes is the budget that was actually decided.
+          GOWORK=off go test -timeout 30m -tags="${GO_TAGS}" -coverpkg="${list}" "${pkgs[@]}" \
             -coverprofile=coverage.out -covermode=atomic
           go tool cover -func=coverage.out | tail -5
 
@@ -661,12 +640,6 @@ jobs:
           name: coverage-${{ github.run_id }}-${{ github.run_attempt }}
           path: coverage.out
           retention-days: 14
-
-      - name: Save the Go build cache
-        uses: coderaxis/ci-workflows/go-build-cache/save@v1
-        with:
-          lane: build-test
-          key: ${{ steps.gocache.outputs.key }}
 
   codeql:
     name: CodeQL
@@ -1663,8 +1636,20 @@ jobs:
       id-token: write
     services:
       postgres:
-        # docker.io on purpose, and pgvector's image: see the comment on the Build and test job's
-        # Postgres image.
+        # docker.io, not public.ecr.aws, on purpose. This job runs on a GitHub-hosted runner, and
+        # GitHub does not apply Docker Hub's rate limit to public-image pulls from hosted runners.
+        # ECR Public caps anonymous pulls at 500 GB a month, hosted runners share egress addresses,
+        # and on 2026-10-12 jobs died in "Initialize containers" with "toomanyrequests: Data limit
+        # exceeded" before a test ran. Both registries serve the same digest for this tag.
+        #
+        # pgvector's image, not the stock one: it is postgres:18 with the vector extension
+        # installed, which is what the managed databases these services run on offer. On the stock
+        # image every test of an embedding column or a vector index skipped. The pgvector release
+        # is pinned; the Postgres minor floats as it did on postgres:18. The pool lanes get the same
+        # two packages from the runner image (test-postgres action).
+        #
+        # Still hosted, unlike Build and test: this job also starts Redpanda with `docker run` for
+        # every service that has events, and the pools run no Docker daemon.
         image: docker.io/pgvector/pgvector:0.8.7-pg18
         env:
           POSTGRES_USER: postgres
