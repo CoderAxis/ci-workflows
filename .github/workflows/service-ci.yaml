@@ -576,7 +576,12 @@ jobs:
           # across the set can only add covered statements to a denominator that was already this
           # list, so no repo's number falls.
           list="$(IFS=,; echo "${pkgs[*]}")"
-          GOWORK=off go test -tags="${GO_TAGS}" -coverpkg="${list}" "${pkgs[@]}" \
+          # -timeout 30m, as the race step below has. Without it each test binary gets go test's
+          # default of 10 minutes, which nobody chose: voice-ai-agent's inbound/http package (the
+          # recorded search goldens against Postgres) took 461 s on a 2-vCPU hosted runner, 77% of
+          # that default, and past it on a pool canary where the tests and Postgres shared 1.5
+          # CPUs. The job's timeout-minutes is the budget that was actually decided.
+          GOWORK=off go test -timeout 30m -tags="${GO_TAGS}" -coverpkg="${list}" "${pkgs[@]}" \
             -coverprofile=coverage.out -covermode=atomic
           go tool cover -func=coverage.out | tail -5
 
