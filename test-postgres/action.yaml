@@ -1,0 +1,117 @@
+name: Test Postgres
+description: >-
+  Start a throwaway PostgreSQL 18 with pgvector for one job, as a plain process on the runner,
+  and report its port. The replacement for a `services:` Postgres container on runners that have
+  no Docker daemon - the self-hosted inboxxhq-ci pools.
+
+# WHY THIS EXISTS. The Go lanes that need a database (Build and test, Schema compatibility) got it
+# as a GitHub `services:` container. The runner starts those through Docker, the pools run no
+# daemon (modules/arc-runners in inboxxhq-infra: container_mode "none"), so those lanes stayed on
+# GitHub-hosted runners. In October 2026 that was ~95,000 billed minutes across the two orgs, and
+# Build and test alone was ~85% of it. The runner image now carries PostgreSQL 18 and pgvector
+# (inboxxhq-infra ci-workflows-runner/runner-image/Dockerfile.gha, verified by the toolbox
+# contract), and this action is the one place that turns those binaries into a database.
+#
+# WHAT A TEST SEES. The same server the container gave it, setting by setting, because search
+# rankings and text ordering in the fleet's recorded tests depend on them:
+#   - PostgreSQL 18 from PGDG with pgvector 0.8.7 (docker.io/pgvector/pgvector:0.8.7-pg18 is the
+#     same two packages);
+#   - superuser `postgres`, password `postgres`, password (scram) auth over TCP, the `postgres`
+#     database plus the one named here;
+#   - locale en_US.UTF-8 with the libc provider, so text ordering is the container's; text search
+#     defaults to `english` (the container's, picked from that locale; C.UTF-8 would give `simple`
+#     and every to_tsvector without a config would rank differently); timezone Etc/UTC.
+# What differs is durability: fsync, synchronous_commit and full_page_writes are off. A test
+# database is thrown away with its pod, so crash safety buys nothing and costs every commit.
+#
+# LIFETIME. The server belongs to the job: the data directory is under RUNNER_TEMP, the process
+# is the job's child, and the runner ends a job's orphaned processes when the job ends. On the
+# pools the pod is ephemeral as well, so nothing is reused between jobs.
+#
+# On a runner without the binaries (a GitHub-hosted image, or a pool image older than the change
+# that added them) the action fails before any test runs and says so; it never installs at job
+# time, because a lane whose database depends on a package mirror at test time is a flake source.
+
+inputs:
+  database:
+    description: >-
+      Database to create beside `postgres`. Lowercase letters, digits and underscores only, since
+      it is spliced into SQL.
+    required: false
+    default: service_test
+
+outputs:
+  port:
+    description: "TCP port the server listens on, on localhost."
+    value: ${{ steps.start.outputs.port }}
+
+runs:
+  using: composite
+  steps:
+    - name: Start PostgreSQL 18 (pgvector)
+      id: start
+      shell: bash
+      env:
+        DATABASE: ${{ inputs.database }}
+      run: |
+        set -euo pipefail
+
+        bin=/usr/lib/postgresql/18/bin
+        if [[ ! -x "${bin}/initdb" || ! -f /usr/share/postgresql/18/extension/vector.control ]]; then
+          echo "::error::PostgreSQL 18 with pgvector is not installed on this runner (${RUNNER_NAME:-unknown})."
+          echo "This action needs the inboxxhq-ci pool image that carries it; see inboxxhq-infra"
+          echo "ci-workflows-runner/runner-image/Dockerfile.gha. It does not install at job time."
+          exit 1
+        fi
+        if [[ ! "${DATABASE}" =~ ^[a-z_][a-z0-9_]{0,62}$ ]]; then
+          echo "::error::database '${DATABASE}' must match ^[a-z_][a-z0-9_]{0,62}\$"
+          exit 1
+        fi
+
+        root="${RUNNER_TEMP}/test-postgres"
+        rm -rf "${root}"
+        mkdir -p "${root}"
+        # A free port rather than 5432: a hosted-style runner may run several jobs' processes in
+        # one network namespace, and the lanes already read the port from an output, as they did
+        # from job.services.
+        port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+
+        printf 'postgres\n' > "${root}/pwfile"
+        "${bin}/initdb" -D "${root}/data" -U postgres --pwfile="${root}/pwfile" \
+          --auth-local=trust --auth-host=scram-sha-256 \
+          --encoding=UTF8 --locale=en_US.UTF-8 --locale-provider=libc \
+          --text-search-config=english >"${root}/initdb.log" 2>&1 \
+          || { echo "::error::initdb failed"; cat "${root}/initdb.log"; exit 1; }
+        rm -f "${root}/pwfile"
+
+        cat >>"${root}/data/postgresql.conf" <<EOF
+        listen_addresses = 'localhost'
+        port = ${port}
+        unix_socket_directories = '${root}'
+        timezone = 'Etc/UTC'
+        log_timezone = 'Etc/UTC'
+        fsync = off
+        synchronous_commit = off
+        full_page_writes = off
+        EOF
+
+        if ! "${bin}/pg_ctl" -D "${root}/data" -l "${root}/postgres.log" -w -t 60 start >/dev/null; then
+          echo "::error::PostgreSQL did not start"
+          cat "${root}/postgres.log"
+          exit 1
+        fi
+
+        "${bin}/psql" -h "${root}" -p "${port}" -U postgres -d postgres -v ON_ERROR_STOP=1 -qAt \
+          -c "CREATE DATABASE ${DATABASE}"
+
+        # The path the tests take - TCP to localhost, password auth, the named database - checked
+        # once here, so a broken server fails this step by name rather than every test by timeout.
+        if ! version="$(PGPASSWORD=postgres "${bin}/psql" -h localhost -p "${port}" -U postgres \
+            -d "${DATABASE}" -w -qAt -c "SHOW server_version")"; then
+          echo "::error::PostgreSQL started but does not accept postgres/postgres on localhost:${port}"
+          cat "${root}/postgres.log"
+          exit 1
+        fi
+
+        echo "port=${port}" >> "${GITHUB_OUTPUT}"
+        echo "PostgreSQL ${version} on localhost:${port}, database ${DATABASE}, log ${root}/postgres.log"
