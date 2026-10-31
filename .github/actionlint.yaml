@@ -10,9 +10,11 @@
 # Both organizations run scale sets under these names (inboxxhq-infra
 # modules/arc-runners: InboxxHQ-CoderAxis in arc-runners, CoderAxis in
 # arc-runners-coderaxis), so a reusable workflow names the label plainly
-# whichever owner calls it. The lanes that declare `services:` stay on
-# ubuntu-latest until the pools run a container mode.
+# whichever owner calls it. inboxxhq-ci-heavy is one job per node, for
+# service-ci's Build and test. The lanes that still need Docker (Integration,
+# End-to-end) stay on ubuntu-latest.
 self-hosted-runner:
   labels:
     - inboxxhq-ci
+    - inboxxhq-ci-heavy
     - inboxxhq-deploy
