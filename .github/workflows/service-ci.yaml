@@ -416,12 +416,17 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    # On the self-hosted pool since 2026-10-31. It was the one big lane left on GitHub-hosted
-    # runners, because its Postgres was a `services:` container and the scale sets run no Docker
-    # daemon (container_mode "none"); in October 2026 it was ~85% of the orgs' hosted bill. The
-    # pool image now carries PostgreSQL 18 + pgvector and the test-postgres action starts it as
-    # a process in this job's pod: the same server, locale and credentials the container gave.
-    runs-on: inboxxhq-ci
+    # On the self-hosted heavy pool since 2026-10-31. It was the largest lane on GitHub-hosted
+    # runners (47% of the two orgs' hosted minutes on 2026-10-30), hosted only because its Postgres
+    # was a `services:` container and the scale sets run no Docker daemon. The pool image now
+    # carries PostgreSQL 18 + pgvector, and the test-postgres action starts it as a process in this
+    # job's pod: the same server, locale and credentials the container gave.
+    #
+    # inboxxhq-ci-heavy, not inboxxhq-ci: one job per non-burstable Graviton3 node
+    # (inboxxhq-infra environments/dev/platform/arc-runners.tf). On the shared, burstable
+    # inboxxhq-ci nodes voice-ai-agent's suite took ~38 min against ~27 hosted with a whole node to
+    # itself, and with a busy neighbour its race step would have passed its 30-minute timeout.
+    runs-on: inboxxhq-ci-heavy
     timeout-minutes: 45
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
@@ -437,15 +442,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-
-      # Compiling is most of this lane on a hosted runner: Lint is `go vet`, which is nothing but
-      # compiling, and the coverage and race steps compile the module again with instrumentation.
-      # See go-build-cache/restore for the keys and why a restored cache cannot grow.
-      - name: Restore the Go build cache
-        id: gocache
-        uses: coderaxis/ci-workflows/go-build-cache/restore@v1
-        with:
-          lane: build-test
 
       - name: Mint module-read token
         id: modauth
@@ -644,12 +640,6 @@ jobs:
           name: coverage-${{ github.run_id }}-${{ github.run_attempt }}
           path: coverage.out
           retention-days: 14
-
-      - name: Save the Go build cache
-        uses: coderaxis/ci-workflows/go-build-cache/save@v1
-        with:
-          lane: build-test
-          key: ${{ steps.gocache.outputs.key }}
 
   codeql:
     name: CodeQL
