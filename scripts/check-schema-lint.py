@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -484,19 +485,161 @@ def constrained_words(clause: str, kind: str) -> set[str]:
         i = clause.find("(")
         clause = balanced(clause, i) if i >= 0 else ""
     return {w.lower() for w in RE_WORD.findall(clause)}
-# A named CHECK that is one column IN a list of literals, read from the RAW text: the
-# stripped text has its literals blanked, and the values are the whole question.
-RE_IN_CHECK = r"\bCONSTRAINT\s+{name}\s+CHECK\s*\(\s*\(?\s*(\w+)\s+IN\s*\(([^)]*)\)"
+# A CHECK's body is compared on the RAW text: the stripped text blanks literals, and
+# the values are the whole question.
+RE_CHECK_NAMED = r"\bCONSTRAINT\s+{name}\s+CHECK\s*\("
 RE_LITERAL = re.compile(r"'((?:[^']|'')*)'")
+RE_VALUE_LIST = re.compile(r"(not\s+)?(?:\bin\s*\(|<@\s*array\s*\[)([^)\]]*)[)\]]")
 
 
-def in_check(raw: str, name: str):
-    """(column, values) of the last CHECK named `name` in raw text written as one
-    column IN a literal list, or None when there is none in that shape."""
+def raw_code(text: str) -> str:
+    """text with `--` comments removed outside string literals, literals kept whole."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text[i] == "'":
+            j = i + 1
+            while j < n:
+                if text[j] == "'":
+                    if text.startswith("''", j):
+                        j += 2
+                        continue
+                    break
+                j += 1
+            out.append(text[i:j + 1])
+            i = j + 1
+            continue
+        if text.startswith("--", i):
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def check_body(raw: str, name: str) -> str | None:
+    """The normalised body of the last CHECK named `name` in raw text, or None."""
+    text = raw_code(raw)
     found = None
-    for m in re.finditer(RE_IN_CHECK.format(name=re.escape(name)), raw, re.I):
-        found = (m.group(1).lower(), set(RE_LITERAL.findall(m.group(2))))
-    return found
+    for m in re.finditer(RE_CHECK_NAMED.format(name=re.escape(name)), text, re.I):
+        found = balanced(text, m.end() - 1)
+    return None if found is None else normalised(found)
+
+
+def normalised(body: str) -> str:
+    """A CHECK body with casts, case outside literals and spacing made uniform, and
+    redundant outer parentheses removed, so two spellings of one rule compare equal."""
+    parts = re.split(r"('(?:[^']|'')*')", body)
+    body = "".join(p if p.startswith("'") else
+                   re.sub(r"\s*([^\w\s])\s*", r"\1", re.sub(r"\s+", " ", re.sub(r"::\s*[\w\[\]]+", "", p).lower()))
+                   for p in parts).strip()
+    while body.startswith("(") and balanced(body, 0) == body[1:-1]:
+        body = body[1:-1].strip()
+    return body
+
+
+def widens(old: str, new: str) -> bool:
+    """Whether a CHECK replaced by `new` accepts every row `old` did: the same rule,
+    `new` holding `old` as one of its OR-ed terms, or the same rule with each list of
+    allowed values (IN, <@ ARRAY) the same or larger and none of them a NOT IN."""
+    if old == new or old in (normalised(t) for t in split_or(new)):
+        return True
+    olds, news = RE_VALUE_LIST.findall(old), RE_VALUE_LIST.findall(new)
+    if not olds or len(olds) != len(news) or RE_VALUE_LIST.sub("#", old) != RE_VALUE_LIST.sub("#", new):
+        return False
+    for (o_not, o_vals), (n_not, n_vals) in zip(olds, news):
+        if o_not or n_not or not set(RE_LITERAL.findall(o_vals)) <= set(RE_LITERAL.findall(n_vals)):
+            return False
+    return True
+
+
+def split_or(body: str) -> list[str]:
+    """body's terms joined by OR at the top level of its parentheses."""
+    terms, depth, cur, i = [], 0, "", 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "'":
+            j = i + 1
+            while j < len(body) and not (body[j] == "'" and not body.startswith("''", j)):
+                j += 2 if body.startswith("''", j) else 1
+            cur += body[i:j + 1]
+            i = j + 1
+            continue
+        depth += ch == "("
+        depth -= ch == ")"
+        if depth == 0 and re.match(r" or ", body[i:i + 4]):
+            terms.append(cur)
+            cur, i = "", i + 4
+            continue
+        cur += ch
+        i += 1
+    return terms + [cur]
+
+
+# A constraint's kind as an earlier migration declared it, by name, for a DROP
+# CONSTRAINT: dropping a CHECK or a FOREIGN KEY only accepts more, while dropping a
+# UNIQUE or PRIMARY KEY can break an older build's ON CONFLICT. PostgreSQL's own
+# names for unnamed constraints carry the kind as a suffix.
+RE_DECLARED_KIND = r"\bCONSTRAINT\s+{name}\s+(CHECK|FOREIGN\s+KEY|REFERENCES|UNIQUE|PRIMARY\s+KEY|EXCLUDE)\b"
+RE_PK_INLINE = re.compile(r"^\s*(\w+)\s+[^,]*\bPRIMARY\s+KEY\b", re.I)
+RE_PK_TABLE = re.compile(r"\bPRIMARY\s+KEY\s*\(([^)]*)\)", re.I)
+# The marker's release: `unused-since: <module> vX.Y.Z` (or <module>@vX.Y.Z), on the
+# expand-contract line or a comment line of its own.
+RE_RELEASE = re.compile(
+    r"--[^\n]*?\bunused-since:\s*(?P<module>[A-Za-z0-9][A-Za-z0-9._/-]*?)(?:@|\s+)(?P<version>v[0-9]+\.[0-9]+\.[0-9]+)\b", re.I)
+
+
+def dropped_kind(name: str, earlier_raw: str) -> str:
+    """CHECK, FOREIGN, UNIQUE, PRIMARY or EXCLUDE for a constraint an earlier
+    migration declared under `name`, from its declaration or PostgreSQL's naming
+    of an unnamed one; "" when neither says."""
+    m = None
+    for m in re.finditer(RE_DECLARED_KIND.format(name=re.escape(name)), earlier_raw, re.I):
+        pass
+    if m:
+        kind = m.group(1).upper().split()[0]
+        return "FOREIGN" if kind == "REFERENCES" else kind
+    for suffix, kind in (("_check", "CHECK"), ("_fkey", "FOREIGN"), ("_pkey", "PRIMARY"),
+                         ("_key", "UNIQUE"), ("_excl", "EXCLUDE")):
+        if name.endswith(suffix):
+            return kind
+    return ""
+
+
+def module_of(root: Path) -> str:
+    """The repository's module name: the last element of go.mod's module path, else
+    the repository's own name (GITHUB_REPOSITORY in CI), else the directory's."""
+    try:
+        for line in (root / "go.mod").read_text(encoding="utf-8").splitlines():
+            if line.startswith("module "):
+                return line.split()[1].rstrip("/").split("/")[-1].lower()
+    except OSError:
+        pass
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if repo and Path(os.environ.get("GITHUB_WORKSPACE", "")).resolve() == root:
+        return repo.split("/")[-1].lower()
+    return root.name.lower()
+
+
+def release_problem(root: Path, module: str, version: str) -> str:
+    """Why `module version` is not a release of this repository published before its
+    head, or "" when it is: the module must be this repository's own, the version a
+    tag here, and that tag an ancestor of HEAD other than HEAD itself."""
+    own = module_of(root)
+    if module.lower() != own:
+        return f"names {module} {version}, but this repository is {own}"
+    tag = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet",
+                          f"refs/tags/{version}^{{commit}}"], capture_output=True, text=True)
+    if tag.returncode != 0:
+        return f"names {module} {version}, which is not a tag of this repository"
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True)
+    older = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor",
+                            tag.stdout.strip(), "HEAD"], capture_output=True, text=True)
+    if older.returncode != 0 or tag.stdout.strip() == head.stdout.strip():
+        return f"names {module} {version}, which is not a release before this head"
+    return ""
+
+
 
 TEXTY = re.compile(r"^(TEXT|VARCHAR|CHARACTER\s+VARYING|CHAR)$", re.I)
 
@@ -613,10 +756,12 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
     # would be a rule with two answers.
     expand_re = re.compile((doc.get("scan") or {}).get("expand_contract_pattern", ""), re.I)
     expand_contract_files: set[str] = set()
-    # SCHEMA-0007: the release a contract migration names, per file, read with the
-    # marker it extends so the two cannot be written apart.
-    release_re = re.compile((doc.get("scan") or {}).get("contract_release_pattern", ""), re.I)
+    # SCHEMA-0007: the release a contract migration names, per file, and why it is
+    # not a release of this module before its head ("" when it is). A name is checked
+    # against the repository's own tags, never taken on trust.
     contract_release_files: dict[str, str] = {}
+    contract_release_problems: dict[str, str] = {}
+    pk_columns: dict[str, set[str]] = {}
     enum_types: set[str] = set()
     check_bodies: list[str] = []
     described_tables: set[str] = set()
@@ -652,6 +797,18 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                 described_tables.add(m.group(1).split(".")[-1].lower())
             for col in _columns(stmt, sline, set()):
                 seen_columns.add((col["table"], col["column"]))
+            cm = RE_CRE_TBL.search(stmt)
+            if cm:
+                tbl = cm.group(1).split(".")[-1].lower()
+                body, _ = table_body_off(stmt)
+                for part in split_top(body):
+                    pm = RE_PK_TABLE.search(part) if CONSTRAINT_KW.match(part) else None
+                    if pm:
+                        pk_columns[tbl] = {c.strip().lower() for c in pm.group(1).split(",")}
+                    elif not CONSTRAINT_KW.match(part):
+                        im = RE_PK_INLINE.match(part)
+                        if im:
+                            pk_columns[tbl] = {im.group(1).lower()}
 
     sites: list[dict] = []
     markers: list[dict] = []
@@ -676,10 +833,10 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                                     "reason": m.group("reason"), "adr": m.group("adr")})
         if expand_re.pattern and expand_re.search(raw):
             expand_contract_files.add(rel)
-        if release_re.pattern:
-            rm = release_re.search(raw)
-            if rm:
-                contract_release_files[rel] = rm.group("release")
+        rm = RE_RELEASE.search(raw)
+        if rm and expand_re.pattern and expand_re.search(raw):
+            contract_release_files[rel] = f"{rm.group('module')} {rm.group('version')}"
+            contract_release_problems[rel] = release_problem(root, rm.group("module"), rm.group("version"))
 
         sql = strip_comments(raw)
         raw_lines = raw.split("\n")
@@ -687,6 +844,7 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
         created_here = set()
         readded: set[str] = set()
         dropped_constraints: set[str] = set()
+        readded_any: set[str] = set()
         created_names: set[str] = set()
         added_here: set[tuple[str, str]] = set()
         for stmt, sline in stmts:
@@ -697,6 +855,8 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                 created_names.add(cm2.group(1).split(".")[-1].lower())
             for dm in re.finditer(r"\bDROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(\w+)", stmt, re.I):
                 dropped_constraints.add(dm.group(1).lower())
+            for am in RE_ADD_CON_ANY.finditer(stmt):
+                readded_any.add(am.group(1).lower())
             for col in _columns(stmt, sline, set()):
                 added_here.add((col["table"], col["column"]))
             # A CHECK constraint cannot be extended in place, so the house idiom is
@@ -743,12 +903,19 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                         clause = split_top(tail)[0] if split_top(tail) else tail
                         if re.search(r"\bDEFAULT\b|\bGENERATED\b", clause, re.I):
                             continue
+                    contract = True
                     if name == "drop_constraint":
                         dm = re.search(r"\bDROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(\w+)",
                                        stmt[m.start():], re.I)
                         if dm and dm.group(1).lower() in readded:
                             continue
-                    sites.append({"rule": "destructive", "form": name, "file": rel,
+                        # SCHEMA-0007: a constraint re-added under its name is judged
+                        # as the re-add; a dropped CHECK or FOREIGN KEY accepts more,
+                        # which no older build can trip on.
+                        if dm and (dm.group(1).lower() in readded_any
+                                   or dropped_kind(dm.group(1).lower(), raw_before.get(f, "")) in ("CHECK", "FOREIGN")):
+                            contract = False
+                    sites.append({"rule": "destructive", "form": name, "file": rel, "contract": contract,
                                   "line": line_of(stmt, sline, m.start()), "span": span,
                                   "detail": f"{name.replace('_', ' ')} on "
                                             f"{tbl or 'an existing object'}"})
@@ -768,34 +935,44 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                                   "line": line_of(stmt, sline, m.start()), "span": span,
                                   "detail": detail})
             # A constraint given to a table that already holds rows, over a column it
-            # already had, narrows what a build of the release before may write. A
-            # constraint over columns this migration adds narrows nothing they wrote.
+            # already had, narrows what a build of the release before may write. Not
+            # one: a NOT VALID constraint (it holds no row already there, and its
+            # validation is a separate, later step), a constraint over any column this
+            # migration adds (it applies to that column, which an older build leaves
+            # at its default or NULL), a UNIQUE over a set that holds the primary key
+            # (it can refuse nothing), and a replace that widens.
             t = RE_ALT_TBL.search(code)
             tbl = t.group(1).split(".")[-1].lower() if t else ""
             if tbl and tbl not in created_here:
                 for m in RE_ADD_CON_ANY.finditer(code):
                     clause = split_top(code[m.end(2):])[0]
+                    if re.search(r"\bNOT\s+VALID\b", clause, re.I):
+                        continue
                     words = constrained_words(clause, m.group(2))
-                    narrowed = sorted(w for w in words
-                                      if (tbl, w) in columns_before.get(f, set())
-                                      and (tbl, w) not in added_here)
+                    if any((tbl, w) in added_here for w in words):
+                        continue
+                    narrowed = sorted(w for w in words if (tbl, w) in columns_before.get(f, set()))
                     if not narrowed:
+                        continue
+                    kind = m.group(2).upper().split()[0]
+                    if kind == "UNIQUE" and pk_columns.get(tbl) and pk_columns[tbl] <= words:
                         continue
                     con = m.group(1).lower()
                     if con in dropped_constraints:
-                        # The replace idiom. It widens when the old and the new are
-                        # each one column IN a literal list and the new list holds
-                        # every old value: nothing written before is refused now.
+                        # The replace idiom: not a contract when the new CHECK accepts
+                        # every row the old one did (widens).
                         lo_, hi_ = span
-                        new_in = in_check("\n".join(raw_lines[lo_ - 1:hi_]), con)
-                        old_in = in_check(raw_before.get(f, ""), con)
-                        if new_in and old_in and new_in[0] == old_in[0] and old_in[1] <= new_in[1]:
+                        new_body = check_body("\n".join(raw_lines[lo_ - 1:hi_]), con)
+                        old_body = check_body(raw_before.get(f, ""), con)
+                        if new_body is not None and old_body is not None and widens(old_body, new_body):
                             continue
                     sites.append({"rule": "contract", "form": "narrow_constraint", "file": rel,
                                   "line": line_of(stmt, sline, m.start()), "span": span,
                                   "detail": f"constraint {m.group(1)} on {tbl} narrows "
                                             f"existing column(s) {', '.join(narrowed)}"})
             for m in RE_ALTER_DOMAIN_ADD.finditer(code):
+                if re.search(r"\bNOT\s+VALID\b", code[m.end():], re.I):
+                    continue
                 sites.append({"rule": "contract", "form": "narrow_constraint", "file": rel,
                               "line": line_of(stmt, sline, m.start()), "span": span,
                               "detail": f"a constraint added to domain {m.group(1).split('.')[-1].lower()}"})
@@ -833,9 +1010,11 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                               "column": col})
 
     return {"files_scanned": files_scanned, "sites": sites, "markers": markers,
+            "module": module_of(root),
             "stmt_spans": stmt_spans,
             "expand_contract_files": expand_contract_files,
             "contract_release_files": contract_release_files,
+            "contract_release_problems": contract_release_problems,
             "enum_types": enum_types, "check_bodies": check_bodies,
             "described_tables": described_tables,
             "objects_scanned": len(sites), "parse_errors": parse_errors}
@@ -939,20 +1118,36 @@ def rule_destructive_statement(facts: dict, doc: dict, ctl: dict) -> list[Findin
 def rule_contract_names_release(facts: dict, doc: dict, ctl: dict) -> list[Finding]:
     """SCHEMA-0007: a contract migration names the release that stopped using it.
 
-    Every SCHEMA-0001 site and every contract site counts. The release is read from
-    the file's own expand-contract marker (`unused-since: <module> vX.Y.Z`), so it is
-    per file as that marker is; `empty-table` and `nothing-refused` markers excuse a site the
-    parser cannot judge.
+    Every SCHEMA-0001 site that removes or narrows (not a dropped CHECK or FOREIGN
+    KEY, which only accept more) and every contract site counts. The release is read
+    from the file's own marker and must be a tag of this module before its head
+    (release_problem). `empty-table` and `nothing-refused` excuse only a narrowed
+    constraint the parser cannot judge, never a drop or a rename: those are cleared
+    by a named, verified release alone.
     """
     c = ctl.get("SCHEMA-0007")
     if not c or c["status"] != "active":
         return []
+    # Report-only until a repository is switched on: enforce_in names the modules
+    # whose findings fail CI; everywhere else the control's own stage applies.
+    if facts.get("module") in {str(m).lower() for m in c.get("enforce_in") or []}:
+        c = dict(c, stage="enforce")
     named = facts.get("contract_release_files") or {}
-    return [_mk(c, s, f"contract migration names no release that stopped using what it "
-                      f"removes or newly refuses: {s['detail']}")
-            for s in facts["sites"] if s["rule"] in ("destructive", "contract")
-            and s["file"] not in named
-            and not excused(s, facts["markers"], {"empty-table", "nothing-refused"})]
+    problems = facts.get("contract_release_problems") or {}
+    out: list[Finding] = []
+    for s in facts["sites"]:
+        if s["rule"] == "destructive" and not s.get("contract", True):
+            continue
+        if s["rule"] not in ("destructive", "contract"):
+            continue
+        if s.get("form") == "narrow_constraint" and excused(s, facts["markers"], {"empty-table", "nothing-refused"}):
+            continue
+        if s["file"] in named and not problems.get(s["file"]):
+            continue
+        why = (f"its marker {problems[s['file']]}" if s["file"] in named
+               else "it names no release that stopped using what it removes or newly refuses")
+        out.append(_mk(c, s, f"contract migration: {why}: {s['detail']}"))
+    return out
 
 
 def rule_add_constraint_not_valid(facts: dict, doc: dict, ctl: dict) -> list[Finding]:
@@ -1096,7 +1291,29 @@ def evaluate(facts: dict, doc: dict) -> list[Finding]:
 # Output
 # ---------------------------------------------------------------------------
 
+def write_summary(findings: list[Finding], mode: str) -> None:
+    """Every finding, enforced or not, as a table in the job summary, where a
+    report-only control is read: an annotation alone is easy to miss."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    lines = [f"### Schema lint ({mode})", ""]
+    if not findings:
+        lines.append("No findings.")
+    else:
+        lines += ["| Control | Stage | Where | Finding |", "|---|---|---|---|"]
+        for f in findings:
+            msg = f.message.replace("|", "\\|")
+            lines.append(f"| {f.control} | {f.stage} | `{f.location}` | {msg} |")
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n\n")
+    except OSError as exc:
+        print(f"::warning::schema-lint could not write the job summary: {exc}")
+
+
 def emit_text(facts: dict, findings: list[Finding], mode: str) -> int:
+    write_summary(findings, mode)
     enforced = [f for f in findings if f.stage == "enforce"]
     warned = [f for f in findings if f.stage == "warn"]
     observed = [f for f in findings if f.stage == "observe"]

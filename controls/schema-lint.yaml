@@ -19,14 +19,14 @@
 # These are that run, not an estimate; re-running it is how a reviewer checks this
 # file has not gone stale.
 #
-# SCHEMA-0007 measured 2026-11-05 on ai-core-postgres and voice-ai-agent-core-postgres
-# (origin/main, files unchanged), the two schemas whose services may be served one
-# migration ahead: 6 contract sites, none naming a release. ai-core-postgres 000012:23,
-# 000012:24 and 000023:55 drop functions a build of the release before called;
-# 000021:48 is a CHECK that holds at its new column's default (`nothing-refused`);
-# voice-ai-agent-core-postgres 000019:69 and 000019:75 replace and add CHECKs over
-# columns the table had. In diff mode, as CI runs it, 000023 and 000019 each fail
-# where today's controls pass them; ai-core-postgres 000029 (expand-only) passes both.
+# SCHEMA-0007 measured 2026-11-05, report-only, in --mode baseline over 35
+# *-core-postgres schemas (239 migrations) and in diff mode over the three open pull
+# requests adding migrations: 14 findings, every one read and every one a real contract
+# (a drop, a SET NOT NULL, or a validated constraint over columns the table had and
+# none the migration adds); 0 false. ai-core-postgres 000012:23, 000012:24 and
+# 000023:55 drop functions the release before called; voice-ai-agent-core-postgres has
+# none (its CHECKs are NOT VALID and gated on new columns); ai-core-postgres 000030
+# (open) has none. Every other control's count is unchanged on all 35.
 #
 # What this catalog is, and is not. It is the single source of WHICH DDL invariants
 # are enforced and WHICH reasons are sanctioned grounds for an exception. It does not
@@ -217,12 +217,12 @@ reasons:
   - token: nothing-refused
     adr: ADR-0062
     description: >-
-      Every row and every write a build of the release before makes passes the new
-      constraint: it replaces one of the same name that refused at least as much, or
-      it holds whenever the columns this migration adds are at their default or NULL,
-      which a build that does not know them leaves them at. The marker says which.
-      A replace where both are one column IN a literal list is compared
-      automatically and needs no marker. Excuses SCHEMA-0007 only.
+      A validated constraint added over columns the table already had refuses no row
+      and no write a build of the release before makes, for a reason the parser
+      cannot see. The marker says which. Excuses SCHEMA-0007's narrowed constraints
+      only, never a drop or a rename: those are cleared by a named, published release
+      alone. The cases the parser can see need no marker (NOT VALID, a constraint on a
+      column the migration adds, a widened CHECK).
   - token: scratch-table
     adr: ADR-0062
     description: >-
@@ -254,11 +254,6 @@ scan:
   # rule two vocabularies and made a migration that satisfies the promotion gate fail
   # this one - which is the drift this catalog exists to stop.
   expand_contract_pattern: '--\s*expand-contract:\s*(?P<ticket>[A-Za-z][A-Za-z0-9_-]*-?[0-9]+)\b'
-  # SCHEMA-0007 reads the release a contract migration names on that SAME line, after
-  # the ticket, so the promotion gate's marker still matches unchanged and one rule
-  # keeps one vocabulary:
-  #     -- expand-contract: AI-123 unused-since: ai-core-postgres v0.24.0
-  contract_release_pattern: '--\s*expand-contract:\s*[A-Za-z][A-Za-z0-9_-]*-?[0-9]+\b[^\n]*?\bunused-since:\s*(?P<release>[A-Za-z0-9][A-Za-z0-9._/-]*(?:@|\s+)v[0-9]+\.[0-9]+\.[0-9]+)'
 
 controls:
   - id: SCHEMA-0001
@@ -471,22 +466,31 @@ controls:
     scope: source
     status: active
     severity: critical
-    # enforce, and in diff mode that costs nothing on the day it lands: the rule
-    # reads only migrations a PR ADDS, and the remedy is one line on the marker the
-    # author already writes for SCHEMA-0001.
-    stage: enforce
+    # warn: report-only. A finding is a ::warning:: and a row in the job summary and
+    # fails nothing, because v1 moves to main on merge and this would otherwise enforce
+    # on every repository at once. A repository is switched on by adding its module to
+    # enforce_in, in a reviewed PR, once its own pull requests have shown zero false
+    # findings. The self-test holds the list empty until then.
+    stage: warn
+    enforce_in: []
     waivable: true
     policy: >-
       A migration that drops, renames or narrows a column, table, type, constraint,
-      function or view is a contract migration: every SCHEMA-0001 form, and DROP TYPE
-      or DOMAIN, DROP FUNCTION, PROCEDURE or VIEW, ALTER TYPE ... RENAME VALUE or
-      ATTRIBUTE, DROP ATTRIBUTE, and a constraint added over columns a table already
-      had. Its `-- expand-contract:` marker MUST also name the earlier release since
-      which no build uses what it removes or writes what it newly refuses, as
-      `unused-since: <module> vX.Y.Z` on the same line. A DROP of a name the same
-      migration creates again, a constraint over columns the same migration adds only,
-      and a constraint replaced by one that accepts everything the old one did are not
-      contracts.
+      function or view is a contract migration: every SCHEMA-0001 form except a
+      dropped CHECK or FOREIGN KEY (they only accept more), and DROP TYPE or DOMAIN,
+      DROP FUNCTION, PROCEDURE or VIEW, ALTER TYPE ... RENAME VALUE or ATTRIBUTE,
+      DROP ATTRIBUTE, and a validated constraint added over columns a table already
+      had. Its file MUST carry the `-- expand-contract:` marker and name the earlier
+      release since which no build uses what it removes or writes what it newly
+      refuses, `unused-since: <module> vX.Y.Z`, on the marker's line or a comment line
+      of its own. The release is checked, not read: <module> must be this
+      repository's own module and vX.Y.Z one of its tags, an ancestor of the head
+      and not the head itself. Not contracts: a DROP of a name the same migration
+      creates again; a constraint that applies to a column the same migration adds,
+      a NOT VALID one, a UNIQUE over a set holding the primary key; and a CHECK
+      replaced by one that accepts every row the old one did (the same rule, the old
+      rule as one of its OR-ed terms, or each IN / <@ ARRAY list of allowed values the
+      same or larger).
     rationale: >-
       A build may now be served a schema one migration past its own
       (platform-shared-go dbmigrate Options.MaxAhead; ai-service AI_SCHEMA_MAX_AHEAD):
@@ -499,17 +503,16 @@ controls:
       tracked, not that the release one migration behind is clear of it. The fleet
       has shipped the hazard: ai-core-postgres 000023 dropped ai_claim_embedding_jobs,
       which the build before it called on every poll ("function ... does not exist",
-      in ai-service's own CompatibilityWindow comment), and voice-ai-agent-core-postgres
-      000019 narrows ai_session_turns with a CHECK whose safety for the release still
-      serving is stated in prose a gate cannot read. The release named here is that
-      prose, made checkable at review: the reviewer confirms the named release is
-      published and no longer uses the thing.
+      in ai-service's own CompatibilityWindow comment). A release named in free text
+      would be a claim nothing checks (`left-pad@v1.0.0`, `v99.0.0`), so it is held
+      to the repository's own published tags.
     remediation: >-
       Ship the release that stops using the object (or stops writing what the new
       constraint refuses) first, then name it on the marker:
-      `-- expand-contract: <TICKET-123> unused-since: <module> vX.Y.Z`. A constraint
-      replaced by a wider one the parser cannot compare takes
-      `-- schema:allow reason=nothing-refused adr=ADR-0062` above it, as does one that holds
-      whenever the columns the migration adds are at their default or NULL.
+      `-- expand-contract: <TICKET-123> unused-since: <this module> vX.Y.Z`, a tag
+      already published. A narrowed constraint the parser cannot judge, that refuses
+      nothing an older build writes, takes `-- schema:allow reason=nothing-refused
+      adr=ADR-0062` above it; that reason never covers a drop or a rename, which only a
+      named, published release clears.
     detector: contract_names_release
     refs: [ADR-0062, RFC-0027, standards/infrastructure/schema-migration-standard.md]
