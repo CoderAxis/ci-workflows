@@ -71,6 +71,17 @@ EXPECTED = {
     ("SCHEMA-0002", "schema/migrations/000004_contract_narrowed.up.sql", 9),
     # A dropped CHECK is SCHEMA-0001's and not SCHEMA-0007's: it only accepts more.
     ("SCHEMA-0001", "schema/migrations/000004_contract_narrowed.up.sql", 13),
+    # What an older build's statements trip on, each shown on PostgreSQL 18: a unique
+    # index rebuilt on other columns (ON CONFLICT finds none), a new unique index, a
+    # NOT VALID CHECK (it still checks new rows), DROP DEFAULT, FORCE ROW LEVEL
+    # SECURITY, REVOKE, and a function back with another signature.
+    ("SCHEMA-0007", "schema/migrations/000005_older_build_trips.up.sql", 8),
+    ("SCHEMA-0007", "schema/migrations/000005_older_build_trips.up.sql", 11),
+    ("SCHEMA-0007", "schema/migrations/000005_older_build_trips.up.sql", 14),
+    ("SCHEMA-0007", "schema/migrations/000005_older_build_trips.up.sql", 17),
+    ("SCHEMA-0007", "schema/migrations/000005_older_build_trips.up.sql", 20),
+    ("SCHEMA-0007", "schema/migrations/000005_older_build_trips.up.sql", 23),
+    ("SCHEMA-0007", "schema/migrations/000005_older_build_trips.up.sql", 26),
 }
 
 
@@ -113,6 +124,11 @@ def tagged_repo(tmp: Path, src: Path, module: str, before: list[str], tags: list
     for f in files:
         if f.name in before:
             (mig / f.name).write_bytes(f.read_bytes())
+    git("-C", str(root), "add", "-A")
+    git("-C", str(root), "commit", "-qm", "the objects")
+    # The release comes after the commit that created what the contracts drop: a
+    # release is a later commit, never the one that added the object.
+    (root / "RELEASE").write_text("released\n", encoding="utf-8")
     git("-C", str(root), "add", "-A")
     git("-C", str(root), "commit", "-qm", "released")
     for t in tags:
@@ -257,6 +273,9 @@ def contract_release_checks() -> list[str]:
         "-- expand-contract: AI-1 unused-since: loop-core-postgres v0.2.0\n": "not a release before this head",
         "-- unused-since: loop-core-postgres v0.1.0\n": "names no release",
         "-- expand-contract: AI-1\n-- schema:allow reason=nothing-refused adr=ADR-0062\n": "names no release",
+        # A tag older than the object, or on the root commit: no release that ever had it.
+        "-- expand-contract: AI-1 unused-since: loop-core-postgres v0.0.9\n": "does not come after the commit that created routine loop_lookup",
+        "-- expand-contract: AI-1 unused-since: loop-core-postgres v0.0.1\n": "does not come after the commit that created routine loop_lookup",
     }
     for marker, want in cases.items():
         with tempfile.TemporaryDirectory() as tmp:
@@ -264,10 +283,18 @@ def contract_release_checks() -> list[str]:
             mig = root / "schema" / "migrations"
             mig.mkdir(parents=True)
             (root / "go.mod").write_text("module example.com/loop-core-postgres\n\ngo 1.26\n", encoding="utf-8")
-            (mig / "000001_init.up.sql").write_text(base, encoding="utf-8")
+            (root / "README").write_text("root\n", encoding="utf-8")
             git("init", "-q", "-b", "main", str(root))
             git("-C", str(root), "add", "-A")
-            git("-C", str(root), "commit", "-qm", "base")
+            git("-C", str(root), "commit", "-qm", "root")
+            git("-C", str(root), "tag", "v0.0.1")
+            (mig / "000001_init.up.sql").write_text(base, encoding="utf-8")
+            git("-C", str(root), "add", "-A")
+            git("-C", str(root), "commit", "-qm", "the function")
+            git("-C", str(root), "tag", "v0.0.9")
+            (root / "README").write_text("released\n", encoding="utf-8")
+            git("-C", str(root), "add", "-A")
+            git("-C", str(root), "commit", "-qm", "release")
             git("-C", str(root), "tag", "v0.1.0")
             git("-C", str(root), "checkout", "-qb", "feature")
             (mig / "000002_drop.up.sql").write_text("-- +goose Up\n" + marker + drop, encoding="utf-8")

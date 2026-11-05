@@ -544,6 +544,14 @@ def widens(old: str, new: str) -> bool:
     allowed values (IN, <@ ARRAY) the same or larger and none of them a NOT IN."""
     if old == new or old in (normalised(t) for t in split_or(new)):
         return True
+    # Every OR-ed term of the old rule is one of the new rule's: it accepts more.
+    old_or, new_or = {normalised(t) for t in _split_bool(old, "or")}, {normalised(t) for t in _split_bool(new, "or")}
+    if len(old_or) > 1 and old_or <= new_or:
+        return True
+    # The new rule is the old one with conditions taken away: it accepts more.
+    old_and, new_and = {normalised(t) for t in _split_bool(old, "and")}, {normalised(t) for t in _split_bool(new, "and")}
+    if len(old_and) > 1 and new_and <= old_and:
+        return True
     olds, news = RE_VALUE_LIST.findall(old), RE_VALUE_LIST.findall(new)
     if not olds or len(olds) != len(news) or RE_VALUE_LIST.sub("#", old) != RE_VALUE_LIST.sub("#", new):
         return False
@@ -621,27 +629,556 @@ def module_of(root: Path) -> str:
     return root.name.lower()
 
 
-def release_problem(root: Path, module: str, version: str) -> str:
-    """Why `module version` is not a release of this repository published before its
-    head, or "" when it is: the module must be this repository's own, the version a
-    tag here, and that tag an ancestor of HEAD other than HEAD itself."""
+def _git(root: Path, *args: str) -> tuple[int, str]:
+    r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+def release_problem(root: Path, module: str, version: str, created: dict[str, str]) -> str:
+    """Why `module version` is not a release that could have stopped using what the
+    contract removes, or "" when it is: the module must be this repository's own, the
+    version one of its tags, an ancestor of HEAD other than HEAD itself, and later
+    than every commit that created what the contract drops or changes (`created`,
+    object -> commit). A tag older than the object, or pushed onto the root commit,
+    names a release that never had it to stop using."""
     own = module_of(root)
     if module.lower() != own:
         return f"names {module} {version}, but this repository is {own}"
-    tag = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet",
-                          f"refs/tags/{version}^{{commit}}"], capture_output=True, text=True)
-    if tag.returncode != 0:
+    rc, tag = _git(root, "rev-parse", "--verify", "--quiet", f"refs/tags/{version}^{{commit}}")
+    if rc != 0:
         return f"names {module} {version}, which is not a tag of this repository"
-    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True)
-    older = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor",
-                            tag.stdout.strip(), "HEAD"], capture_output=True, text=True)
-    if older.returncode != 0 or tag.stdout.strip() == head.stdout.strip():
+    _, head = _git(root, "rev-parse", "HEAD")
+    if _git(root, "merge-base", "--is-ancestor", tag, "HEAD")[0] != 0 or tag == head:
         return f"names {module} {version}, which is not a release before this head"
+    for obj, commit in sorted(created.items()):
+        if not commit:
+            return f"names {module} {version}, but no migration of this repository creates {obj}, so no release can be shown to come after it"
+        if commit == tag or _git(root, "merge-base", "--is-ancestor", commit, tag)[0] != 0:
+            return f"names {module} {version}, which does not come after the commit that created {obj}"
     return ""
 
 
+def objects_of(code: str, tbl: str) -> list[tuple]:
+    """What one contract statement drops or changes, as the creation index keys it."""
+    out: list[tuple] = []
+    for m in re.finditer(r"\bDROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?(\w+)", code, re.I):
+        out.append(("column", tbl, m.group(1).lower()))
+    for m in re.finditer(r"\bALTER\s+(?:COLUMN\s+)?(\w+)\s+(?:SET|DROP|TYPE)\b", code, re.I):
+        if m.group(1).lower() not in ("table", "column", "constraint", "domain", "type"):
+            out.append(("column", tbl, m.group(1).lower()))
+    for m in re.finditer(r"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\w.]+)", code, re.I):
+        out.append(("table", obj_name(m.group(1))))
+    for m in re.finditer(r"\bDROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(\w+)", code, re.I):
+        out.append(("constraint", m.group(1).lower()))
+    for m in re.finditer(r"\bDROP\s+(?:FUNCTION|PROCEDURE)\s+(?:IF\s+EXISTS\s+)?([\w.]+)", code, re.I):
+        out.append(("routine", obj_name(m.group(1))))
+    for m in re.finditer(r"\bDROP\s+(?:TYPE|DOMAIN)\s+(?:IF\s+EXISTS\s+)?([\w.]+)", code, re.I):
+        out.append(("type", obj_name(m.group(1))))
+    for m in re.finditer(r"\b(?:DROP|CREATE\s+UNIQUE)\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(\w+)", code, re.I):
+        out.append(("index", obj_name(m.group(1))))
+    if tbl and not out:
+        out.append(("table", tbl))
+    return out
+
 
 TEXTY = re.compile(r"^(TEXT|VARCHAR|CHARACTER\s+VARYING|CHAR)$", re.I)
+
+
+# ---------------------------------------------------------------------------
+# SCHEMA-0007: what a build of the release before trips on
+# ---------------------------------------------------------------------------
+# A build one migration behind the schema (dbmigrate Options.MaxAhead) runs its own
+# statements against the newer schema. Each detector below names a change that can
+# refuse one of them: a write a new constraint or index rejects, an ON CONFLICT whose
+# unique index is gone, an INSERT that relied on a default, a call to a signature that
+# no longer exists, a row level security or privilege change. A change is cleared only
+# where the parser can show it refuses nothing such a build does; everything else is a
+# contract, cleared by a named, published release or by a reviewed marker.
+
+RE_CREATE_UNIQUE_INDEX = re.compile(
+    r"\bCREATE\s+UNIQUE\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s+ON\s+(?:ONLY\s+)?([\w.]+)", re.I)
+RE_CREATE_ANY_INDEX = re.compile(
+    r"\bCREATE\s+(UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s+ON\s+(?:ONLY\s+)?([\w.]+)", re.I)
+RE_DROP_INDEX = re.compile(r"\bDROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?([\w.,\s]+?)(?:\s+(?:CASCADE|RESTRICT))?\s*$", re.I)
+RE_DROP_DEFAULT = re.compile(r"\bALTER\s+(?:COLUMN\s+)?(\w+)\s+DROP\s+DEFAULT\b", re.I)
+RE_RLS = re.compile(r"\b(ENABLE|FORCE)\s+ROW\s+LEVEL\s+SECURITY\b", re.I)
+RE_REVOKE = re.compile(r"\bREVOKE\b(.*?)\bON\b\s+(.*?)\s+\bFROM\b", re.I | re.S)
+RE_ROUTINE_DEF = re.compile(r"\bCREATE\s+(?:OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\s+([\w.]+)\s*\(", re.I)
+RE_CREATED_TYPE = re.compile(r"\bCREATE\s+(?:TYPE|DOMAIN)\s+([\w.]+)", re.I)
+RE_CREATE_INDEX_NAME = re.compile(r"\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(\w+)", re.I)
+RE_CONSTRAINT_NAME = re.compile(r"\bCONSTRAINT\s+(\w+)", re.I)
+RE_ROUTINE_DROP = re.compile(r"\bDROP\s+(FUNCTION|PROCEDURE)\s+(?:IF\s+EXISTS\s+)?([\w.]+)\s*(\()?", re.I)
+RE_ADD_COLUMN_CLAUSE = re.compile(r"\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s+", re.I)
+TYPE_WORDS = {"double", "character", "timestamp", "time", "bit", "interval", "national", "varying", "precision"}
+
+
+def obj_name(name: str) -> str:
+    return name.split(".")[-1].strip().strip('"').lower()
+
+
+def old_build_columns(code: str, tbl: str) -> dict[str, tuple[str, str]]:
+    """The columns this statement adds to `tbl`, each as a build that does not know it
+    leaves it: ("null", ""), ("lit", <literal>) for a literal default, or ("set", "")
+    for any other default or a generated column (some value, not NULL)."""
+    out: dict[str, tuple[str, str]] = {}
+    for m in RE_ADD_COLUMN_CLAUSE.finditer(code):
+        clause = split_top(code[m.end():])[0]
+        if re.search(r"\bGENERATED\s+(?:ALWAYS|BY\s+DEFAULT)\s+AS\s+IDENTITY\b|\b(?:BIG)?SERIAL\b|\bDEFAULT\s+(?:nextval|gen_random_uuid|uuidv7|uuid_generate_v[14])\s*\(", clause, re.I):
+            # A value the database makes unique for each row it writes.
+            out[m.group(1).lower()] = ("ident", "")
+            continue
+        if re.search(r"\bGENERATED\b", clause, re.I):
+            out[m.group(1).lower()] = ("set", "")
+            continue
+        d = re.search(r"\bDEFAULT\s+('(?:[^']|'')*'|-?\d+(?:\.\d+)?(?![\w.(])|(?:true|false|null)\b)", clause, re.I)
+        if d:
+            v = d.group(1)
+            out[m.group(1).lower()] = ("null", "") if v.lower() == "null" else ("lit", v.strip("'").lower())
+        elif re.search(r"\bDEFAULT\b", clause, re.I):
+            out[m.group(1).lower()] = ("set", "")
+        else:
+            out[m.group(1).lower()] = ("null", "")
+    return out
+
+
+# --- a CHECK, judged for a build that does not know this migration's columns -------
+#
+# Four values. T and N pass a CHECK (a CHECK refuses only FALSE), F refuses, and D
+# depends on what the build writes into columns it already knew, which no parser can
+# see: D is a contract.
+
+def _and(vals: list[str]) -> str:
+    return "F" if "F" in vals else "D" if "D" in vals else "N" if "N" in vals else "T"
+
+
+def _or(vals: list[str]) -> str:
+    return "T" if "T" in vals else "D" if "D" in vals else "N" if "N" in vals else "F"
+
+
+def _split_bool(expr: str, word: str) -> list[str]:
+    """expr's terms joined by `word` (and / or) at the top level, outside literals, and
+    never the AND of a BETWEEN."""
+    terms, cur, depth, i, between = [], "", 0, 0, 0
+    n = len(expr)
+    while i < n:
+        ch = expr[i]
+        if ch == "'":
+            j = i + 1
+            while j < n and not (expr[j] == "'" and not expr.startswith("''", j)):
+                j += 2 if expr.startswith("''", j) else 1
+            cur += expr[i:j + 1]
+            i = j + 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        boundary = i == 0 or not (expr[i - 1].isalnum() or expr[i - 1] == "_")
+        if depth == 0 and boundary and re.match(r"between\b", expr[i:]):
+            between += 1
+        if depth == 0 and boundary and re.match(rf"{word}(?![\w])", expr[i:]):
+            if word == "and" and between:
+                between -= 1
+            else:
+                terms.append(cur)
+                cur = ""
+                i += len(word)
+                continue
+        cur += ch
+        i += 1
+    return terms + [cur]
+
+
+def _strip_parens(expr: str) -> str:
+    expr = expr.strip()
+    while expr.startswith("(") and balanced(expr, 0) == expr[1:-1]:
+        expr = expr[1:-1].strip()
+    return expr
+
+
+def fold(expr: str, value) -> str:
+    """expr as a build that does not know this migration's columns meets it: each term
+    whose value is known for such a build (T or F) folded away, so a rule that only
+    adds conditions on new columns reads as the rule it replaced."""
+    expr = _strip_parens(expr).strip()
+    for word, unit, zero in (("or", "false", "true"), ("and", "true", "false")):
+        terms = _split_bool(expr, word)
+        if len(terms) > 1:
+            kept = []
+            for t in terms:
+                v = fold(t, value)
+                if v == zero:
+                    return zero
+                if v != unit:
+                    kept.append(v if len(_split_bool(v, "or" if word == "and" else "and")) == 1 else f"({v})")
+            return f" {word} ".join(kept) if kept else unit
+    v = judge(expr, value)
+    return {"T": "true", "F": "false"}.get(v, expr)
+
+
+def judge(expr: str, value) -> str:
+    """T, F, N or D for a normalised boolean expression, `value(col)` giving each
+    column's old-build state: ("null"|"lit"|"set"|"unknown", literal)."""
+    expr = _strip_parens(expr).strip()
+    terms = _split_bool(expr, "or")
+    if len(terms) > 1:
+        return _or([judge(t, value) for t in terms])
+    terms = _split_bool(expr, "and")
+    if len(terms) > 1:
+        return _and([judge(t, value) for t in terms])
+    if re.match(r"not(?![\w])", expr):
+        v = judge(expr[3:], value)
+        return {"T": "F", "F": "T"}.get(v, v)
+    return _atom(expr, value)
+
+
+def _atom(expr: str, value) -> str:
+    if expr == "true":
+        return "T"
+    if expr == "false":
+        return "F"
+    if re.fullmatch(r"[a-z_]\w*", expr) and expr not in SQL_WORDS:
+        # A boolean column: its default, for a build that does not know it.
+        state, lit = value(expr)[:2]
+        if state == "null":
+            return "N"
+        if state == "lit" and lit in ("true", "false"):
+            return "T" if lit == "true" else "F"
+        return "D"
+    m = re.fullmatch(r"(\w+) is (not )?null", expr)
+    if m:
+        state = value(m.group(1))[0]
+        if state == "unknown":
+            return "D"
+        isnull = state == "null"
+        return "T" if isnull != bool(m.group(2)) else "F"
+    # (a) = (b): two booleans compared.
+    m = re.fullmatch(r"(\(.*\))\s*(=|<>|!=)\s*(\(.*\))", expr)
+    if m and balanced(m.group(1), 0) == m.group(1)[1:-1] and balanced(m.group(3), 0) == m.group(3)[1:-1]:
+        a, b = judge(m.group(1), value), judge(m.group(3), value)
+        if "D" in (a, b):
+            return "D"
+        if "N" in (a, b):
+            return "N"
+        return "T" if (a == b) == (m.group(2) == "=") else "F"
+    if re.search(r"\b(coalesce|nullif|case|distinct)\b", expr):
+        return "D"
+    m = re.fullmatch(r"(\w+)\s+(not\s+)?in\s*\((.*)\)", expr) or re.fullmatch(r"(\w+)\s*(=|<>|!=)\s*('(?:[^']|'')*')", expr)
+    if m and value(m.group(1))[3]:
+        # An existing column whose earlier CHECK names every value it can hold.
+        dom = value(m.group(1))[3]
+        vals = {v.lower() for v in RE_LITERAL.findall(m.group(3))}
+        negate = bool(m.group(2)) and m.group(2).strip() in ("not", "<>", "!=")
+        if dom <= vals:
+            return "F" if negate else "T"
+        if not dom & vals:
+            return "T" if negate else "F"
+        return "D"
+    cols = [w for w in re.findall(r"(?<!['\w])([a-z_]\w*)\b(?!\s*\()", re.sub(r"'(?:[^']|'')*'", "''", expr))
+            if w not in SQL_WORDS]
+    states = [value(c) for c in cols]
+    if any(s[0] == "null" for s in states):
+        return "N"
+    if cols and all(s[0] == "lit" for s in states):
+        got = _literal_atom(expr, dict(zip(cols, (s[1] for s in states))))
+        if got != "D":
+            return got
+    if cols and all(s[2] for s in states):
+        # Only columns this migration adds: a build that does not know them writes
+        # their defaults, which the same migration gives them to satisfy this.
+        return "T"
+    return "D"
+
+
+SQL_WORDS = {"and", "or", "not", "in", "is", "null", "true", "false", "like", "ilike", "between",
+             "array", "any", "all", "some", "similar", "to", "escape", "collate", "text", "uuid",
+             "int", "integer", "bigint", "numeric", "boolean", "varchar", "jsonb", "json",
+             "timestamptz", "timestamp", "date", "interval", "current_date", "current_timestamp", "now"}
+
+
+def _literal_atom(expr: str, lits: dict[str, str]) -> str:
+    """A comparison of columns whose value is a known literal: = <>, IN, NOT IN."""
+    m = re.fullmatch(r"(\w+)\s*(=|<>|!=|is not|is)\s*(true|false)", expr)
+    if m and m.group(1) in lits and lits[m.group(1)] in ("true", "false"):
+        eq = lits[m.group(1)] == m.group(3)
+        return "T" if eq == (m.group(2) in ("=", "is")) else "F"
+    m = re.fullmatch(r"(\w+)\s*(=|<>|!=)\s*'((?:[^']|'')*)'", expr)
+    if m and m.group(1) in lits:
+        eq = lits[m.group(1)] == m.group(3).lower()
+        return "T" if eq == (m.group(2) == "=") else "F"
+    m = re.fullmatch(r"(\w+)\s+(not\s+)?in\s*\((.*)\)", expr)
+    if m and m.group(1) in lits:
+        vals = {v.lower() for v in RE_LITERAL.findall(m.group(3))}
+        return "T" if (lits[m.group(1)] in vals) != bool(m.group(2)) else "F"
+    m = re.fullmatch(r"(\w+)\s*(>=|<=|>|<|=|<>|!=)\s*(-?\d+(?:\.\d+)?)", expr)
+    if m and m.group(1) in lits and re.fullmatch(r"-?\d+(?:\.\d+)?", lits[m.group(1)]):
+        a, b = float(lits[m.group(1)]), float(m.group(3))
+        ok = {">=": a >= b, "<=": a <= b, ">": a > b, "<": a < b, "=": a == b, "<>": a != b, "!=": a != b}[m.group(2)]
+        return "T" if ok else "F"
+    m = re.fullmatch(r"(\w+)\s+between\s+(-?\d+(?:\.\d+)?)\s+and\s+(-?\d+(?:\.\d+)?)", expr)
+    if m and m.group(1) in lits and re.fullmatch(r"-?\d+(?:\.\d+)?", lits[m.group(1)]):
+        return "T" if float(m.group(2)) <= float(lits[m.group(1)]) <= float(m.group(3)) else "F"
+    return "D"
+
+
+def column_state(tbl: str, new_cols: dict[str, tuple[str, str]], notnull: set,
+                 domains: dict | None = None) -> "callable":
+    """value(col) -> (state, literal, added by this migration, allowed values): what a
+    build that predates the migration can have written into col. The allowed values
+    are an earlier CHECK's `col IN (...)` list, which held every row that build wrote."""
+    domains = domains or {}
+
+    def value(col: str) -> tuple[str, str, bool, frozenset | None]:
+        if col in new_cols:
+            return (*new_cols[col], True, None)
+        dom = domains.get((tbl, col))
+        if (tbl, col) in notnull:
+            return ("set", "", False, dom)
+        return ("unknown", "", False, dom)
+    return value
+
+
+RE_IN_DOMAIN = re.compile(r"\bCHECK\s*\(\s*\(?\s*(\w+)\s+IN\s*\(([^)]*)\)\s*\)?\s*\)", re.I)
+
+
+def track_domains(text: str, domains: dict) -> None:
+    """Fold a migration's single-column `col IN (...)` CHECKs into domains, by
+    (table, column): the values every row written under them holds."""
+    for stmt, _ in statements(text):
+        cm = RE_CRE_TBL.search(stmt) or RE_ALT_TBL.search(stmt)
+        if not cm:
+            continue
+        tbl = obj_name(cm.group(1))
+        for m in RE_IN_DOMAIN.finditer(stmt):
+            domains[(tbl, m.group(1).lower())] = frozenset(v.lower() for v in RE_LITERAL.findall(m.group(2)))
+
+
+def track_not_null(stmt: str, notnull: set) -> None:
+    """Fold one statement into the set of (table, column) that are NOT NULL."""
+    cm = RE_CRE_TBL.search(stmt)
+    if cm:
+        tbl = obj_name(cm.group(1))
+        body, _ = table_body_off(stmt)
+        for part in split_top(body):
+            pk = RE_PK_TABLE.search(part)
+            if CONSTRAINT_KW.match(part):
+                if pk:
+                    notnull.update((tbl, c.strip().lower()) for c in pk.group(1).split(","))
+                continue
+            pm = re.match(r"\s*(\w+)\s+(.+)", part, re.S)
+            if pm and re.search(r"\bNOT\s+NULL\b|\bPRIMARY\s+KEY\b", pm.group(2), re.I):
+                notnull.add((tbl, pm.group(1).lower()))
+        return
+    t = RE_ALT_TBL.search(stmt)
+    if not t:
+        return
+    tbl = obj_name(t.group(1))
+    for m in RE_ADD_COLUMN_CLAUSE.finditer(stmt):
+        if re.search(r"\bNOT\s+NULL\b|\bPRIMARY\s+KEY\b", split_top(stmt[m.end():])[0], re.I):
+            notnull.add((tbl, m.group(1).lower()))
+    for m in re.finditer(r"\bALTER\s+(?:COLUMN\s+)?(\w+)\s+(SET|DROP)\s+NOT\s+NULL\b", stmt, re.I):
+        (notnull.add if m.group(2).upper() == "SET" else notnull.discard)((tbl, m.group(1).lower()))
+
+
+# --- definitions read from earlier migrations ---------------------------------------
+
+def last_index_def(raw: str, name: str) -> tuple[bool, str] | None:
+    """(unique, normalised definition) of the last CREATE INDEX of `name`, or None."""
+    text = raw_code(raw)
+    found = None
+    for m in RE_CREATE_ANY_INDEX.finditer(text):
+        if obj_name(m.group(2)) == name:
+            end = text.find(";", m.end())
+            found = (bool(m.group(1)), normalised(text[m.start(3):end if end > 0 else len(text)]))
+    return found
+
+
+def index_def(code: str, m: re.Match) -> str:
+    end = code.find(";", m.end())
+    return normalised(code[m.start(2):end if end > 0 else len(code)])
+
+
+def routine_signature(text: str, start: int) -> tuple[str, ...]:
+    """The argument types of the routine whose parameter list opens at `start`."""
+    args = balanced(text, start)
+    out = []
+    for part in split_top(args):
+        part = re.split(r"\s+default\s+|\s*=\s*", part.strip().lower())[0].strip()
+        words = part.split()
+        if words and words[0] in ("in", "out", "inout", "variadic"):
+            words = words[1:]
+        if len(words) >= 2 and words[0] not in TYPE_WORDS:
+            words = words[1:]
+        if words:
+            out.append(" ".join(words))
+    return tuple(out)
+
+
+def routine_def(text: str, name: str) -> tuple[tuple[str, ...], str] | None:
+    """(argument types, normalised RETURNS) of the last CREATE of routine `name`."""
+    found = None
+    for m in RE_ROUTINE_DEF.finditer(text):
+        if obj_name(m.group(2)) == name:
+            sig = routine_signature(text, m.end() - 1)
+            after = text[m.end() - 1 + len(balanced(text, m.end() - 1)) + 2:]
+            r = re.match(r"\s*returns\s+(.*?)(?:\s+(?:language|as|immutable|stable|volatile|security|set|strict)\b|$)",
+                         after, re.I | re.S)
+            found = (sig, normalised(r.group(1)) if r else "")
+    return found
+
+
+def contract_sites(stmt: str, sline: int, span: tuple[int, int], rel: str, raw_stmt: str, ctx: dict) -> list[dict]:
+    """Every SCHEMA-0007 site of one statement (destructive SCHEMA-0001 forms are added
+    where SCHEMA-0001 finds them). `stmt` locates (its literals are blanked), and
+    `raw_stmt`, the statement's own lines as written, gives the literals a CHECK, a
+    default or an index predicate is judged by."""
+    code = code_of(stmt)
+    rawc = raw_code(raw_stmt)
+    sites: list[dict] = []
+
+    def site(form: str, offset: int, detail: str) -> None:
+        sites.append({"rule": "contract", "form": form, "file": rel,
+                      "line": line_of(stmt, sline, offset), "span": span, "detail": detail})
+
+    # Types, attributes, views: gone or renamed.
+    for name, pat in CONTRACT:
+        if name == "drop_routine":
+            continue
+        for m in pat.finditer(code):
+            obj = obj_name(m.group(2) or "")
+            if obj and obj in ctx["created_names"]:
+                continue
+            what = " ".join(m.group(1).lower().split())
+            site(name, m.start(), f"drop {what} {obj}" if obj
+                 else f"{'rename' if name == 'rename_value' else 'drop'} {what} of a type")
+    for m in re.finditer(r"\bDROP\s+(VIEW|MATERIALIZED\s+VIEW)\s+(?:IF\s+EXISTS\s+)?([\w.]+)", code, re.I):
+        if obj_name(m.group(2)) not in ctx["created_names"]:
+            site("drop_routine", m.start(), f"drop {' '.join(m.group(1).lower().split())} {obj_name(m.group(2))}")
+
+    # Functions and procedures: gone, or back with another signature or result.
+    for m in RE_ROUTINE_DROP.finditer(code):
+        name = obj_name(m.group(2))
+        kind = m.group(1).lower()
+        new = ctx["routines_here"].get(name)
+        if new is None:
+            site("drop_routine", m.start(), f"drop {kind} {name}")
+            continue
+        old_sig = routine_signature(code, m.end() - 1) if m.group(3) else None
+        old = routine_def(ctx["raw_before"], name)
+        if old_sig is None and old:
+            old_sig = old[0]
+        if old_sig is None or old_sig != new[0] or (old and old[1] and new[1] and old[1] != new[1]):
+            site("drop_routine", m.start(), f"{kind} {name} comes back as {name}({', '.join(new[0])}), "
+                 f"not {name}({', '.join(old_sig or ('?',))})")
+
+    t = RE_ALT_TBL.search(code)
+    tbl = obj_name(t.group(1)) if t else ""
+    existing = bool(tbl) and tbl not in ctx["created_here"]
+    new_cols = ctx["new_cols"].get(tbl, {})
+    value = column_state(tbl, new_cols, ctx["notnull_before"], ctx["domains"])
+
+    if existing:
+        for m in RE_ADD_CON_ANY.finditer(code):
+            clause = split_top(code[m.end(2):])[0]
+            kind = m.group(2).upper().split()[0]
+            con = m.group(1).lower()
+            cols = constrained_words(clause, m.group(2))
+            if kind == "CHECK":
+                body = check_body(raw_stmt, con)
+                if body is None:
+                    body = normalised(balanced(clause, clause.find("("))) if "(" in clause else ""
+                if con in ctx["dropped_constraints"]:
+                    old_body = check_body(ctx["raw_before"], con)
+                    if old_body is not None and (widens(old_body, body) or widens(old_body, normalised(fold(body, value)))):
+                        continue
+                if body and judge(body, value) in ("T", "N"):
+                    continue
+                site("narrow_constraint", m.start(), f"CHECK {m.group(1)} on {tbl} can refuse a row "
+                     f"an older build writes{' (NOT VALID still checks new rows)' if 'not valid' in clause.lower() else ''}")
+            elif kind == "FOREIGN":
+                if cols and all(new_cols.get(c, ("unknown",))[0] == "null" for c in cols):
+                    continue
+                site("narrow_constraint", m.start(), f"FOREIGN KEY {m.group(1)} on {tbl}({', '.join(sorted(cols))}) "
+                     f"refuses a row an older build writes")
+            elif kind == "UNIQUE":
+                if con in ctx["dropped_constraints"] and ctx["old_unique"].get(con) == tuple(sorted(cols)):
+                    continue
+                if ctx["pk"].get(tbl) and ctx["pk"][tbl] <= cols:
+                    continue
+                if any(new_cols.get(c, ("unknown",))[0] == "null" for c in cols) and con not in ctx["dropped_constraints"]:
+                    continue
+                site("narrow_constraint", m.start(), f"UNIQUE {m.group(1)} on {tbl}({', '.join(sorted(cols))}) "
+                     f"refuses a duplicate an older build may write, or moves its ON CONFLICT target")
+            else:
+                site("narrow_constraint", m.start(), f"{m.group(2).upper()} {m.group(1)} on {tbl} "
+                     f"refuses rows an older build writes, or moves its ON CONFLICT target")
+        for m in RE_DROP_DEFAULT.finditer(code):
+            col = m.group(1).lower()
+            if col not in new_cols:
+                site("drop_default", m.start(), f"{tbl}.{col} loses its default, which an older build's INSERT relies on")
+        for m in RE_RLS.finditer(code):
+            site("row_security", m.start(), f"{m.group(1).upper()} ROW LEVEL SECURITY on {tbl}, whose rows an older "
+                 f"build reads and writes without that policy")
+    for m in RE_ALTER_DOMAIN_ADD.finditer(code):
+        site("narrow_constraint", m.start(), f"a constraint added to domain {obj_name(m.group(1))}")
+
+    # Unique indexes: one that is new on a table an older build writes, and one whose
+    # definition changes under the same name (an ON CONFLICT names its columns).
+    for m in RE_CREATE_UNIQUE_INDEX.finditer(code):
+        name, itbl = obj_name(m.group(1)), obj_name(m.group(2))
+        if itbl in ctx["created_here"]:
+            continue
+        rm = next((x for x in RE_CREATE_UNIQUE_INDEX.finditer(rawc) if obj_name(x.group(1)) == name), None)
+        new_def = index_def(rawc, rm) if rm else index_def(code, m)
+        old = last_index_def(ctx["raw_before"], name) if name in ctx["dropped_indexes"] else None
+        if old:
+            if old[1] == new_def:
+                continue
+            site("unique_index", m.start(), f"unique index {name} on {itbl} is rebuilt on another definition: "
+                 f"an older build's ON CONFLICT on the old columns finds no matching index")
+            continue
+        on = new_def.split("(", 1)
+        icols = set(re.findall(r"[a-z_]\w*", on[1].split(")", 1)[0])) - SQL_WORDS if len(on) > 1 else set()
+        inew = ctx["new_cols"].get(itbl, {})
+        ivalue = column_state(itbl, inew, ctx["notnull_before"], ctx["domains"])
+        where = re.search(r"\bwhere\b(.*)$", new_def)
+        if where and judge(where.group(1).strip(), ivalue) in ("F", "N"):
+            continue
+        if "nulls not distinct" not in new_def and any(inew.get(c, ("unknown",))[0] == "null" for c in icols):
+            continue
+        if any(inew.get(c, ("unknown",))[0] == "ident" for c in icols):
+            continue
+        if ctx["pk"].get(itbl) and ctx["pk"][itbl] <= icols:
+            continue
+        site("unique_index", m.start(), f"unique index {name} on {itbl}({', '.join(sorted(icols))}) refuses a "
+             f"duplicate an older build may write")
+    dm = RE_DROP_INDEX.search(code.strip())
+    if dm:
+        for raw_name in dm.group(1).split(","):
+            name = obj_name(raw_name)
+            if not name or name in ctx["unique_here"]:
+                continue
+            # Only a unique index an earlier migration made: a plain index carries no
+            # ON CONFLICT target, and one this migration re-creates is judged there.
+            old = last_index_def(ctx["raw_before"], name)
+            if old and old[0]:
+                site("unique_index", dm.start(), f"unique index {name} is dropped: an older build's ON CONFLICT "
+                     f"on its columns finds no matching index")
+
+    # Privileges taken away from objects an older build uses.
+    for m in RE_REVOKE.finditer(code):
+        target = m.group(2).strip()
+        if re.match(r"all\s+(tables|sequences|functions|routines)\s+in\s+schema\b", target, re.I):
+            site("revoke", m.start(), f"REVOKE {' '.join(m.group(1).split())} ON {' '.join(target.split())}")
+            continue
+        target = re.sub(r"^(table|sequence|function|procedure|routine|schema|database|type|domain)\s+", "",
+                        target, flags=re.I)
+        names = [obj_name(re.split(r"\(", n)[0]) for n in split_top(target)]
+        if names and all(n in ctx["created_here"] or n in ctx["created_names"] for n in names):
+            continue
+        site("revoke", m.start(), f"REVOKE {' '.join(m.group(1).split())} ON {' '.join(m.group(2).split())}, which "
+             f"an older build may use")
+    return sites
 
 
 # ---------------------------------------------------------------------------
@@ -761,6 +1298,7 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
     # against the repository's own tags, never taken on trust.
     contract_release_files: dict[str, str] = {}
     contract_release_problems: dict[str, str] = {}
+    release_of: dict[str, tuple[str, str]] = {}
     pk_columns: dict[str, set[str]] = {}
     enum_types: set[str] = set()
     check_bodies: list[str] = []
@@ -778,15 +1316,26 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
     columns_before: dict[Path, set[tuple[str, str]]] = {}
     raw_before: dict[Path, str] = {}
     seen_columns: set[tuple[str, str]] = set()
+    # Which columns were NOT NULL before each file: an older build wrote a value there,
+    # so `col IS NOT NULL` holds for every row it writes.
+    notnull_before: dict[Path, set[tuple[str, str]]] = {}
+    seen_notnull: set[tuple[str, str]] = set()
     seen_raw = ""
+    # Where each object was first created: a contract's release must come after it.
+    created_in: dict[tuple, Path] = {}
+    domains_before: dict[Path, dict] = {}
+    seen_domains: dict[tuple[str, str], frozenset] = {}
     for f in all_files:
+        domains_before[f] = dict(seen_domains)
         columns_before[f] = set(seen_columns)
+        notnull_before[f] = set(seen_notnull)
         raw_before[f] = seen_raw
         try:
             raw_all = f.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         seen_raw += "\n" + raw_all
+        track_domains(raw_code(raw_all), seen_domains)
         sql = strip_comments(raw_all)
         for stmt, sline in statements(sql):
             for m in RE_ENUM.finditer(stmt):
@@ -797,6 +1346,13 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                 described_tables.add(m.group(1).split(".")[-1].lower())
             for col in _columns(stmt, sline, set()):
                 seen_columns.add((col["table"], col["column"]))
+            track_not_null(stmt, seen_notnull)
+            for col in _columns(stmt, sline, set()):
+                created_in.setdefault(("column", col["table"], col["column"]), f)
+            for key, rx in (("table", RE_CRE_TBL), ("routine", RE_ROUTINE_DEF), ("type", RE_CREATED_TYPE),
+                            ("index", RE_CREATE_INDEX_NAME), ("constraint", RE_CONSTRAINT_NAME)):
+                for m in rx.finditer(stmt):
+                    created_in.setdefault((key, obj_name(m.group(m.lastindex))), f)
             cm = RE_CRE_TBL.search(stmt)
             if cm:
                 tbl = cm.group(1).split(".")[-1].lower()
@@ -836,7 +1392,7 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
         rm = RE_RELEASE.search(raw)
         if rm and expand_re.pattern and expand_re.search(raw):
             contract_release_files[rel] = f"{rm.group('module')} {rm.group('version')}"
-            contract_release_problems[rel] = release_problem(root, rm.group("module"), rm.group("version"))
+            release_of[rel] = (rm.group("module"), rm.group("version"))
 
         sql = strip_comments(raw)
         raw_lines = raw.split("\n")
@@ -845,6 +1401,10 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
         readded: set[str] = set()
         dropped_constraints: set[str] = set()
         readded_any: set[str] = set()
+        indexes_here: set[str] = set()
+        unique_here: set[str] = set()
+        dropped_indexes: set[str] = set()
+        new_cols: dict[str, dict[str, tuple[str, str]]] = {}
         created_names: set[str] = set()
         added_here: set[tuple[str, str]] = set()
         for stmt, sline in stmts:
@@ -857,6 +1417,18 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                 dropped_constraints.add(dm.group(1).lower())
             for am in RE_ADD_CON_ANY.finditer(stmt):
                 readded_any.add(am.group(1).lower())
+            for im in RE_CREATE_ANY_INDEX.finditer(stmt):
+                indexes_here.add(obj_name(im.group(2)))
+                if im.group(1):
+                    unique_here.add(obj_name(im.group(2)))
+            dim = RE_DROP_INDEX.search(code_of(stmt).strip())
+            if dim:
+                dropped_indexes.update(obj_name(n) for n in dim.group(1).split(","))
+            at = RE_ALT_TBL.search(stmt)
+            if at:
+                lo_, hi_ = sline, sline + stmt.count("\n")
+                new_cols.setdefault(obj_name(at.group(1)), {}).update(
+                    old_build_columns(raw_code("\n".join(raw_lines[lo_ - 1:hi_])), obj_name(at.group(1))))
             for col in _columns(stmt, sline, set()):
                 added_here.add((col["table"], col["column"]))
             # A CHECK constraint cannot be extended in place, so the house idiom is
@@ -867,6 +1439,21 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
             # output is its own false positives gets switched off.
             for am in RE_ADD_CON.finditer(stmt):
                 readded.add(am.group(1).lower())
+
+        rawc_file = raw_code(raw)
+        routines_here = {}
+        for rm_ in RE_ROUTINE_DEF.finditer(rawc_file):
+            got = routine_def(rawc_file, obj_name(rm_.group(2)))
+            if got:
+                routines_here[obj_name(rm_.group(2))] = got
+        before = raw_before.get(f, "")
+        old_unique = {m_.group(1).lower(): tuple(sorted(c.strip().lower() for c in m_.group(2).split(",")))
+                      for m_ in re.finditer(r"\bCONSTRAINT\s+(\w+)\s+UNIQUE\s*\(([^)]*)\)", raw_code(before), re.I)}
+        ctx = {"created_here": created_here, "created_names": created_names, "routines_here": routines_here,
+               "raw_before": before, "new_cols": new_cols, "notnull_before": notnull_before.get(f, set()),
+               "dropped_constraints": dropped_constraints, "old_unique": old_unique, "pk": pk_columns,
+               "dropped_indexes": dropped_indexes, "indexes_here": indexes_here, "unique_here": unique_here,
+               "domains": domains_before.get(f, {})}
 
         for stmt, sline in stmts:
             span = (sline, sline + stmt.count("\n"))
@@ -916,66 +1503,17 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                                    or dropped_kind(dm.group(1).lower(), raw_before.get(f, "")) in ("CHECK", "FOREIGN")):
                             contract = False
                     sites.append({"rule": "destructive", "form": name, "file": rel, "contract": contract,
+                                  "objects": objects_of(code_of(stmt), tbl),
                                   "line": line_of(stmt, sline, m.start()), "span": span,
                                   "detail": f"{name.replace('_', ' ')} on "
                                             f"{tbl or 'an existing object'}"})
 
-            # SCHEMA-0007's own forms: what removes a type, a routine or a view, or
-            # renames or drops part of a type.
-            code = code_of(stmt)
-            for name, pat in CONTRACT:
-                for m in pat.finditer(code):
-                    obj = (m.group(2) or "").split(".")[-1].lower()
-                    if obj and obj in created_names:
-                        continue
-                    what = " ".join(m.group(1).lower().split())
-                    detail = (f"drop {what} {obj}" if obj
-                              else f"{'rename' if name == 'rename_value' else 'drop'} {what} of a type")
-                    sites.append({"rule": "contract", "form": name, "file": rel,
-                                  "line": line_of(stmt, sline, m.start()), "span": span,
-                                  "detail": detail})
-            # A constraint given to a table that already holds rows, over a column it
-            # already had, narrows what a build of the release before may write. Not
-            # one: a NOT VALID constraint (it holds no row already there, and its
-            # validation is a separate, later step), a constraint over any column this
-            # migration adds (it applies to that column, which an older build leaves
-            # at its default or NULL), a UNIQUE over a set that holds the primary key
-            # (it can refuse nothing), and a replace that widens.
-            t = RE_ALT_TBL.search(code)
-            tbl = t.group(1).split(".")[-1].lower() if t else ""
-            if tbl and tbl not in created_here:
-                for m in RE_ADD_CON_ANY.finditer(code):
-                    clause = split_top(code[m.end(2):])[0]
-                    if re.search(r"\bNOT\s+VALID\b", clause, re.I):
-                        continue
-                    words = constrained_words(clause, m.group(2))
-                    if any((tbl, w) in added_here for w in words):
-                        continue
-                    narrowed = sorted(w for w in words if (tbl, w) in columns_before.get(f, set()))
-                    if not narrowed:
-                        continue
-                    kind = m.group(2).upper().split()[0]
-                    if kind == "UNIQUE" and pk_columns.get(tbl) and pk_columns[tbl] <= words:
-                        continue
-                    con = m.group(1).lower()
-                    if con in dropped_constraints:
-                        # The replace idiom: not a contract when the new CHECK accepts
-                        # every row the old one did (widens).
-                        lo_, hi_ = span
-                        new_body = check_body("\n".join(raw_lines[lo_ - 1:hi_]), con)
-                        old_body = check_body(raw_before.get(f, ""), con)
-                        if new_body is not None and old_body is not None and widens(old_body, new_body):
-                            continue
-                    sites.append({"rule": "contract", "form": "narrow_constraint", "file": rel,
-                                  "line": line_of(stmt, sline, m.start()), "span": span,
-                                  "detail": f"constraint {m.group(1)} on {tbl} narrows "
-                                            f"existing column(s) {', '.join(narrowed)}"})
-            for m in RE_ALTER_DOMAIN_ADD.finditer(code):
-                if re.search(r"\bNOT\s+VALID\b", code[m.end():], re.I):
-                    continue
-                sites.append({"rule": "contract", "form": "narrow_constraint", "file": rel,
-                              "line": line_of(stmt, sline, m.start()), "span": span,
-                              "detail": f"a constraint added to domain {m.group(1).split('.')[-1].lower()}"})
+            # SCHEMA-0007's own forms: what an older build's statements trip on.
+            n_before = len(sites)
+            sites += contract_sites(stmt, sline, span, rel, "\n".join(raw_lines[span[0] - 1:span[1]]), ctx)
+            tm = RE_ALT_TBL.search(code_of(stmt))
+            for s_ in sites[n_before:]:
+                s_["objects"] = objects_of(code_of(stmt), obj_name(tm.group(1)) if tm else "")
 
             for m in RE_ADD_CON.finditer(stmt):
                 t = RE_ALT_TBL.search(stmt)
@@ -1008,6 +1546,25 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                 sites.append({"rule": "column", "file": rel, "line": col["line"],
                               "span": span, "detail": f"{col['table']}.{col['column']}",
                               "column": col})
+
+    # A contract's release is judged against what its own sites drop or change.
+    commit_of: dict[Path, str] = {}
+    for rel_, (module, version) in release_of.items():
+        created: dict[str, str] = {}
+        for s_ in sites:
+            if s_["file"] != rel_ or s_["rule"] not in ("destructive", "contract"):
+                continue
+            for obj in s_.get("objects") or []:
+                src = created_in.get(obj) or (created_in.get(("table", obj[1])) if obj[0] == "column" else None)
+                label = " ".join(obj[1:]) if obj[0] != "column" else f"{obj[1]}.{obj[2]}"
+                if src is None:
+                    created[f"{obj[0]} {label}"] = ""
+                    continue
+                if src not in commit_of:
+                    _, log = _git(root, "log", "--diff-filter=A", "--format=%H", "--", str(src.relative_to(root)))
+                    commit_of[src] = log.split("\n")[-1] if log else ""
+                created[f"{obj[0]} {label}"] = commit_of[src] or ""
+        contract_release_problems[rel_] = release_problem(root, module, version, created)
 
     return {"files_scanned": files_scanned, "sites": sites, "markers": markers,
             "module": module_of(root),
