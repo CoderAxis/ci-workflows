@@ -353,7 +353,7 @@ jobs:
             echo "::error::baseline mode must never fail; it is the inventory pass"
             exit 1
           fi
-          for id in SCHEMA-0001 SCHEMA-0002 SCHEMA-0003 SCHEMA-0004 SCHEMA-0005; do
+          for id in SCHEMA-0001 SCHEMA-0002 SCHEMA-0003 SCHEMA-0004 SCHEMA-0005 SCHEMA-0007; do
             grep -q "\[$id\]" <<<"$out" || {
               echo "::error::$id no longer fires on the violating fixture"; exit 1; }
           done

@@ -19,6 +19,15 @@
 # These are that run, not an estimate; re-running it is how a reviewer checks this
 # file has not gone stale.
 #
+# SCHEMA-0007 measured 2026-11-05 on ai-core-postgres and voice-ai-agent-core-postgres
+# (origin/main, files unchanged), the two schemas whose services may be served one
+# migration ahead: 6 contract sites, none naming a release. ai-core-postgres 000012:23,
+# 000012:24 and 000023:55 drop functions a build of the release before called;
+# 000021:48 is a CHECK that holds at its new column's default (`nothing-refused`);
+# voice-ai-agent-core-postgres 000019:69 and 000019:75 replace and add CHECKs over
+# columns the table had. In diff mode, as CI runs it, 000023 and 000019 each fail
+# where today's controls pass them; ai-core-postgres 000029 (expand-only) passes both.
+#
 # What this catalog is, and is not. It is the single source of WHICH DDL invariants
 # are enforced and WHICH reasons are sanctioned grounds for an exception. It does not
 # describe detection: each control's `detector` key binds it to an implementation in
@@ -98,6 +107,24 @@ destructive_forms:
   - name: add_column_not_null_without_default
     kind: write-break
     control: SCHEMA-0001
+  # The contract forms SCHEMA-0007 adds: each removes or narrows something a build
+  # of the release before may still use. A DROP is exempt when the same migration
+  # creates the same name again (the rebuild idiom).
+  - name: drop_type
+    kind: contract-break
+    control: SCHEMA-0007
+  - name: drop_routine
+    kind: contract-break
+    control: SCHEMA-0007
+  - name: rename_value
+    kind: contract-break
+    control: SCHEMA-0007
+  - name: drop_attribute
+    kind: contract-break
+    control: SCHEMA-0007
+  - name: narrow_constraint
+    kind: write-break
+    control: SCHEMA-0007
 
 # ---------------------------------------------------------------------------
 # Enumerated-column shape: the name suffixes that signal a closed value set
@@ -187,6 +214,15 @@ reasons:
       The column name matches an enumerated shape but the value is genuinely open
       text authored by a user or an operator. Stops applying if the application ever
       begins to branch on the value.
+  - token: nothing-refused
+    adr: ADR-0062
+    description: >-
+      Every row and every write a build of the release before makes passes the new
+      constraint: it replaces one of the same name that refused at least as much, or
+      it holds whenever the columns this migration adds are at their default or NULL,
+      which a build that does not know them leaves them at. The marker says which.
+      A replace where both are one column IN a literal list is compared
+      automatically and needs no marker. Excuses SCHEMA-0007 only.
   - token: scratch-table
     adr: ADR-0062
     description: >-
@@ -218,6 +254,11 @@ scan:
   # rule two vocabularies and made a migration that satisfies the promotion gate fail
   # this one - which is the drift this catalog exists to stop.
   expand_contract_pattern: '--\s*expand-contract:\s*(?P<ticket>[A-Za-z][A-Za-z0-9_-]*-?[0-9]+)\b'
+  # SCHEMA-0007 reads the release a contract migration names on that SAME line, after
+  # the ticket, so the promotion gate's marker still matches unchanged and one rule
+  # keeps one vocabulary:
+  #     -- expand-contract: AI-123 unused-since: ai-core-postgres v0.24.0
+  contract_release_pattern: '--\s*expand-contract:\s*[A-Za-z][A-Za-z0-9_-]*-?[0-9]+\b[^\n]*?\bunused-since:\s*(?P<release>[A-Za-z0-9][A-Za-z0-9._/-]*(?:@|\s+)v[0-9]+\.[0-9]+\.[0-9]+)'
 
 controls:
   - id: SCHEMA-0001
@@ -423,3 +464,52 @@ controls:
       and what a reader cannot infer from its columns; one sentence is enough.
     detector: table_without_comment
     refs: [ADR-0062, RFC-0027]
+
+  - id: SCHEMA-0007
+    title: A contract migration names the release that stopped using what it removes
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: critical
+    # enforce, and in diff mode that costs nothing on the day it lands: the rule
+    # reads only migrations a PR ADDS, and the remedy is one line on the marker the
+    # author already writes for SCHEMA-0001.
+    stage: enforce
+    waivable: true
+    policy: >-
+      A migration that drops, renames or narrows a column, table, type, constraint,
+      function or view is a contract migration: every SCHEMA-0001 form, and DROP TYPE
+      or DOMAIN, DROP FUNCTION, PROCEDURE or VIEW, ALTER TYPE ... RENAME VALUE or
+      ATTRIBUTE, DROP ATTRIBUTE, and a constraint added over columns a table already
+      had. Its `-- expand-contract:` marker MUST also name the earlier release since
+      which no build uses what it removes or writes what it newly refuses, as
+      `unused-since: <module> vX.Y.Z` on the same line. A DROP of a name the same
+      migration creates again, a constraint over columns the same migration adds only,
+      and a constraint replaced by one that accepts everything the old one did are not
+      contracts.
+    rationale: >-
+      A build may now be served a schema one migration past its own
+      (platform-shared-go dbmigrate Options.MaxAhead; ai-service AI_SCHEMA_MAX_AHEAD):
+      the state an image rollback across a migration leaves, which before it failed
+      the PreSync hook closed ("provenance FAIL CLOSED: applied migration version N is
+      unknown"), reproduced 2026-11-05 on voice-ai-agent's real dbtool. That is safe
+      for exactly the migrations the build before it does not depend on: expand-only
+      ones, and contracts whose release before them had already stopped using the
+      thing. SCHEMA-0001 asks for a ticket; a ticket says the contract half is
+      tracked, not that the release one migration behind is clear of it. The fleet
+      has shipped the hazard: ai-core-postgres 000023 dropped ai_claim_embedding_jobs,
+      which the build before it called on every poll ("function ... does not exist",
+      in ai-service's own CompatibilityWindow comment), and voice-ai-agent-core-postgres
+      000019 narrows ai_session_turns with a CHECK whose safety for the release still
+      serving is stated in prose a gate cannot read. The release named here is that
+      prose, made checkable at review: the reviewer confirms the named release is
+      published and no longer uses the thing.
+    remediation: >-
+      Ship the release that stops using the object (or stops writing what the new
+      constraint refuses) first, then name it on the marker:
+      `-- expand-contract: <TICKET-123> unused-since: <module> vX.Y.Z`. A constraint
+      replaced by a wider one the parser cannot compare takes
+      `-- schema:allow reason=nothing-refused adr=ADR-0062` above it, as does one that holds
+      whenever the columns the migration adds are at their default or NULL.
+    detector: contract_names_release
+    refs: [ADR-0062, RFC-0027, standards/infrastructure/schema-migration-standard.md]

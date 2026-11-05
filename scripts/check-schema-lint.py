@@ -439,6 +439,65 @@ RE_DROP_TABLE_NAME = re.compile(r"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\w.]+)",
 RE_COMMENT_TBL = re.compile(r"\bCOMMENT\s+ON\s+TABLE\s+([\w.]+)\s+IS\b", re.I)
 RE_PARTITION_OF = re.compile(r"\bPARTITION\s+OF\b", re.I)
 
+# Contract forms beyond SCHEMA-0001's: what removes or narrows a thing a build of the
+# release before may still use, so a build one migration behind the schema
+# (dbmigrate Options.MaxAhead) breaks on it. SCHEMA-0007 judges them, with every
+# SCHEMA-0001 site.
+#
+# DROP of a type, domain, function, procedure or view is exempt when the same
+# migration creates the same name again: that is the rebuild idiom (a domain cannot
+# change its CHECK in place, a function its return type), and like the constraint
+# replace SCHEMA-0001 already exempts, the object exists for the whole transaction.
+CONTRACT = (
+    ("drop_type", re.compile(r"\bDROP\s+(TYPE|DOMAIN)\s+(?:IF\s+EXISTS\s+)?([\w.]+)", re.I)),
+    ("drop_routine", re.compile(
+        r"\bDROP\s+(FUNCTION|PROCEDURE|VIEW|MATERIALIZED\s+VIEW)\s+(?:IF\s+EXISTS\s+)?([\w.]+)", re.I)),
+    ("rename_value", re.compile(r"\bRENAME\s+(VALUE|ATTRIBUTE)\b()", re.I)),
+    ("drop_attribute", re.compile(r"\bDROP\s+(ATTRIBUTE)\b()", re.I)),
+)
+RE_CREATED_NAME = re.compile(
+    r"\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:TYPE|DOMAIN|FUNCTION|PROCEDURE|VIEW|MATERIALIZED\s+VIEW)\s+"
+    r"(?:IF\s+NOT\s+EXISTS\s+)?([\w.]+)", re.I)
+# Any constraint a table may be given after it holds rows. RE_ADD_CON stays CHECK and
+# FOREIGN KEY because SCHEMA-0002's NOT VALID applies to those two alone.
+RE_ADD_CON_ANY = re.compile(
+    r"\bADD\s+CONSTRAINT\s+(\w+)\s+(CHECK|FOREIGN\s+KEY|UNIQUE|EXCLUDE|PRIMARY\s+KEY)\b", re.I)
+RE_ALTER_DOMAIN_ADD = re.compile(r"\bALTER\s+DOMAIN\s+([\w.]+)\s+ADD\b", re.I)
+RE_WORD = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
+# strip_comments() leaves a dollar-quoted body as it is, so a DO block keeps its
+# `--` comments; these detectors read code only, and a comment ABOUT an ALTER DOMAIN
+# inside a DO block was read as one.
+RE_LINE_COMMENT = re.compile(r"--[^\n]*")
+
+
+def code_of(stmt: str) -> str:
+    """stmt with every remaining `--` comment blanked, newlines kept. Literal contents
+    are already blank, so a `--` left in a statement is a comment in a dollar body."""
+    return RE_LINE_COMMENT.sub(lambda m: " " * len(m.group(0)), stmt)
+
+
+def constrained_words(clause: str, kind: str) -> set[str]:
+    """The identifiers a constraint holds a table's rows to: the column list of a
+    FOREIGN KEY, UNIQUE or PRIMARY KEY (never the REFERENCES side, which names the
+    other table's columns), and every word of a CHECK or EXCLUDE."""
+    if kind.upper().split()[0] in ("FOREIGN", "UNIQUE", "PRIMARY"):
+        i = clause.find("(")
+        clause = balanced(clause, i) if i >= 0 else ""
+    return {w.lower() for w in RE_WORD.findall(clause)}
+# A named CHECK that is one column IN a list of literals, read from the RAW text: the
+# stripped text has its literals blanked, and the values are the whole question.
+RE_IN_CHECK = r"\bCONSTRAINT\s+{name}\s+CHECK\s*\(\s*\(?\s*(\w+)\s+IN\s*\(([^)]*)\)"
+RE_LITERAL = re.compile(r"'((?:[^']|'')*)'")
+
+
+def in_check(raw: str, name: str):
+    """(column, values) of the last CHECK named `name` in raw text written as one
+    column IN a literal list, or None when there is none in that shape."""
+    found = None
+    for m in re.finditer(RE_IN_CHECK.format(name=re.escape(name)), raw, re.I):
+        found = (m.group(1).lower(), set(RE_LITERAL.findall(m.group(2))))
+    return found
+
 TEXTY = re.compile(r"^(TEXT|VARCHAR|CHARACTER\s+VARYING|CHAR)$", re.I)
 
 
@@ -554,6 +613,10 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
     # would be a rule with two answers.
     expand_re = re.compile((doc.get("scan") or {}).get("expand_contract_pattern", ""), re.I)
     expand_contract_files: set[str] = set()
+    # SCHEMA-0007: the release a contract migration names, per file, read with the
+    # marker it extends so the two cannot be written apart.
+    release_re = re.compile((doc.get("scan") or {}).get("contract_release_pattern", ""), re.I)
+    contract_release_files: dict[str, str] = {}
     enum_types: set[str] = set()
     check_bodies: list[str] = []
     described_tables: set[str] = set()
@@ -563,18 +626,32 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
     # Table comments are gathered here for the same reason: a table created in the
     # baseline and described by a later migration IS described, and in diff mode
     # only that later migration is a target.
+    #
+    # Columns are gathered per file, in migration order, for SCHEMA-0007: a constraint
+    # narrows only what a table already held when the migration runs, so a CHECK over a
+    # column added in the same migration constrains nothing an older build writes.
+    columns_before: dict[Path, set[tuple[str, str]]] = {}
+    raw_before: dict[Path, str] = {}
+    seen_columns: set[tuple[str, str]] = set()
+    seen_raw = ""
     for f in all_files:
+        columns_before[f] = set(seen_columns)
+        raw_before[f] = seen_raw
         try:
-            sql = strip_comments(f.read_text(encoding="utf-8", errors="replace"))
+            raw_all = f.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for stmt, _ in statements(sql):
+        seen_raw += "\n" + raw_all
+        sql = strip_comments(raw_all)
+        for stmt, sline in statements(sql):
             for m in RE_ENUM.finditer(stmt):
                 enum_types.add(m.group(1).split(".")[-1].lower())
             for m in re.finditer(r"\bCHECK\s*\(", stmt, re.I):
                 check_bodies.append(balanced(stmt, m.end() - 1))
             for m in RE_COMMENT_TBL.finditer(stmt):
                 described_tables.add(m.group(1).split(".")[-1].lower())
+            for col in _columns(stmt, sline, set()):
+                seen_columns.add((col["table"], col["column"]))
 
     sites: list[dict] = []
     markers: list[dict] = []
@@ -599,15 +676,29 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                                     "reason": m.group("reason"), "adr": m.group("adr")})
         if expand_re.pattern and expand_re.search(raw):
             expand_contract_files.add(rel)
+        if release_re.pattern:
+            rm = release_re.search(raw)
+            if rm:
+                contract_release_files[rel] = rm.group("release")
 
         sql = strip_comments(raw)
+        raw_lines = raw.split("\n")
         stmts = statements(sql)
         created_here = set()
         readded: set[str] = set()
-        for stmt, _ in stmts:
+        dropped_constraints: set[str] = set()
+        created_names: set[str] = set()
+        added_here: set[tuple[str, str]] = set()
+        for stmt, sline in stmts:
             m = RE_CRE_TBL.search(stmt)
             if m:
                 created_here.add(m.group(1).split(".")[-1].lower())
+            for cm2 in RE_CREATED_NAME.finditer(stmt):
+                created_names.add(cm2.group(1).split(".")[-1].lower())
+            for dm in re.finditer(r"\bDROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(\w+)", stmt, re.I):
+                dropped_constraints.add(dm.group(1).lower())
+            for col in _columns(stmt, sline, set()):
+                added_here.add((col["table"], col["column"]))
             # A CHECK constraint cannot be extended in place, so the house idiom is
             # DROP CONSTRAINT IF EXISTS x followed by ADD CONSTRAINT x in the same
             # migration - which keeps the table constrained for the whole transaction
@@ -662,6 +753,53 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
                                   "detail": f"{name.replace('_', ' ')} on "
                                             f"{tbl or 'an existing object'}"})
 
+            # SCHEMA-0007's own forms: what removes a type, a routine or a view, or
+            # renames or drops part of a type.
+            code = code_of(stmt)
+            for name, pat in CONTRACT:
+                for m in pat.finditer(code):
+                    obj = (m.group(2) or "").split(".")[-1].lower()
+                    if obj and obj in created_names:
+                        continue
+                    what = " ".join(m.group(1).lower().split())
+                    detail = (f"drop {what} {obj}" if obj
+                              else f"{'rename' if name == 'rename_value' else 'drop'} {what} of a type")
+                    sites.append({"rule": "contract", "form": name, "file": rel,
+                                  "line": line_of(stmt, sline, m.start()), "span": span,
+                                  "detail": detail})
+            # A constraint given to a table that already holds rows, over a column it
+            # already had, narrows what a build of the release before may write. A
+            # constraint over columns this migration adds narrows nothing they wrote.
+            t = RE_ALT_TBL.search(code)
+            tbl = t.group(1).split(".")[-1].lower() if t else ""
+            if tbl and tbl not in created_here:
+                for m in RE_ADD_CON_ANY.finditer(code):
+                    clause = split_top(code[m.end(2):])[0]
+                    words = constrained_words(clause, m.group(2))
+                    narrowed = sorted(w for w in words
+                                      if (tbl, w) in columns_before.get(f, set())
+                                      and (tbl, w) not in added_here)
+                    if not narrowed:
+                        continue
+                    con = m.group(1).lower()
+                    if con in dropped_constraints:
+                        # The replace idiom. It widens when the old and the new are
+                        # each one column IN a literal list and the new list holds
+                        # every old value: nothing written before is refused now.
+                        lo_, hi_ = span
+                        new_in = in_check("\n".join(raw_lines[lo_ - 1:hi_]), con)
+                        old_in = in_check(raw_before.get(f, ""), con)
+                        if new_in and old_in and new_in[0] == old_in[0] and old_in[1] <= new_in[1]:
+                            continue
+                    sites.append({"rule": "contract", "form": "narrow_constraint", "file": rel,
+                                  "line": line_of(stmt, sline, m.start()), "span": span,
+                                  "detail": f"constraint {m.group(1)} on {tbl} narrows "
+                                            f"existing column(s) {', '.join(narrowed)}"})
+            for m in RE_ALTER_DOMAIN_ADD.finditer(code):
+                sites.append({"rule": "contract", "form": "narrow_constraint", "file": rel,
+                              "line": line_of(stmt, sline, m.start()), "span": span,
+                              "detail": f"a constraint added to domain {m.group(1).split('.')[-1].lower()}"})
+
             for m in RE_ADD_CON.finditer(stmt):
                 t = RE_ALT_TBL.search(stmt)
                 tbl = t.group(1).split(".")[-1].lower() if t else "?"
@@ -697,6 +835,7 @@ def collect(root: Path, targets: list[Path], doc: dict, all_files: list[Path]) -
     return {"files_scanned": files_scanned, "sites": sites, "markers": markers,
             "stmt_spans": stmt_spans,
             "expand_contract_files": expand_contract_files,
+            "contract_release_files": contract_release_files,
             "enum_types": enum_types, "check_bodies": check_bodies,
             "described_tables": described_tables,
             "objects_scanned": len(sites), "parse_errors": parse_errors}
@@ -795,6 +934,25 @@ def rule_destructive_statement(facts: dict, doc: dict, ctl: dict) -> list[Findin
             for s in facts["sites"] if s["rule"] == "destructive"
             and s["file"] not in exp
             and not excused(s, facts["markers"], {"empty-table"})]
+
+
+def rule_contract_names_release(facts: dict, doc: dict, ctl: dict) -> list[Finding]:
+    """SCHEMA-0007: a contract migration names the release that stopped using it.
+
+    Every SCHEMA-0001 site and every contract site counts. The release is read from
+    the file's own expand-contract marker (`unused-since: <module> vX.Y.Z`), so it is
+    per file as that marker is; `empty-table` and `nothing-refused` markers excuse a site the
+    parser cannot judge.
+    """
+    c = ctl.get("SCHEMA-0007")
+    if not c or c["status"] != "active":
+        return []
+    named = facts.get("contract_release_files") or {}
+    return [_mk(c, s, f"contract migration names no release that stopped using what it "
+                      f"removes or newly refuses: {s['detail']}")
+            for s in facts["sites"] if s["rule"] in ("destructive", "contract")
+            and s["file"] not in named
+            and not excused(s, facts["markers"], {"empty-table", "nothing-refused"})]
 
 
 def rule_add_constraint_not_valid(facts: dict, doc: dict, ctl: dict) -> list[Finding]:
@@ -919,6 +1077,7 @@ def evaluate(facts: dict, doc: dict) -> list[Finding]:
     findings += rule_enum_hidden_from_codegen(facts, doc, ctl)
     findings += rule_unconstrained_enumerated_column(facts, doc, ctl)
     findings += rule_table_without_comment(facts, doc, ctl)
+    findings += rule_contract_names_release(facts, doc, ctl)
     findings += rule_orphan_marker(facts, doc, ctl)
     # One finding per control per site: a reviewer needs the site once, not once per
     # rule that happened to reach it.

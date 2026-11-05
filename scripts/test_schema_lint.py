@@ -34,6 +34,8 @@ VIOLATING = REPO_ROOT / "fixtures" / "schema-lint-violating"
 #   SCHEMA-0004  chat_threads.channel_type, read by an authorization predicate
 #   SCHEMA-0005  an excuse citing a reason nobody sanctioned
 #   SCHEMA-0006  194 tables fleet-wide with no COMMENT ON TABLE (measured 2026-09-30)
+#   SCHEMA-0007  ai-core-postgres 000023 (a function the build before called, dropped)
+#                and voice-ai-agent-core-postgres 000019 (a CHECK over existing columns)
 EXPECTED = {
     ("SCHEMA-0003", "schema/migrations/000001_init.up.sql", 18),
     # Both tables the violating fixture creates are undescribed. Pinned at the
@@ -49,6 +51,17 @@ EXPECTED = {
     # that quietly stops reporting reads exactly like a repository that got cleaner.
     ("SCHEMA-0004", "schema/migrations/000002_forward.up.sql", 31),
     ("SCHEMA-0004", "schema/migrations/000002_forward.up.sql", 39),
+    # SCHEMA-0007: every contract with no release named. The two in 000002 are the
+    # same sites SCHEMA-0001 and SCHEMA-0002 report: a constraint over a column the
+    # table had, and a dropped column.
+    ("SCHEMA-0007", "schema/migrations/000002_forward.up.sql", 11),
+    ("SCHEMA-0007", "schema/migrations/000002_forward.up.sql", 15),
+    ("SCHEMA-0007", "schema/migrations/000003_contract_unnamed.up.sql", 8),
+    ("SCHEMA-0007", "schema/migrations/000003_contract_unnamed.up.sql", 11),
+    ("SCHEMA-0007", "schema/migrations/000003_contract_unnamed.up.sql", 15),
+    # A replace that narrows. Pinned from the suppression side: the widening check
+    # that exempts conformant 000003 must not exempt this one.
+    ("SCHEMA-0007", "schema/migrations/000004_contract_narrowed.up.sql", 8),
 }
 
 
