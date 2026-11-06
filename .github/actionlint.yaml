@@ -12,7 +12,7 @@
 # arc-runners-coderaxis), so a reusable workflow names the label plainly
 # whichever owner calls it. inboxxhq-ci-heavy is one job per node, for
 # service-ci's Build and test. The lanes that still need Docker (Integration,
-# End-to-end) stay on ubuntu-latest.
+# Docker-backed tests, End-to-end) stay on ubuntu-latest.
 self-hosted-runner:
   labels:
     - inboxxhq-ci

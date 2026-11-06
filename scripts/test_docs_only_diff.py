@@ -513,6 +513,7 @@ def test_harness_checkout_inside_the_caller_is_not_read() -> None:
 GATED_JOBS = {
     "build-test", "codeql", "events", "seeding", "schema", "dockerfile",
     "structure", "vulnerabilities", "uuid-policy", "sqlc", "integration",
+    "docker-tests",
     "contract-classification", "gateway-baseline", "contract",
     "openapi-generator", "e2e", "source-invariants", "dependency-review",
     "artifact",
