@@ -306,6 +306,36 @@ jobs:
       - name: Dependency-pin classification and its wiring
         run: python3 scripts/test_pin_only_diff.py
 
+  # ── container tests (scripts/docker-test-packages.sh) ───────────────────────────────────────
+  # Build and test runs on pools without Docker and sends the packages whose tests start
+  # containers to the hosted docker-tests job. Both directions of a mistake are expensive: a
+  # package the detector misses fails Build and test on every run, and one it names wrongly moves
+  # tests onto billed runners. The run blocks are executed out of service-ci.yaml against a fixture
+  # module whose container libraries are local stubs, so this needs no Docker and no network.
+  docker-test-routing:
+    name: Container test routing - detector, executed steps and wiring
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: false
+
+      - name: Install guard dependencies
+        run: python3 -m pip install --upgrade PyYAML
+
+      - name: Detector, the Build and test and docker-tests steps, and their wiring
+        run: python3 scripts/test_docker_test_packages.py
+
   # ── org vocabulary (ORG-0001 broad, ORG-0002 identifiers) ──────────────────────────────────
   # Arrived without a job here, which is the omission this file's own header warns about: "new
   # central checkers should arrive with a self-test here". Added now, alongside ORG-0002.
