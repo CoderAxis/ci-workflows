@@ -16,6 +16,11 @@
 # directly. `go list -test` resolves the whole import graph of each test binary under those tags
 # without compiling it, so a test that reaches a client through a shared helper package is found as
 # well, and a package cannot opt out by renaming anything.
+#
+# KNOWN LIMIT. The rule is "links a Docker client", not "starts a container". A test that drives
+# Docker by running the docker CLI through os/exec links no client and is not found: the compose
+# helper in platform-testing-go (stack) works that way. No library imports it today. Such a test
+# would stay in Build and test, where it fails for want of a daemon, or skips if it checks first.
 set -euo pipefail
 
 tags="${1:-}"
