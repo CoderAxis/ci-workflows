@@ -78,6 +78,7 @@ def step(job: str, name: str) -> dict:
 
 def run_step(job: str, name: str, workdir: Path, **env: str) -> tuple[int, str, dict]:
     """Run one step's `run:` block the way GitHub runs `shell: bash`, returning its outputs."""
+    env.setdefault("RUNNER_TEMP", str(workdir.parent / "runner_temp"))
     script = workdir.parent / "step.sh"
     script.write_text(step(job, name)["run"], encoding="utf-8")
     outputs = workdir.parent / "github_output"
@@ -94,12 +95,17 @@ def run_step(job: str, name: str, workdir: Path, **env: str) -> tuple[int, str, 
     return proc.returncode, proc.stdout + proc.stderr, parsed
 
 
+CENTRAL = "ci-workflows-central"
+
+
 def checkout(tmp: Path) -> Path:
-    """The fixture as a service checkout, with the central scripts where Build and test puts them."""
+    """The fixture as a service checkout, with the central scripts where Build and test moves
+    them: under RUNNER_TEMP, outside the workspace."""
     work = tmp / "repo"
     shutil.copytree(FIXTURE, work)
-    (work / ".central" / "scripts").mkdir(parents=True)
-    shutil.copy(SCRIPT, work / ".central" / "scripts" / SCRIPT.name)
+    scripts = tmp / "runner_temp" / CENTRAL / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy(SCRIPT, scripts / SCRIPT.name)
     return work
 
 
@@ -213,6 +219,19 @@ def test_the_hosted_job_runs_the_container_tests(tmp: Path) -> None:
     expect(code != 0, "without a daemon the hosted step must fail: it runs the container tests")
 
 
+def test_the_central_checkout_leaves_the_workspace(tmp: Path) -> None:
+    """Tests that walk the repository tree read whatever sits in it; the central scripts must not."""
+    work = tmp / "repo"
+    (work / ".central" / "scripts").mkdir(parents=True)
+    (work / ".central" / "scripts" / "probe.sh").write_text("true\n", encoding="utf-8")
+    (tmp / "runner_temp").mkdir()  # a runner always has its RUNNER_TEMP
+    code, out, _ = run_step("build-test", "Move the central checkers out of the workspace", work)
+    expect(code == 0, f"the move step failed:\n{out}")
+    expect(not (work / ".central").exists(), "the central checkout is still in the workspace")
+    expect((tmp / "runner_temp" / CENTRAL / "scripts" / "probe.sh").is_file(),
+           "the central checkout did not arrive under RUNNER_TEMP")
+
+
 # ---------------------------------------------------------------------------
 # The wiring
 # ---------------------------------------------------------------------------
@@ -231,6 +250,16 @@ def test_build_test_publishes_the_list_from_its_detection_step() -> None:
     detect_at = names.index("Find the tests that need Docker")
     expect(names.index("Check out the central checkers") < detect_at < names.index("Tests with coverage"),
            "the central checkout must precede detection, and detection the coverage run")
+    move_at = names.index("Move the central checkers out of the workspace")
+    expect(names.index("Check out the central checkers") + 1 == move_at,
+           "the central checkout must be moved out of the workspace in the very next step")
+    tests = [i for i, s in enumerate(bt["steps"]) if "go test" in str(s.get("run", ""))]
+    expect(tests and move_at < min(tests),
+           "the central checkout must leave the workspace before any step that runs tests")
+    for s in bt["steps"][move_at + 1:]:
+        body = str(s.get("run", "")) + str(s.get("with", ""))
+        expect(".central/" not in body,
+               f"step {s.get('name')!r} still reads .central/ inside the workspace")
     det = bt["steps"][detect_at]
     expect(det.get("id") == "docker", "the detection step's id must be docker")
     expect("repo_kind != 'deployable'" in str(det.get("if", "")),

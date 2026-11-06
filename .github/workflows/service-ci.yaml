@@ -502,7 +502,13 @@ jobs:
           echo "TEST_DATABASE_URL=postgres://postgres:postgres@localhost:${PG_PORT}/service_test?sslmode=disable" \
             >> "${GITHUB_ENV}"
 
-      # Before the tests rather than beside the coverage gate, because the next step needs it.
+      # Before the tests rather than beside the coverage gate, because the detection step needs it,
+      # and then moved out of the workspace before any test runs. Tests that walk the repository
+      # tree skip only .git, vendor and node_modules: inboxxhq-ai-service's and
+      # voice-ai-agent's tests/privacy phone scans and ai-core's banned-import guard all read a
+      # .central/ directory in the module root, so a fixture added to scripts/ here would fail them
+      # fleet-wide the moment v1 moved. actions/checkout writes only under the workspace, hence the
+      # move. No credentials are persisted: the moved tree must carry no token.
       - name: Check out the central checkers
         uses: actions/checkout@v4
         with:
@@ -510,6 +516,14 @@ jobs:
           ref: v1
           path: .central
           sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Move the central checkers out of the workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP:?}/ci-workflows-central"
+          mv .central "${RUNNER_TEMP}/ci-workflows-central"
 
       # A test that starts its own container (testcontainers-go, dockertest) cannot run here: this
       # pool has no Docker daemon, and such a test fails with "rootless Docker not found" rather
@@ -531,7 +545,7 @@ jobs:
           set -euo pipefail
           # A command substitution, not `mapfile < <(...)`: a failed `go list` must fail this step
           # rather than read as "no packages", which would put them straight back on this pool.
-          found="$(bash .central/scripts/docker-test-packages.sh "${GO_TAGS}")"
+          found="$(bash "${RUNNER_TEMP}/ci-workflows-central/scripts/docker-test-packages.sh" "${GO_TAGS}")"
           packages="$(paste -sd ' ' <<<"${found}")"
           echo "packages=${packages}" >> "${GITHUB_OUTPUT}"
           if [[ -n "${packages}" ]]; then
@@ -650,7 +664,7 @@ jobs:
 
             # The split works only while the container tests sit behind the tag. One that does not
             # would fail below on every run with "rootless Docker not found", so it is named here.
-            still="$(bash .central/scripts/docker-test-packages.sh "${other_tags}")"
+            still="$(bash "${RUNNER_TEMP}/ci-workflows-central/scripts/docker-test-packages.sh" "${other_tags}")"
             stray=()
             for p in "${without_tag[@]}"; do
               if grep -qxF -- "${p}" <<<"${still}"; then stray+=("${p}"); fi
@@ -708,7 +722,7 @@ jobs:
           # only against the target constrains nothing in a repo that is far below it: the number
           # was already failing, so it is free to keep falling. The ratchet makes the current
           # position the thing that cannot be lost, while the target stays the thing being aimed at.
-          python3 .central/scripts/check_coverage_ratchet.py --pct "${PCT}" --threshold "${THRESHOLD}"
+          python3 "${RUNNER_TEMP}/ci-workflows-central/scripts/check_coverage_ratchet.py" --pct "${PCT}" --threshold "${THRESHOLD}"
 
       - name: Contract tests when present
         shell: bash
