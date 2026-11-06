@@ -248,6 +248,7 @@ PIN_KEPT = {
     "pin-only",            # this one
     "build-test",          # does it still compile and pass its tests
     "integration",         # a library change is a behaviour change
+    "docker-tests",        # likewise, for the tests that start containers
     "e2e",                 # likewise, end to end
     "vulnerabilities",     # a bump is EXACTLY when a CVE arrives
     "dependency-review",   # its entire subject is the dependency delta
