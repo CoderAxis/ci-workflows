@@ -720,7 +720,16 @@ jobs:
           # sees. The same line service-ci.yaml carries (95c5ea4); the first release verified
           # on the pool (ledger-core v0.5.0, 2026-09-06) failed three route tests without it.
           KUBERNETES_SERVICE_HOST: ""
-        run: GOWORK=off go test -race -count=1 ./...
+        # `go test` kills a test binary at 10 minutes unless told otherwise, and that default, not
+        # this job's timeout-minutes, was the limit that fired: ai-core v0.54.2 died with
+        # "panic: test timed out after 10m0s" while its tests were still progressing, because the
+        # largest package takes well over 600s under -race on this pool. This is the REAL limit,
+        # deliberately under the job's timeout-minutes (30) so that it is the one that fires and
+        # names the package; losing the race to the job cap leaves a killed step with no
+        # annotation. The 5 minutes of margin cover checkout, module download, the race-detector
+        # gate and the steps after this one. Keep the two numbers tied: raise this only together
+        # with timeout-minutes above.
+        run: GOWORK=off go test -race -count=1 -timeout 25m ./...
 
       - name: Create tag
         if: steps.ver.outputs.releasable == 'true' && steps.ver.outputs.createtag == 'true'
