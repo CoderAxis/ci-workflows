@@ -690,6 +690,20 @@ jobs:
           fi
           go tool cover -func=coverage.out | tail -5
 
+          # TESTED, NOT MEASURED: package main. The filter above leaves entrypoints out of the
+          # coverage denominator, which is right, but that also kept their tests from running at
+          # all: a route-table contract test in a service's cmd/server went red on main and no
+          # pull request or main run saw it; only a release bump job running `go test ./...` did.
+          # These tests run here, with the same tags, and add nothing to the coverage figure.
+          mapfile -t mains < <(
+            GOWORK=off go list -tags="${GO_TAGS}" \
+              -f '{{if eq .Name "main"}}{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}{{end}}' ./... \
+              | grep -Ev '/tests/(contracts|integration)' || true
+          )
+          if [[ ${#mains[@]} -gt 0 ]]; then
+            GOWORK=off go test -timeout 30m -tags="${GO_TAGS}" "${mains[@]}"
+          fi
+
       - name: Race detector on the packages the repo names
         if: inputs.go_race_packages != ''
         shell: bash
