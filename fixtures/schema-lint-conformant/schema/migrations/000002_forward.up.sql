@@ -17,5 +17,6 @@ ALTER TABLE fixture_threads VALIDATE CONSTRAINT chk_fixture_threads_body_present
 
 -- The contract half of an expand/contract pair, declared with the SAME marker the
 -- promotion gate reads (inboxxhq-infra/scripts/check-destructive-ddl.py).
--- expand-contract: PLAT-4471  (expand shipped in core v0.9.0)
+-- The release since which no build reads the column is on the same line (SCHEMA-0007).
+-- expand-contract: PLAT-4471 unused-since: fixture-core v0.9.0
 ALTER TABLE fixture_threads DROP COLUMN IF EXISTS content_type;

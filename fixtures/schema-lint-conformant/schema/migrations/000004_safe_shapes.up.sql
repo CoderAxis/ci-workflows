@@ -57,3 +57,7 @@ BEGIN
         ADD CONSTRAINT chk_fixture_audit_actor CHECK (actor_id IS NOT NULL);
 END $$;
 -- +goose StatementEnd
+
+-- 6. A function a later contract drops (000005), created here so the release that
+--    contract names comes after the migration that made it.
+CREATE FUNCTION fixture_old_lookup(id uuid) RETURNS uuid LANGUAGE sql AS 'SELECT id';
