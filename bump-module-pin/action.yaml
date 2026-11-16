@@ -190,8 +190,16 @@ runs:
         #
         # mapfile, not `go test $(...)`: an unquoted command substitution word-splits, so a
         # package path containing a space would be passed as two broken arguments.
+        #
+        # -timeout: `go test` kills a test binary at 10 minutes unless told otherwise, and on the
+        # self-hosted pool on the dev Docker host (~2.7x slower per core, load ~40 on 18 cores)
+        # that default, not the job's timeout-minutes, fired: ai-core v0.69.0's bump of
+        # voice-ai-agent-service died with "panic: test timed out after 10m0s" in one package
+        # (release run 43953296586, 2026-11-16). x3 of the default, as #75 did for module-release
+        # and service-ci; this step and the contract gate's 30m each stay under the calling job's
+        # 90 (module-release.yaml bump-consumers), so a hung test still fails here, by name.
         mapfile -t pkgs < <(GOWORK=off go list ./... | grep -Ev '/tests/(contracts|integration)')
-        [[ ${#pkgs[@]} -eq 0 ]] || GOWORK=off go test "${pkgs[@]}" -count=1
+        [[ ${#pkgs[@]} -eq 0 ]] || GOWORK=off go test "${pkgs[@]}" -count=1 -timeout 30m
 
     - name: Contract gate
       if: steps.guard.outputs.skip != 'true'
@@ -212,7 +220,8 @@ runs:
         # Imports the BUMPED module and validates the committed spec against it, so DTO or
         # operationId drift fails the PR before merge rather than after deploy.
         if [[ -d tests/contracts ]]; then
-          GOWORK=off go test ./tests/contracts/... -count=1
+          # -timeout: as "Test against the new pin" (x3 of go test's 10-minute default).
+          GOWORK=off go test ./tests/contracts/... -count=1 -timeout 30m
         fi
 
     - name: Check out the central checkers
