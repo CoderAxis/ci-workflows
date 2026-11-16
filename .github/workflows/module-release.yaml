@@ -724,12 +724,14 @@ jobs:
         # this job's timeout-minutes, was the limit that fired: ai-core v0.54.2 died with
         # "panic: test timed out after 10m0s" while its tests were still progressing, because the
         # largest package takes well over 600s under -race on this pool. This is the REAL limit,
-        # deliberately under the job's timeout-minutes (30) so that it is the one that fires and
+        # deliberately under the job's timeout-minutes (90) so that it is the one that fires and
         # names the package; losing the race to the job cap leaves a killed step with no
-        # annotation. The 5 minutes of margin cover checkout, module download, the race-detector
+        # annotation. The 15 minutes of margin cover checkout, module download, the race-detector
         # gate and the steps after this one. Keep the two numbers tied: raise this only together
-        # with timeout-minutes above.
-        run: GOWORK=off go test -race -count=1 -timeout 25m ./...
+        # with timeout-minutes above. (x3 with the job limit, 2026-11-16: the self-hosted pool
+        # moved to the dev Docker host, ~2.7x slower per core; ai-core's rolepipeline/executor
+        # took 1019.5 s under -race on ARC.)
+        run: GOWORK=off go test -race -count=1 -timeout 75m ./...
 
       - name: Create tag
         if: steps.ver.outputs.releasable == 'true' && steps.ver.outputs.createtag == 'true'
