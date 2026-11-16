@@ -118,7 +118,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 10
+    timeout-minutes: 30 # x3 for the self-hosted runners on the dev Docker host (was 10)
     outputs:
       artifact: ${{ steps.consumers.outputs.artifact }}
       event_type: ${{ steps.consumers.outputs.event_type }}
@@ -335,7 +335,7 @@ jobs:
     runs-on: inboxxhq-ci
     # Generous, because it is waiting for the repository's full CI lane rather than doing work. The
     # timeout is a refusal, not a pass: running out of time fails the gate.
-    timeout-minutes: 45
+    timeout-minutes: 135 # x3 for the self-hosted runners on the dev Docker host (was 45)
     steps:
       - name: Require a successful ci.yaml run for the exact commit being fanned out
         env:
@@ -448,7 +448,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 10
+    timeout-minutes: 30 # x3 for the self-hosted runners on the dev Docker host (was 10)
     strategy:
       # One unreachable consumer must not suppress the others; a partial fan-out is recoverable by
       # re-running, whereas a cancelled fan-out hides which targets were reached.
@@ -637,7 +637,7 @@ jobs:
     # second, vaguer error on the same fault.
     if: always() && needs.resolve.result == 'success' && needs.ci-gate.result == 'success'
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     steps:
       - name: Fail if any consumer was not notified
         env:

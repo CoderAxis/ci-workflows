@@ -128,7 +128,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     outputs:
       service: ${{ steps.id.outputs.service }}
       repo_kind: ${{ steps.id.outputs.repo_kind }}
@@ -223,7 +223,7 @@ jobs:
     # being waited for never arrives. Raise it only against a measurement of ci.yaml duration, and
     # be aware that a rise here buys tolerance for a stuck release at a directly proportional cost
     # in runner minutes across every module in the fleet.
-    timeout-minutes: 50
+    timeout-minutes: 150 # x3 for the self-hosted runners on the dev Docker host (was 50)
     steps:
       - name: Require a successful ci.yaml run for the exact commit being released
         env:
@@ -336,7 +336,7 @@ jobs:
     name: Verify, tag, and publish
     needs: [resolve, ci-gate]
     runs-on: inboxxhq-ci
-    timeout-minutes: 30
+    timeout-minutes: 90 # x3 for the self-hosted runners on the dev Docker host (was 30)
     permissions:
       contents: write # push the tag, create the release
       id-token: write # keyless provenance
@@ -886,7 +886,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 30
+    timeout-minutes: 90 # x3 for the self-hosted runners on the dev Docker host (was 30)
     strategy:
       # One unreachable consumer must not suppress the others; a partial fan-out is recoverable
       # by re-running, whereas a cancelled fan-out hides which targets were reached.
@@ -955,7 +955,7 @@ jobs:
     needs: [resolve, release, bump-consumers]
     if: always() && needs.release.outputs.releasable == 'true'
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     steps:
       - name: Fail if any consumer was not bumped
         env:
