@@ -123,7 +123,7 @@ jobs:
   service-ports:
     name: Service ports agree across manifests, images and the registry
     runs-on: inboxxhq-ci
-    timeout-minutes: 20
+    timeout-minutes: 60 # x3 for the self-hosted runners on the dev Docker host (was 20)
     permissions:
       contents: read
       # Required by ci-app-token: the OIDC token IS the proof of identity, and without this

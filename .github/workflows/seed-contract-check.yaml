@@ -38,7 +38,7 @@ jobs:
   seed-contract:
     name: Seed contract
     runs-on: inboxxhq-ci
-    timeout-minutes: 10
+    timeout-minutes: 30 # x3 for the self-hosted runners on the dev Docker host (was 10)
     steps:
       - name: Checkout service (caller)
         uses: actions/checkout@v4

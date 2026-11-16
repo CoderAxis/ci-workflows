@@ -80,7 +80,7 @@ jobs:
   platform-governance:
     name: Platform governance (assembled workspace)
     runs-on: inboxxhq-ci
-    timeout-minutes: 15
+    timeout-minutes: 45 # x3 for the self-hosted runners on the dev Docker host (was 15)
     permissions:
       contents: read
       # Required by ci-app-token: the OIDC token IS the proof of identity, and without this the

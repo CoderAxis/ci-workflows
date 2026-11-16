@@ -105,7 +105,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: ${{ inputs.runs_on }}
-    timeout-minutes: 30
+    timeout-minutes: 90 # x3 for the self-hosted runners on the dev Docker host (was 30)
     env:
       # Both accounts, matching every other Go job in service-ci. This job had only
       # coderaxis, which is latent rather than broken today (inboxxhq-coderaxis appears

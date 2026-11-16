@@ -72,7 +72,7 @@ jobs:
   build:
     name: Docker build + unit tests (verify)
     runs-on: ${{ inputs.runs_on }}
-    timeout-minutes: 45
+    timeout-minutes: 135 # x3 for the self-hosted runners on the dev Docker host (was 45)
     permissions:
       contents: read
       id-token: write # proves this job's identity to AWS; no App key is handled here

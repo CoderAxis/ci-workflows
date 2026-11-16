@@ -125,7 +125,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     outputs:
       service: ${{ steps.id.outputs.service }}
       language: ${{ steps.id.outputs.language }}
@@ -180,7 +180,7 @@ jobs:
   docs-only:
     name: Documentation-only change
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     permissions:
       contents: read
     outputs:
@@ -246,7 +246,7 @@ jobs:
   pin-only:
     name: Dependency-pin-only change
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     permissions:
       contents: read
     outputs:
@@ -296,7 +296,7 @@ jobs:
     name: Language is supported
     needs: resolve
     runs-on: inboxxhq-ci
-    timeout-minutes: 2
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 2)
     steps:
       - name: Refuse a language this pipeline cannot build
         shell: bash
@@ -322,7 +322,7 @@ jobs:
     needs: [resolve, pin-only]
     if: needs.pin-only.outputs.pin_only != 'true'
     runs-on: inboxxhq-ci
-    timeout-minutes: 15
+    timeout-minutes: 45 # x3 for the self-hosted runners on the dev Docker host (was 15)
     steps:
       - name: Check out the service repo
         uses: actions/checkout@v4
@@ -427,7 +427,7 @@ jobs:
     # inboxxhq-ci nodes voice-ai-agent's suite took ~38 min against ~27 hosted with a whole node to
     # itself, and with a busy neighbour its race step would have passed its 30-minute timeout.
     runs-on: inboxxhq-ci-heavy
-    timeout-minutes: 45
+    timeout-minutes: 135 # x3 for the self-hosted runners on the dev Docker host (was 45)
     # The packages this job ran without the integration tag because their tests start containers;
     # the docker-tests job runs them with it. Empty for a deployable and for any repo with none.
     outputs:
@@ -944,7 +944,7 @@ jobs:
       # WFC-0004 already caught on the schema job.
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 15
+    timeout-minutes: 45 # x3 for the self-hosted runners on the dev Docker host (was 15)
     steps:
       - uses: actions/checkout@v4
 
@@ -1165,7 +1165,7 @@ jobs:
     name: Required workflow lanes
     needs: resolve
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     steps:
       - uses: actions/checkout@v4
 
@@ -1301,7 +1301,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 45
+    timeout-minutes: 135 # x3 for the self-hosted runners on the dev Docker host (was 45)
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
       GONOSUMDB: github.com/coderaxis/*
@@ -1408,7 +1408,7 @@ jobs:
     permissions:
       contents: read
     runs-on: inboxxhq-ci
-    timeout-minutes: 10
+    timeout-minutes: 30 # x3 for the self-hosted runners on the dev Docker host (was 10)
     steps:
       - uses: actions/checkout@v4
 
@@ -1472,7 +1472,7 @@ jobs:
     permissions:
       contents: read
     runs-on: inboxxhq-ci
-    timeout-minutes: 10
+    timeout-minutes: 30 # x3 for the self-hosted runners on the dev Docker host (was 10)
     steps:
       - uses: actions/checkout@v4
 
@@ -1512,7 +1512,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 15
+    timeout-minutes: 45 # x3 for the self-hosted runners on the dev Docker host (was 15)
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
       GONOSUMDB: github.com/coderaxis/*
@@ -1592,7 +1592,7 @@ jobs:
     needs: [resolve, pin-only]
     if: needs.pin-only.outputs.pin_only != 'true'
     runs-on: inboxxhq-ci
-    timeout-minutes: 10
+    timeout-minutes: 30 # x3 for the self-hosted runners on the dev Docker host (was 10)
     permissions:
       contents: read
     steps:
@@ -2101,7 +2101,7 @@ jobs:
     permissions:
       contents: read
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     steps:
       - name: Check out the service repo
         uses: actions/checkout@v4
@@ -2161,7 +2161,7 @@ jobs:
     permissions:
       contents: read
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     steps:
       - name: Check out the service repo
         uses: actions/checkout@v4
@@ -2278,7 +2278,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 25
+    timeout-minutes: 75 # x3 for the self-hosted runners on the dev Docker host (was 25)
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
       GONOSUMDB: github.com/coderaxis/*
@@ -2960,7 +2960,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 15
+    timeout-minutes: 45 # x3 for the self-hosted runners on the dev Docker host (was 15)
     steps:
       - uses: actions/checkout@v4
         with:
@@ -3012,7 +3012,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 15
+    timeout-minutes: 45 # x3 for the self-hosted runners on the dev Docker host (was 15)
     steps:
       # Checked out under the repository's real name, not a fixed "service" directory.
       # check_service_docs.py chooses between two required trees by looking at the name of
@@ -3063,7 +3063,7 @@ jobs:
     needs: [resolve, docs-only]
     if: github.event_name == 'pull_request' && needs.docs-only.outputs.docs_only != 'true'
     runs-on: inboxxhq-ci
-    timeout-minutes: 10
+    timeout-minutes: 30 # x3 for the self-hosted runners on the dev Docker host (was 10)
     steps:
       - uses: actions/checkout@v4
 
@@ -3243,7 +3243,7 @@ jobs:
     # alert would have fired only on the subset of runs where every gate happened to be relevant.
     if: always() && contains(needs.*.result, 'failure')
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     permissions:
       contents: read
       id-token: write

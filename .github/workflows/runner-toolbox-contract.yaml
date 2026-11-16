@@ -45,7 +45,7 @@ jobs:
   contract:
     name: Runner toolbox contract (inboxxhq-ci)
     runs-on: inboxxhq-ci
-    timeout-minutes: 15
+    timeout-minutes: 45 # x3 for the self-hosted runners on the dev Docker host (was 15)
     permissions:
       contents: read
     steps:

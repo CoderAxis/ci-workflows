@@ -87,7 +87,7 @@ jobs:
     name: Codegen drift (Go + TS SDKs)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: inboxxhq-ci
-    timeout-minutes: 30
+    timeout-minutes: 90 # x3 for the self-hosted runners on the dev Docker host (was 30)
     permissions:
       contents: read
       id-token: write
@@ -197,7 +197,7 @@ jobs:
   openapi-bundle-drift:
     name: OpenAPI bundle drift
     runs-on: inboxxhq-ci
-    timeout-minutes: 20
+    timeout-minutes: 60 # x3 for the self-hosted runners on the dev Docker host (was 20)
     permissions:
       contents: read
       id-token: write
