@@ -30,7 +30,7 @@ jobs:
   workflow-lint:
     name: Workflow definitions lint clean
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     permissions:
       contents: read
     steps:

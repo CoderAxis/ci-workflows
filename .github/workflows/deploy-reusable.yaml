@@ -206,7 +206,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     outputs:
       service: ${{ steps.id.outputs.service }}
       deployable: ${{ steps.id.outputs.deployable }}
@@ -997,7 +997,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     steps:
       - name: Name the stage that failed
         id: stage

@@ -48,7 +48,7 @@ jobs:
   sdk-contract:
     name: Frontend SDK contract
     runs-on: inboxxhq-ci
-    timeout-minutes: 10
+    timeout-minutes: 30 # x3 for the self-hosted runners on the dev Docker host (was 10)
     permissions:
       contents: read
       id-token: write
