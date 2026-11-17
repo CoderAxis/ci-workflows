@@ -92,6 +92,21 @@ on:
         required: false
         type: string
         default: ""
+      build_test_runner:
+        description: >-
+          The runs-on label for Build and test. The default is the self-hosted heavy pool, and that
+          is where every repo should stay. The input exists for a suite the pool cannot run
+          reliably: on 2026-11-17 voice-ai-agent-service's DB-backed SMS burst and timing tests
+          failed five attempts in a row on the dev Docker host (at 2, then 6 CPUs), while the same
+          commit's whole suite passed on a 6-CPU machine in 7 minutes. A repo that sets this pays
+          GitHub-hosted minutes for its Build and test, so it is a per-repo decision.
+
+          On a GitHub-hosted runner (runner.environment == 'github-hosted') the throwaway database is
+          the docker.io/pgvector/pgvector:0.8.7-pg18 container the pool image's PostgreSQL mirrors:
+          same PostgreSQL major, same pgvector, same locale, credentials and durability settings.
+        required: false
+        type: string
+        default: inboxxhq-ci-heavy
 
 # No `secrets:` block, deliberately. Every token this pipeline uses is minted from the job's own
 # OIDC identity via ci-app-token and ci-slack-notify, so a repository forwards nothing: the
@@ -426,7 +441,8 @@ jobs:
     # (inboxxhq-infra environments/dev/platform/arc-runners.tf). On the shared, burstable
     # inboxxhq-ci nodes voice-ai-agent's suite took ~38 min against ~27 hosted with a whole node to
     # itself, and with a busy neighbour its race step would have passed its 30-minute timeout.
-    runs-on: inboxxhq-ci-heavy
+    # A repo may name another runner (inputs.build_test_runner); see that input for when and why.
+    runs-on: ${{ inputs.build_test_runner }}
     timeout-minutes: 135 # x3 for the self-hosted runners on the dev Docker host (was 45)
     # The packages this job ran without the integration tag because their tests start containers;
     # the docker-tests job runs them with it. Empty for a deployable and for any repo with none.
@@ -487,14 +503,48 @@ jobs:
       # a repo that passes in one and was never checked by the other.
       - name: Start the throwaway database
         id: postgres
+        if: runner.environment != 'github-hosted'
         uses: coderaxis/ci-workflows/test-postgres@v1
         with:
           database: service_test
 
+      # A GitHub-hosted image has no PostgreSQL 18 + pgvector, and test-postgres never installs at
+      # job time. It does have a Docker daemon, so the database is the container the pool image's
+      # packages were chosen to match (test-postgres/action.yaml): the official image's initdb gives
+      # en_US.utf8 with the libc provider, `english` text search and Etc/UTC; the durability
+      # settings are the ones test-postgres turns off.
+      - name: Start the throwaway database (GitHub-hosted runner)
+        id: postgres-hosted
+        if: runner.environment == 'github-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name service-test-postgres \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=service_test \
+            -p 127.0.0.1::5432 \
+            docker.io/pgvector/pgvector:0.8.7-pg18 \
+            -c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null
+          for _ in $(seq 1 60); do
+            # pg_isready alone answers during the image's init restart; a query on the named
+            # database over TCP is only possible once the final server is up.
+            if docker exec service-test-postgres psql -h 127.0.0.1 -U postgres -d service_test -tAc 'select 1' >/dev/null 2>&1; then
+              port="$(docker port service-test-postgres 5432/tcp | head -1 | awk -F: '{print $NF}')"
+              [[ "${port}" =~ ^[0-9]+$ ]] || { echo "::error::could not read the database port"; exit 1; }
+              echo "port=${port}" >> "${GITHUB_OUTPUT}"
+              docker exec service-test-postgres psql -U postgres -d service_test -tAc \
+                "select version(), current_setting('lc_collate'), current_setting('default_text_search_config'), current_setting('TimeZone'), current_setting('fsync')"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the throwaway database did not come up in 60 s"
+          docker logs service-test-postgres | tail -50
+          exit 1
+
       - name: Point the tests at the throwaway database
         shell: bash
         env:
-          PG_PORT: ${{ steps.postgres.outputs.port }}
+          PG_PORT: ${{ steps.postgres.outputs.port || steps.postgres-hosted.outputs.port }}
         run: |
           set -euo pipefail
           # One name, because all 41 integration test files in the fleet read this one. The tests
