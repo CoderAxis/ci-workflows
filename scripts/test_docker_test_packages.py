@@ -243,7 +243,12 @@ def _needs(job: dict) -> list[str]:
 
 def test_build_test_publishes_the_list_from_its_detection_step() -> None:
     bt = jobs()["build-test"]
-    expect(bt.get("runs-on") == "inboxxhq-ci-heavy", "Build and test stays on the heavy pool")
+    # The pool is a per-repo input (a repo may opt into a GitHub-hosted runner); unset, it is the heavy pool.
+    wf = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    runner = ((wf.get("on") or wf.get(True))["workflow_call"]["inputs"]).get("build_test_runner") or {}
+    expect(bt.get("runs-on") == "${{ inputs.build_test_runner }}",
+           "Build and test runs on the build_test_runner input")
+    expect(runner.get("default") == "inboxxhq-ci-heavy", "Build and test stays on the heavy pool by default")
     expect((bt.get("outputs") or {}).get("docker_packages") == "${{ steps.docker.outputs.packages }}",
            "build-test must publish the detection step's list as docker_packages")
     names = [s.get("name") for s in bt["steps"]]
