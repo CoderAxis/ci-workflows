@@ -532,7 +532,7 @@ jobs:
               [[ "${port}" =~ ^[0-9]+$ ]] || { echo "::error::could not read the database port"; exit 1; }
               echo "port=${port}" >> "${GITHUB_OUTPUT}"
               docker exec service-test-postgres psql -U postgres -d service_test -tAc \
-                "select version(), current_setting('lc_collate'), current_setting('default_text_search_config'), current_setting('TimeZone'), current_setting('fsync')"
+                "select version(), (select datcollate from pg_database where datname = current_database()), current_setting('default_text_search_config'), current_setting('TimeZone'), current_setting('fsync')"
               exit 0
             fi
             sleep 1
