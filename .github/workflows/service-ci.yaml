@@ -645,8 +645,10 @@ jobs:
           # THE RACE DETECTOR (inputs.go_race, on by default) runs on this coverage run itself,
           # not as a second pass: every package below is tested once, under -race. Coverage is
           # already -covermode=atomic, which is what -race requires, so the figures do not move.
+          # GO_RACE is always set by this workflow; it is unset only when the step runs outside
+          # GitHub (scripts/test_docker_test_packages.py), where it reads as off.
           race=()
-          if [[ "${GO_RACE}" == "true" ]]; then race=(-race); fi
+          if [[ "${GO_RACE:-false}" == "true" ]]; then race=(-race); fi
 
           # WHY THE INTEGRATION TAG IS ALWAYS ON.
           #
