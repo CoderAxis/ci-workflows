@@ -238,17 +238,6 @@ controls:
           inboxxhq-infra's own dev GitOps pins and release provenance, which is why it lives here
           rather than in core-docs or in a central `@v1` workflow every other repository also
           calls.
-      ci-workflows:
-        lanes: [cascade-reconcile-schedule.yaml]
-        reason: >-
-          The schedule for cascade-reconcile.yaml, the repair half of the release cascade. The
-          work lives in that reusable workflow; this file only fires it every six hours and on
-          dispatch. It cannot be ci.yaml or release.yaml: those run on this repository's own
-          pushes, and a fleet-wide bump run behind them would fire on every lint fix. It cannot be
-          a `schedule` trigger inside the reusable file either, because the release bot's trust
-          policy admits the reconcile jobs only as `cascade-reconcile.yaml@refs/tags/v1`, the
-          spelling a call through `@v1` produces; a scheduled run of the file itself reports
-          `@refs/heads/main` and would be denied at the token mint.
     policy: >-
       A repository's `.github/workflows` directory MUST contain only `ci.yaml`, `release.yaml`,
       workflows that the repository itself PUBLISHES as reusable (`on.workflow_call`), and thin

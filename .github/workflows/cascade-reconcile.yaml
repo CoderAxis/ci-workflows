@@ -5,11 +5,13 @@ name: Cascade reconcile (reusable)
 # go.mod and .frontend-core-ref actually committed on each default branch - and bumps it again with
 # the same gates. scripts/cascade_reconcile.py says what it repairs and why each case happens.
 #
-# Called on a schedule by cascade-reconcile-schedule.yaml in this repository. It is a reusable
-# workflow, called at @v1, for one reason: the release bot's trust policy admits jobs by
-# job_workflow_ref, and that names the file a job is DEFINED in, at the ref it was called with. A
-# job defined here and called at v1 is "cascade-reconcile.yaml@refs/tags/v1", which is the exact
-# string environments/management/ci-identity lists. Renaming this file revokes that grant.
+# Called on a schedule by a thin caller of the same name in coderaxis/core-docs, the catalog's own
+# repository. Not from here: this repository is public, and the self-hosted runner group the bump
+# jobs need does not admit public repositories (the first dispatch from here failed at start-up).
+# It is a reusable workflow, called at @v1, because the release bot's trust policy admits jobs by
+# job_workflow_ref, which names the file a job is DEFINED in at the ref it was called with: a job
+# defined here and called at v1 is "cascade-reconcile.yaml@refs/tags/v1", the exact string
+# environments/management/ci-identity lists. Renaming this file revokes that grant.
 #
 # Gentle by design: the bump jobs run on the same self-hosted pool as every service's CI, so the
 # matrix is capped (max_parallel) and a run never cancels another. A consumer whose bump fails its
