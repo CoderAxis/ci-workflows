@@ -234,6 +234,11 @@ def main() -> int:
     (args.out / "bumps.json").write_text(json.dumps(result["bumps"], separators=(",", ":")))
     (args.out / "frontends.json").write_text(json.dumps(result["frontends"], separators=(",", ":")))
     (args.out / "summary.md").write_text(summary(result))
+    # Annotations, not only the summary: the reconcile repairs the lag, but until the graph is
+    # regenerated every release keeps missing these consumers and only this run catches them.
+    for d in result["drift"]:
+        print(f"::warning::artifact graph drift: {d}; regenerate it with core-docs "
+              "scripts/build_artifact_graph.py")
     print(f"{len(result['bumps'])} consumers behind, {len(result['frontends'])} frontends behind, "
           f"{len(result['drift'])} graph drift, {len(result['skipped'])} skipped")
     return 0
