@@ -45,6 +45,16 @@ inputs:
     description: "JSON array of modules the target must pin directly, for the pin policy gate."
     required: false
     default: "[]"
+  companions:
+    description: >-
+      Further `module@version` pins moved in the SAME change, whitespace-separated. A core and its
+      -postgres adapter often only build together (the adapter implements the core's ports), so
+      moving one alone fails the gates below for a reason that is not a defect. The cascade
+      reconciler passes every lagging platform module of a consumer here; the release fan-out
+      leaves it empty. The guard, branch and title still name `module`; every companion is
+      gated, listed in the PR body and counted by the tier rule exactly like it.
+    required: false
+    default: ""
 
 outputs:
   skipped:
@@ -64,18 +74,33 @@ runs:
       env:
         MODULE: ${{ inputs.module }}
         VERSION: ${{ inputs.version }}
+        COMPANIONS: ${{ inputs.companions }}
       run: |
         set -euo pipefail
+        pin_of() {
+          awk -v m="$1" '
+            $1 == "require" && $2 == "(" { inb = 1; next }
+            inb && $1 == ")" { inb = 0; next }
+            inb && $1 == m { print $2; exit }
+            $1 == "require" && $2 == m { print $3; exit }
+          ' go.mod || true
+        }
         # Bumps can arrive out of order, and a release can be re-run deliberately. Without this,
         # a late bump for an older tag would open a PR that DOWNGRADES the pin.
-        current="$(awk -v m="${MODULE}" '
-          $1 == "require" && $2 == "(" { inb = 1; next }
-          inb && $1 == ")" { inb = 0; next }
-          inb && $1 == m { print $2; exit }
-          $1 == "require" && $2 == m { print $3; exit }
-        ' go.mod || true)"
+        current="$(pin_of "${MODULE}")"
         echo "current=${current}" >> "${GITHUB_OUTPUT}"
         echo "skip=false" >> "${GITHUB_OUTPUT}"
+        # "module from to" per line, primary first: the tier rule and the PR body read every move,
+        # not only the one the branch is named after.
+        {
+          echo "moves<<MOVES_EOF"
+          echo "${MODULE} ${current:-none} ${VERSION}"
+          for c in ${COMPANIONS}; do
+            cpin="$(pin_of "${c%@*}")"
+            echo "${c%@*} ${cpin:-none} ${c##*@}"
+          done
+          echo "MOVES_EOF"
+        } >> "${GITHUB_OUTPUT}"
 
         if [[ -z "${current}" ]]; then
           echo "::notice::${MODULE} is not yet a direct requirement; proceeding to add it"
@@ -128,9 +153,13 @@ runs:
         GONOSUMDB: github.com/coderaxis/*
         MODULE: ${{ inputs.module }}
         VERSION: ${{ inputs.version }}
+        COMPANIONS: ${{ inputs.companions }}
       run: |
         set -euo pipefail
-        GOWORK=off go get "${MODULE}@${VERSION}"
+        # One `go get` for every move, so minimal version selection resolves them together: a
+        # core and its adapter moved in two steps can fail the first for a reason the second fixes.
+        # shellcheck disable=SC2086 # COMPANIONS is a whitespace-separated list by contract
+        GOWORK=off go get "${MODULE}@${VERSION}" ${COMPANIONS}
         GOWORK=off go mod tidy
         GOWORK=off go build ./...
 
@@ -274,18 +303,24 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
         TARGET: ${{ inputs.target-repository }}
         SHORT: ${{ inputs.short }}
+        COMPANIONS: ${{ inputs.companions }}
         NEW_BRANCH: chore/bump-${{ inputs.short }}-${{ inputs.version }}
       run: |
         set -euo pipefail
         # Leaving them open produces a stack of PRs for the same module at different versions,
-        # any of which could be merged out of order and downgrade the pin.
-        gh pr list --repo "${TARGET}" --state open --json number,headRefName \
-          --jq ".[] | select(.headRefName | startswith(\"chore/bump-${SHORT}-v\")) | select(.headRefName != \"${NEW_BRANCH}\") | .number" \
-        | while read -r pr; do
-            echo "closing superseded #${pr}"
-            gh pr close "${pr}" --repo "${TARGET}" --delete-branch \
-              --comment "Superseded by ${NEW_BRANCH}." || true
-          done
+        # any of which could be merged out of order and downgrade the pin. A companion's own older
+        # bump PRs are superseded too: this change moves it to its newest release.
+        shorts="${SHORT}"
+        for c in ${COMPANIONS}; do m="${c%@*}"; shorts="${shorts} ${m##*/}"; done
+        for s in ${shorts}; do
+          gh pr list --repo "${TARGET}" --state open --json number,headRefName \
+            --jq ".[] | select(.headRefName | startswith(\"chore/bump-${s}-v\")) | select(.headRefName != \"${NEW_BRANCH}\") | .number" \
+          | while read -r pr; do
+              echo "closing superseded #${pr}"
+              gh pr close "${pr}" --repo "${TARGET}" --delete-branch \
+                --comment "Superseded by ${NEW_BRANCH}." || true
+            done
+        done
 
     - name: Decide which paths the bump may commit
       id: paths
@@ -337,40 +372,61 @@ runs:
           | Service | `${{ inputs.service }}` |
           | Repo kind | `${{ inputs.repo-kind }}` |
 
-          The pin builds, the unit and contract suites pass against it, and the platform pin
-          policy holds. Patch and minor bumps auto-merge once required checks are green; a major
-          bump is labelled for review instead.
+          Every module moved by this change (`module from to`):
+
+          ```
+          ${{ steps.guard.outputs.moves }}
+          ```
+
+          The pins build, the unit and contract suites pass against them, and the platform pin
+          policy holds. Patch and minor bumps, 0.x minors included, auto-merge once required
+          checks are green; only a move across a major version (v0 to v1 and up) is labelled for
+          review instead.
 
     # Auto-merge is what makes this automation rather than a queue of PRs nobody notices. It is
     # `--auto`, so GitHub still waits for every required check: the merge happens because the
     # gates passed, not instead of them.
     #
-    # A major bump is withheld deliberately: it means the module removed or changed API, so a
-    # green build only proves this consumer still compiles, not that the behaviour is intended.
-    # Under semver, 0.x MINOR is also breaking, so it counts as major here.
+    # A 0.x MINOR auto-merges like any minor. It used to count as major and wait for a person,
+    # because under SemVer §4 a 0.x minor MAY break. But module-release maps BOTH `feat:` and a
+    # breaking change on a 0.x module to the minor, and nearly every platform module is 0.x, so
+    # that rule withheld every feature release from every consumer: by 2026-11-18, 86 bump PRs
+    # sat open (the oldest from 2026-08-09) and all 44 deployables lagged at least one core, e.g.
+    # 33 still on platform-contracts-go v0.83.0 against v0.146.0. The version number cannot say
+    # whether THIS consumer is affected; the gates above can, and this PR exists only because
+    # they passed: the consumer compiles against the new pins, its unit and contract suites pass,
+    # and the pin policy holds. A breaking change that touches this consumer fails them, opens no
+    # PR and turns the release run red, which is the loud failure a person must act on. One that
+    # does not touch it lands on the first environment, and promotion still gates the rest.
+    #
+    # Withheld for review: a move across a MAJOR version (v0 to v1, or later majors). That is a
+    # deliberate stability commitment by the module's owner, dispatched by hand, never a side
+    # effect of a commit subject (see module-release's version rule).
     - name: Auto-merge when green, or flag a major bump for review
       if: steps.guard.outputs.skip != 'true' && steps.cpr.outputs.pull-request-number != ''
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
         TARGET: ${{ inputs.target-repository }}
-        CURRENT: ${{ steps.guard.outputs.current }}
-        VERSION: ${{ inputs.version }}
+        MOVES: ${{ steps.guard.outputs.moves }}
         PR: ${{ steps.cpr.outputs.pull-request-number }}
       run: |
         set -euo pipefail
         # Quoted: `patch` and `major` are also real commands (SC2209).
         tier="patch"
-        cv="${CURRENT#v}"; rv="${VERSION#v}"
-        if [[ "${cv}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${rv}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        while read -r mod cur new; do
+          [[ -n "${mod}" ]] || continue
+          cv="${cur#v}"; rv="${new#v}"
+          [[ "${cv}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${rv}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
           cmaj="${cv%%.*}"; rmaj="${rv%%.*}"
           cmin="$(cut -d. -f2 <<<"${cv}")"; rmin="$(cut -d. -f2 <<<"${rv}")"
-          if [[ "${rmaj}" -gt "${cmaj}" ]]; then tier="major"
-          elif [[ "${rmaj}" == "0" && "${cmaj}" == "0" && "${rmin}" -gt "${cmin}" ]]; then tier="major"
-          elif [[ "${rmin}" -gt "${cmin}" ]]; then tier="minor"
+          if [[ "${rmaj}" -gt "${cmaj}" ]]; then
+            tier="major"; echo "::notice::${mod} ${cur} -> ${new} crosses a major version"
+          elif [[ "${tier}" == "patch" && "${rmin}" -gt "${cmin}" ]]; then
+            tier="minor"
           fi
-        fi
-        echo "::notice::bump tier=${tier} (${CURRENT:-none} -> ${VERSION})"
+        done <<<"${MOVES}"
+        echo "::notice::bump tier=${tier}"
 
         if [[ "${tier}" == "major" ]]; then
           # The labels are the only durable signal that this PR is waiting on a person, so they
@@ -381,7 +437,7 @@ runs:
           # green. The v0.14.0 fan-out left 48 PRs withheld for review and not one of them said
           # so - which is the same silent skew this pipeline exists to prevent, one step later.
           for label in \
-            "major-bump:b60205:Crosses a major version boundary; 0.x minor counts" \
+            "major-bump:b60205:Crosses a major version boundary (v0 to v1 and up)" \
             "needs-manual-review:d93f0b:Auto-merge withheld deliberately; a person has to decide"; do
             gh label create "${label%%:*}" --repo "${TARGET}" \
               --color "$(cut -d: -f2 <<<"${label}")" \

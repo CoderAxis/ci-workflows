@@ -1,0 +1,39 @@
+name: Cascade reconcile
+
+# Every six hours, bring every consumer that is behind the newest platform release up to date.
+# The work is in cascade-reconcile.yaml; this only schedules it. Called at @v1 (not by a local
+# path) because the release bot's trust policy admits that workflow at refs/tags/v1.
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Space-separated graph node names (blank = every consumer)"
+        required: false
+        type: string
+        default: ""
+      max_parallel:
+        description: "Bump jobs at once"
+        required: false
+        type: number
+        default: 2
+      dry_run:
+        description: "Plan and report only"
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  reconcile:
+    permissions:
+      contents: read
+      id-token: write
+    uses: coderaxis/ci-workflows/.github/workflows/cascade-reconcile.yaml@v1
+    with:
+      only: ${{ inputs.only || '' }}
+      max_parallel: ${{ inputs.max_parallel || 2 }}
+      dry_run: ${{ inputs.dry_run || false }}
