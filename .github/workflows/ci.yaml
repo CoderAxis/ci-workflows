@@ -910,6 +910,9 @@ jobs:
       - name: DAG derivation and pin policy mutation tests
         run: python3 scripts/test_release_cascade.py
 
+      - name: Cascade reconcile planner tests
+        run: python3 scripts/test_cascade_reconcile.py
+
       # The composite action is what the workflows actually call, so an output added to the script
       # but not surfaced by the action resolves to an empty string at runtime - and an empty
       # consumers list is a fan-out that notifies nobody, silently.
