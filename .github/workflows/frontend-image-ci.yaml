@@ -121,6 +121,13 @@ jobs:
       - name: Base images must name a registry
         run: python3 .coderaxis-ci/scripts/check-base-image-registry.py --root .
 
+      # Advisory: base images pinned by @sha256 digest, not by tag only (supply-chain Target).
+      # Warn mode exits 0 and continue-on-error keeps a checker fault from failing the build;
+      # see check-base-image-digest.py for the baseline and the ratchet switch.
+      - name: Base images pinned by digest (advisory)
+        continue-on-error: true
+        run: python3 .coderaxis-ci/scripts/check-base-image-digest.py --mode warn --root .
+
       # Needed for the Dockerfile's secret mount (RUN --mount=type=secret,id=gh_token),
       # which is how the private dependencies are cloned without baking a token
       # into a layer.

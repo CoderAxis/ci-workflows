@@ -752,6 +752,12 @@ jobs:
       - name: DS-0018 runtime package exceptions hold in both directions
         run: python3 scripts/test_dockerfile_package_exceptions.py
 
+      # The digest-pin check (advisory in the reusable workflows) in every mode against its
+      # fixtures, DS-0003 accepting the digest it asks for, and the warn-mode wiring that
+      # keeps it from failing the fleet.
+      - name: Base-image digest check and DS-0003 digest tolerance
+        run: python3 scripts/test_base_image_digest.py
+
       # Capability gates must read INSTRUCTIONS, not the file as text. DS-0012 used to grep
       # df.all_text() for `cmd/seed`, and all_text() includes comments — so a Dockerfile that
       # merely mentioned the path in prose certified that the image ships a seed binary.
