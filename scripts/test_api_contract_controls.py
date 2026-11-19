@@ -928,6 +928,101 @@ def test_security_response_headers():
             expect(f.count == 0, f"security_response_headers: {opt} IS an explicit CSP opt-in and "
                                  f"MUST count as setting the header, got {f.count}: {f.details}")
 
+    # The backend-for-frontend inbound chain, platform/bff/inbound.Use, registers
+    # ginmiddleware.SecurityHeaders itself, so a BFF on it carries no such call of its own. It
+    # counts only as an unaliased import of that package AND an inbound.Use( call in code, in one
+    # runtime file; each negative case breaks exactly one of those. The same table is in the ihq
+    # CLI (internal/openapi/rfc0038_test.go), because check-detector-parity.py compares the two.
+    inbound_import = '"github.com/coderaxis/platform-shared-go/platform/bff/inbound"'
+    html_page = ('package handler\n\nfunc Page(c *Context) {\n'
+                 '\tc.Data(200, "text/html; charset=utf-8", body)\n}\n')
+    inbound_cases = [
+        ("inbound.Use with the shared package imported counts as setting all four",
+         {"internal/server/server.go":
+              'package server\n\nimport (\n\t"github.com/gin-gonic/gin"\n\t' + inbound_import + '\n)\n\n'
+              'func New(router *gin.Engine) error {\n'
+              '\treturn inbound.Use(router, inbound.Config{ServiceName: "platform-bff"})\n}\n'},
+         0),
+        ("a single-line import of the shared package counts the same",
+         {"internal/server/server.go":
+              'package server\n\nimport ' + inbound_import + '\n\n'
+              'func New(router Router) error { return inbound.Use(router, '
+              'inbound.Config{ServiceName: "org-bff"}) }\n'},
+         0),
+        ("inbound.Use opted into CSP through Config.SecurityHeaders is clean on an HTML surface",
+         {"internal/server/server.go":
+              'package server\n\nimport (\n'
+              '\t"github.com/coderaxis/platform-shared-go/platform/ginmiddleware"\n'
+              '\t' + inbound_import + '\n)\n\n'
+              'func New(router Router) error {\n'
+              '\treturn inbound.Use(router, inbound.Config{\n'
+              '\t\tServiceName:     "platform-bff",\n'
+              '\t\tSecurityHeaders: []ginmiddleware.SecurityHeadersOption{ginmiddleware.WithHTML()},\n'
+              '\t})\n}\n',
+          "internal/handler/page.go": html_page},
+         0),
+        ("bare inbound.Use does not imply Content-Security-Policy on an HTML surface",
+         {"internal/server/server.go":
+              'package server\n\nimport ' + inbound_import + '\n\n'
+              'func New(router Router) error { return inbound.Use(router, '
+              'inbound.Config{ServiceName: "platform-bff"}) }\n',
+          "internal/handler/page.go": html_page},
+         1),
+        ("inbound.Use from a package that is not the shared one does not count",
+         {"internal/server/server.go":
+              'package server\n\nimport "example.com/bff/internal/inbound"\n\n'
+              'func New(router Router) error { return inbound.Use(router) }\n'},
+         4),
+        ("importing the shared package but registering an unrelated Use does not count",
+         {"internal/server/server.go":
+              'package server\n\nimport ' + inbound_import + '\n\n'
+              'func New(router Router) {\n'
+              '\trouter.Use(inbound.RateLimit(limiter, policy))\n'
+              '\trouter.Use(cors.New())\n}\n'},
+         4),
+        ("an aliased import is not credited",
+         {"internal/server/server.go":
+              'package server\n\nimport bffinbound ' + inbound_import + '\n\n'
+              'func New(router Router) error { return bffinbound.Use(router, '
+              'bffinbound.Config{ServiceName: "x"}) }\n'},
+         4),
+        ("inbound.Use named only in a comment does not count",
+         {"internal/server/server.go":
+              'package server\n\nimport ' + inbound_import + '\n\n'
+              '// TODO: replace this chain with inbound.Use(router, cfg).\n'
+              'func New(router Router) { router.Use(inbound.RateLimit(limiter, policy)) }\n'},
+         4),
+        ("inbound.Use named only in a string literal does not count",
+         {"internal/server/server.go":
+              'package server\n\nimport ' + inbound_import + '\n\n'
+              'const hint = "call inbound.Use(router, cfg) once"\n\n'
+              'func New(router Router) { router.Use(inbound.RateLimit(limiter, policy)) }\n'},
+         4),
+        ("a commented-out import does not count",
+         {"internal/server/server.go":
+              'package server\n\nimport (\n\t// ' + inbound_import + '\n'
+              '\t"example.com/bff/internal/inbound"\n)\n\n'
+              'func New(router Router) error { return inbound.Use(router) }\n'},
+         4),
+        ("the import and the call in different files do not count",
+         {"internal/server/limits.go":
+              'package server\n\nimport ' + inbound_import + '\n\nvar limit = inbound.RateLimit\n',
+          "internal/server/server.go":
+              'package server\n\nfunc New(router Router) error { return inbound.Use(router) }\n'},
+         4),
+        ("a test file is not runtime source",
+         {"internal/server/server_test.go":
+              'package server\n\nimport ' + inbound_import + '\n\n'
+              'func newTestRouter(router Router) error { return inbound.Use(router, '
+              'inbound.Config{ServiceName: "t"}) }\n'},
+         4),
+    ]
+    for name, files, want in inbound_cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            f = m.security_response_headers(make_repo(tmp, go_files=files))
+            expect(f.count == want, f"security_response_headers: {name}: got {f.count} findings, "
+                                    f"want {want}: {f.details}")
+
 
 # ── End-to-end mutation test: the real CLI, not just the detector functions ─────────────────
 #
