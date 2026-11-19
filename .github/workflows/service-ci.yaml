@@ -813,8 +813,11 @@ jobs:
     name: CodeQL
     needs: [resolve, docs-only, pin-only]
     if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go' && needs.pin-only.outputs.pin_only != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # On the self-hosted pool (the CI host) since 2026-11-19: CI runs on our own server, not on
+    # GitHub-hosted minutes. CodeQL needs no Docker daemon; the slots keep /opt/hostedtoolcache
+    # per organization, so the CodeQL bundle downloads once per host, not once per run.
+    runs-on: inboxxhq-ci
+    timeout-minutes: 90 # x3 for the self-hosted runners (was 30 on GitHub-hosted)
     permissions:
       id-token: write
       contents: read
