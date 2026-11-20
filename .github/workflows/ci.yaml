@@ -306,6 +306,12 @@ jobs:
       - name: Dependency-pin classification and its wiring
         run: python3 scripts/test_pin_only_diff.py
 
+      # `CI passed` is the check every calling repository requires on main, so its needs list is
+      # load-bearing: a gate the image build waits on but this job does not would let a PR merge
+      # green and then build no image. The verdict half runs the job's own script.
+      - name: The required CI passed gate and its wiring
+        run: python3 scripts/test_ci_passed_gate.py
+
   # ── container tests (scripts/docker-test-packages.sh) ───────────────────────────────────────
   # Build and test runs on pools without Docker and sends the packages whose tests start
   # containers to the hosted docker-tests job. Both directions of a mistake are expensive: a
