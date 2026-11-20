@@ -58,8 +58,8 @@ inputs:
 
 outputs:
   skipped:
-    description: "true when the pin was already at or ahead of this version."
-    value: ${{ steps.guard.outputs.skip }}
+    description: "true when the pin was already at or ahead of this version, or an open bump PR already moves a module of this change past it."
+    value: ${{ steps.guard.outputs.skip == 'true' || steps.supersede.outputs.skip == 'true' }}
   pull-request-number:
     description: "Number of the pull request opened, empty when nothing changed."
     value: ${{ steps.cpr.outputs.pull-request-number }}
@@ -75,6 +75,11 @@ runs:
         MODULE: ${{ inputs.module }}
         VERSION: ${{ inputs.version }}
         COMPANIONS: ${{ inputs.companions }}
+        SHORT: ${{ inputs.short }}
+        GH_TOKEN: ${{ inputs.token }}
+        TARGET: ${{ inputs.target-repository }}
+        NEW_BRANCH: chore/bump-${{ inputs.short }}-${{ inputs.version }}
+        SUPERSEDE: ${{ github.action_path }}/supersede.py
       run: |
         set -euo pipefail
         pin_of() {
@@ -104,20 +109,37 @@ runs:
 
         if [[ -z "${current}" ]]; then
           echo "::notice::${MODULE} is not yet a direct requirement; proceeding to add it"
-          exit 0
-        fi
-        if [[ "${current}" == "${VERSION}" ]]; then
+        elif [[ "${current}" == "${VERSION}" ]]; then
           echo "skip=true" >> "${GITHUB_OUTPUT}"
           echo "::notice::already at ${VERSION}; nothing to do"
           exit 0
-        fi
-        semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
-        if [[ "${current}" =~ ${semver} ]]; then
-          newest="$(printf '%s\n%s\n' "${current#v}" "${VERSION#v}" | sort -V | tail -1)"
-          if [[ "${newest}" == "${current#v}" ]]; then
-            echo "skip=true" >> "${GITHUB_OUTPUT}"
-            echo "::notice::${current} is already newer than ${VERSION}; refusing to downgrade"
+        else
+          semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ "${current}" =~ ${semver} ]]; then
+            newest="$(printf '%s\n%s\n' "${current#v}" "${VERSION#v}" | sort -V | tail -1)"
+            if [[ "${newest}" == "${current#v}" ]]; then
+              echo "skip=true" >> "${GITHUB_OUTPUT}"
+              echo "::notice::${current} is already newer than ${VERSION}; refusing to downgrade"
+              exit 0
+            fi
           fi
+        fi
+
+        # The pin on main is not the only thing this bump can be behind: an OPEN bump PR may
+        # already move a module of this change further (a release fan-out and the cascade
+        # reconciler run at once, and the reconciler plans with the versions that were latest
+        # when it started). Opening this one anyway races it: whichever merges first leaves the
+        # other in conflict, or, before supersede.py, closed the newer one outright. The newer PR
+        # carries the module past this version, so this bump has nothing to add.
+        moves=(--move "${SHORT}=${VERSION}")
+        for c in ${COMPANIONS}; do m="${c%@*}"; moves+=(--move "${m##*/}=${c##*@}"); done
+        newer="$(gh pr list --repo "${TARGET}" --state open --limit 500 --json number,headRefName \
+          | python3 "${SUPERSEDE}" --new-branch "${NEW_BRANCH}" "${moves[@]}" | grep '^newer ' || true)"
+        if [[ -n "${newer}" ]]; then
+          echo "skip=true" >> "${GITHUB_OUTPUT}"
+          while read -r _ pr short v; do
+            echo "::notice::open #${pr} already moves ${short} to ${v}, past this bump; skipping"
+          done <<<"${newer}"
         fi
 
     - uses: actions/setup-go@v5
@@ -295,6 +317,7 @@ runs:
       run: rm -rf "${{ github.workspace }}/.bump-central"
 
     - name: Close superseded bump PRs for this module
+      id: supersede
       if: steps.guard.outputs.skip != 'true'
       shell: bash
       env:
@@ -303,28 +326,45 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
         TARGET: ${{ inputs.target-repository }}
         SHORT: ${{ inputs.short }}
+        VERSION: ${{ inputs.version }}
         COMPANIONS: ${{ inputs.companions }}
         NEW_BRANCH: chore/bump-${{ inputs.short }}-${{ inputs.version }}
+        SUPERSEDE: ${{ github.action_path }}/supersede.py
       run: |
         set -euo pipefail
         # Leaving them open produces a stack of PRs for the same module at different versions,
-        # any of which could be merged out of order and downgrade the pin. A companion's own older
-        # bump PRs are superseded too: this change moves it to its newest release.
-        shorts="${SHORT}"
-        for c in ${COMPANIONS}; do m="${c%@*}"; shorts="${shorts} ${m##*/}"; done
-        for s in ${shorts}; do
-          gh pr list --repo "${TARGET}" --state open --json number,headRefName \
-            --jq ".[] | select(.headRefName | startswith(\"chore/bump-${s}-v\")) | select(.headRefName != \"${NEW_BRANCH}\") | .number" \
-          | while read -r pr; do
-              echo "closing superseded #${pr}"
+        # any of which could be merged out of order and downgrade the pin. A companion's own
+        # bump PRs are superseded too: this change moves it to the release it names.
+        #
+        # Only PRs at the SAME or an OLDER version are closed (supersede.py). One at a newer
+        # version supersedes THIS bump: the guard skips that case up front, and it is asked again
+        # here because the gates above take minutes and a newer release's bump can open meanwhile.
+        echo "skip=false" >> "${GITHUB_OUTPUT}"
+        moves=(--move "${SHORT}=${VERSION}")
+        for c in ${COMPANIONS}; do m="${c%@*}"; moves+=(--move "${m##*/}=${c##*@}"); done
+        found="$(gh pr list --repo "${TARGET}" --state open --limit 500 --json number,headRefName \
+          | python3 "${SUPERSEDE}" --new-branch "${NEW_BRANCH}" "${moves[@]}")"
+        if grep -q '^newer ' <<<"${found}"; then
+          echo "skip=true" >> "${GITHUB_OUTPUT}"
+          grep '^newer ' <<<"${found}" | while read -r _ pr short v; do
+            echo "::notice::open #${pr} moves ${short} to ${v} while this bump ran; opening nothing"
+          done
+          exit 0
+        fi
+        while read -r kind pr rest; do
+          case "${kind}" in
+            close)
+              echo "closing superseded #${pr} (${rest})"
               gh pr close "${pr}" --repo "${TARGET}" --delete-branch \
-                --comment "Superseded by ${NEW_BRANCH}." || true
-            done
-        done
+                --comment "Superseded by ${NEW_BRANCH}." || true ;;
+            unknown)
+              echo "::notice::left #${pr} open: ${rest} names no plain vX.Y.Z version" ;;
+          esac
+        done <<<"${found}"
 
     - name: Decide which paths the bump may commit
       id: paths
-      if: steps.guard.outputs.skip != 'true'
+      if: steps.guard.outputs.skip != 'true' && steps.supersede.outputs.skip != 'true'
       shell: bash
       working-directory: ${{ inputs.target-path }}
       run: |
@@ -344,7 +384,7 @@ runs:
 
     - name: Open the bump PR
       id: cpr
-      if: steps.guard.outputs.skip != 'true'
+      if: steps.guard.outputs.skip != 'true' && steps.supersede.outputs.skip != 'true'
       uses: peter-evans/create-pull-request@v7
       with:
         token: ${{ inputs.token }}
@@ -403,7 +443,7 @@ runs:
     # deliberate stability commitment by the module's owner, dispatched by hand, never a side
     # effect of a commit subject (see module-release's version rule).
     - name: Auto-merge when green, or flag a major bump for review
-      if: steps.guard.outputs.skip != 'true' && steps.cpr.outputs.pull-request-number != ''
+      if: steps.guard.outputs.skip != 'true' && steps.supersede.outputs.skip != 'true' && steps.cpr.outputs.pull-request-number != ''
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
