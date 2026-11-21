@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for bump-module-pin's supersede rule: bump-module-pin/supersede.py, and the two steps of
-bump-module-pin/action.yaml that act on it, run as the action runs them (bash, a fake `gh`).
+"""Tests for bump-module-pin: the supersede rule (bump-module-pin/supersede.py and the guard and
+supersede steps that act on it) and the auto-merge step, run as the action runs them (bash, a
+fake `gh`).
 
 The steps are the layer that closes PRs and opens nothing, so they are executed, not only the
 script: a script that decides right is no use if a step ignores its `newer` line.
@@ -72,7 +73,8 @@ def step(step_id: str) -> dict:
 
 def run_step(step_id: str, *, pin: str, version: str, open_prs: list[dict],
              companions: str = "", short: str = "ai-core",
-             module: str = "github.com/coderaxis/ai-core") -> tuple[str, list[str], str]:
+             module: str = "github.com/coderaxis/ai-core", gh_body: str | None = None,
+             extra: dict | None = None) -> tuple[str, list[str], str]:
     """Runs one action step's `run:` under bash; returns (last skip value, gh calls, stdout)."""
     s = step(step_id)
     env_keys = set(s.get("env", {}))
@@ -82,19 +84,21 @@ def run_step(step_id: str, *, pin: str, version: str, open_prs: list[dict],
         (dp / "prs.json").write_text(json.dumps(open_prs))
         (dp / "bin").mkdir()
         gh = dp / "bin" / "gh"
-        gh.write_text('#!/usr/bin/env bash\necho "$*" >> "$GH_LOG"\n'
-                      'if [[ "$1 $2" == "pr list" ]]; then cat "$GH_PRS"; fi\n')
+        gh.write_text('#!/usr/bin/env bash\necho "$*" >> "$GH_LOG"\n' + (gh_body or
+                      'if [[ "$1 $2" == "pr list" ]]; then cat "$GH_PRS"; fi\n'))
         gh.chmod(0o755)
         provided = {
             "MODULE": module, "VERSION": version, "COMPANIONS": companions, "SHORT": short,
             "GH_TOKEN": "x", "TARGET": "acme/consumer",
             "NEW_BRANCH": f"chore/bump-{short}-{version}", "SUPERSEDE": str(SUPERSEDE),
+            **(extra or {}),
         }
         missing = {k for k in env_keys if k not in provided}
         expect(not missing, f"{step_id}: the test provides every env the step declares {missing or ''}")
         env = {k: v for k, v in provided.items() if k in env_keys}
         env.update(PATH=f"{dp / 'bin'}:{os.environ['PATH']}", GITHUB_OUTPUT=str(dp / "out"),
-                   GH_LOG=str(dp / "gh.log"), GH_PRS=str(dp / "prs.json"), HOME=d)
+                   GH_LOG=str(dp / "gh.log"), GH_PRS=str(dp / "prs.json"), HOME=d,
+                   GITHUB_STEP_SUMMARY=str(dp / "summary.md"))
         (dp / "out").touch()
         r = subprocess.run(["bash", "-e", "-c", s["run"]], cwd=d, env=env, text=True,
                            capture_output=True)
@@ -102,7 +106,8 @@ def run_step(step_id: str, *, pin: str, version: str, open_prs: list[dict],
         skips = [ln.split("=", 1)[1] for ln in (dp / "out").read_text().splitlines()
                  if ln.startswith("skip=")]
         calls = (dp / "gh.log").read_text().splitlines() if (dp / "gh.log").exists() else []
-        return (skips[-1] if skips else ""), calls, r.stdout
+        summary = (dp / "summary.md").read_text() if (dp / "summary.md").exists() else ""
+        return (skips[-1] if skips else ""), calls, r.stdout + "\nSUMMARY:" + summary
 
 
 print("action.yaml guard step")
@@ -147,6 +152,31 @@ expect("steps.supersede.outputs.skip != 'true'" in am.get("if", ""), "auto-merge
 outv = yaml.safe_load(ACTION.read_text())["outputs"]["skipped"]["value"]
 expect("steps.supersede.outputs.skip" in outv and "steps.guard.outputs.skip" in outv,
        "the skipped output reports either skip")
+
+print("action.yaml auto-merge step")
+AM_ID = next(s.get("id") for s in yaml.safe_load(ACTION.read_text())["runs"]["steps"]
+             if s.get("name", "").startswith("Auto-merge"))
+AM_ENV = {"PR": "42", "MOVES": "github.com/coderaxis/ai-core v0.70.1 v0.70.2"}
+# GitHub's answer when the repository setting is off (enablePullRequestAutoMerge).
+OFF = ('if [[ "$1 $2" == "pr merge" ]]; then echo "GraphQL: Auto merge is not allowed for this '
+       'repository (enablePullRequestAutoMerge)" >&2; exit 1; fi\n'
+       'if [[ "$1" == "api" ]]; then echo false; fi\n')
+_, calls, out = run_step(AM_ID, pin="v0.70.1", version="v0.70.2", open_prs=[], gh_body=OFF, extra=AM_ENV)
+warn = [ln for ln in out.splitlines() if ln.startswith("::warning")]
+expect(any('"Allow auto-merge" OFF' in w and "allow_auto_merge=true" in w for w in warn),
+       f"setting off: a warning names the setting and the fix: {warn}")
+expect('"Allow auto-merge" OFF' in out.split("SUMMARY:", 1)[1], "setting off: the run summary says so too")
+_, calls, out = run_step(AM_ID, pin="v0.70.1", version="v0.70.2", open_prs=[], extra=AM_ENV,
+                         gh_body='if [[ "$1 $2" == "pr merge" ]]; then exit 0; fi\n')
+expect(not any(ln.startswith("::warning") for ln in out.splitlines()) and
+       any(c.startswith("pr merge 42") and "--auto" in c for c in calls),
+       "auto-merge enabled: no warning")
+_, calls, out = run_step(AM_ID, pin="v0.70.1", version="v0.70.2", open_prs=[], extra=AM_ENV,
+                         gh_body='if [[ "$1 $2" == "pr merge" ]]; then echo "HTTP 502" >&2; exit 1; fi\n'
+                                 'if [[ "$1" == "api" ]]; then echo true; fi\n')
+warn = [ln for ln in out.splitlines() if ln.startswith("::warning")]
+expect(any("HTTP 502" in w and "allow_auto_merge=true)" in w for w in warn),
+       f"another failure: the warning carries GitHub's error, not the setting: {warn}")
 
 print(f"\n{'FAILED' if FAILS else 'passed'}: {FAILS} failure(s)")
 sys.exit(1 if FAILS else 0)
