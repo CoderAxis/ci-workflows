@@ -37,3 +37,6 @@ CREATE TABLE broken_windows (
 -- schema:allow reason=free-form adr=ADR-0062
 ALTER TABLE broken_windows ADD COLUMN operator_note TEXT;
 ALTER TABLE broken_windows ADD COLUMN audit_kind TEXT;
+
+-- The unique index 000005 rebuilds; on a table this migration creates, so no finding.
+CREATE UNIQUE INDEX uq_broken_windows_tier ON broken_windows (id, tier);

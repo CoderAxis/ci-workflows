@@ -19,6 +19,15 @@
 # These are that run, not an estimate; re-running it is how a reviewer checks this
 # file has not gone stale.
 #
+# SCHEMA-0007 measured 2026-11-05, report-only, in --mode baseline over 35
+# *-core-postgres schemas (239 migrations) and in diff mode over the three open pull
+# requests adding migrations: 47 findings, every one read, every one a change an older
+# build's own statements can trip on, 0 false. Each class it reads (a unique index
+# rebuilt on other columns, a NOT VALID CHECK over an existing column, a new unique
+# index, DROP DEFAULT, FORCE ROW LEVEL SECURITY, REVOKE, a function back with another
+# signature) was shown on PostgreSQL 18: the older statement passes before the migration
+# and fails after it. Every other control's count is unchanged on all 35.
+#
 # What this catalog is, and is not. It is the single source of WHICH DDL invariants
 # are enforced and WHICH reasons are sanctioned grounds for an exception. It does not
 # describe detection: each control's `detector` key binds it to an implementation in
@@ -98,6 +107,24 @@ destructive_forms:
   - name: add_column_not_null_without_default
     kind: write-break
     control: SCHEMA-0001
+  # The contract forms SCHEMA-0007 adds: each removes or narrows something a build
+  # of the release before may still use. A DROP is exempt when the same migration
+  # creates the same name again (the rebuild idiom).
+  - name: drop_type
+    kind: contract-break
+    control: SCHEMA-0007
+  - name: drop_routine
+    kind: contract-break
+    control: SCHEMA-0007
+  - name: rename_value
+    kind: contract-break
+    control: SCHEMA-0007
+  - name: drop_attribute
+    kind: contract-break
+    control: SCHEMA-0007
+  - name: narrow_constraint
+    kind: write-break
+    control: SCHEMA-0007
 
 # ---------------------------------------------------------------------------
 # Enumerated-column shape: the name suffixes that signal a closed value set
@@ -187,6 +214,15 @@ reasons:
       The column name matches an enumerated shape but the value is genuinely open
       text authored by a user or an operator. Stops applying if the application ever
       begins to branch on the value.
+  - token: nothing-refused
+    adr: ADR-0062
+    description: >-
+      A validated constraint added over columns the table already had refuses no row
+      and no write a build of the release before makes, for a reason the parser
+      cannot see. The marker says which. Excuses SCHEMA-0007's narrowed constraints
+      only, never a drop or a rename: those are cleared by a named, published release
+      alone. The cases the parser can see need no marker (NOT VALID, a constraint on a
+      column the migration adds, a widened CHECK).
   - token: scratch-table
     adr: ADR-0062
     description: >-
@@ -423,3 +459,70 @@ controls:
       and what a reader cannot infer from its columns; one sentence is enough.
     detector: table_without_comment
     refs: [ADR-0062, RFC-0027]
+
+  - id: SCHEMA-0007
+    title: A contract migration names the release that stopped using what it removes
+    owner: platform-architecture
+    scope: source
+    status: active
+    severity: critical
+    # warn: report-only. A finding is a ::warning:: and a row in the job summary and
+    # fails nothing, because v1 moves to main on merge and this would otherwise enforce
+    # on every repository at once. A repository is switched on by adding its module to
+    # enforce_in, in a reviewed PR, once its own pull requests have shown zero false
+    # findings. The self-test holds the list empty until then.
+    stage: warn
+    enforce_in: []
+    waivable: true
+    policy: >-
+      A migration that changes what a build of the release before may do is a contract
+      migration: every SCHEMA-0001 form except a dropped CHECK or FOREIGN KEY (they only
+      accept more); DROP TYPE or DOMAIN, ALTER TYPE ... RENAME VALUE or ATTRIBUTE, DROP
+      ATTRIBUTE; DROP FUNCTION or PROCEDURE, unless the same migration creates it again
+      with the same argument types and result; DROP VIEW not re-created; a CHECK,
+      FOREIGN KEY, UNIQUE, PRIMARY KEY or EXCLUDE constraint added to a table that
+      holds rows, NOT VALID or not (NOT VALID leaves existing rows alone and checks
+      every new one); a unique index created on such a table, or rebuilt under its name
+      on another definition (an older build's ON CONFLICT names its columns), or
+      dropped; DROP DEFAULT; ENABLE or FORCE ROW LEVEL SECURITY on such a table; and
+      REVOKE on an object an earlier migration created. Its file MUST carry the
+      `-- expand-contract:` marker and name the earlier release since which no build
+      uses what it removes or writes what it newly refuses, `unused-since: <module>
+      vX.Y.Z`, on the marker's line or a comment line of its own. The release is
+      checked, not read: <module> is this repository's own module, vX.Y.Z one of its
+      tags, an ancestor of the head and not the head, and a descendant (not the same
+      commit) of every commit that created what the contract drops or changes. Not a
+      contract, where the parser can show it refuses nothing a build that predates the
+      migration does: a constraint, index predicate or unique key that such a build
+      meets with this migration's new columns at their defaults or NULL (NULLs do not
+      collide; an identity or sequence default never repeats); a CHECK over a column
+      whose earlier `col IN (...)` CHECK allows only values the new one accepts; a
+      UNIQUE over a set holding the primary key; a CHECK replaced by one that accepts
+      every row the old one did (the same rule; the old rule, or each of its OR-ed
+      terms, among the new one's; the old rule with conditions taken away or with
+      conditions only on new columns; each IN / <@ ARRAY list the same or larger).
+    rationale: >-
+      A build may now be served a schema one migration past its own
+      (platform-shared-go dbmigrate Options.MaxAhead; ai-service AI_SCHEMA_MAX_AHEAD):
+      the state an image rollback across a migration leaves, which before it failed the
+      PreSync hook closed. That is safe for exactly the migrations the build before them
+      does not trip on, and a contract missed is worse than a finding too many once the
+      tolerance exists: the older build's own writes, upserts and calls start failing in
+      production. SCHEMA-0001 asks for a ticket, which says the contract half is tracked,
+      not that the release one migration behind is clear of it. The fleet has shipped
+      each class: ai-core-postgres 000023 dropped a function the build before called on
+      every poll; order-core-postgres 000006 rebuilt the unique index an older ON
+      CONFLICT names; voice-ai-agent-core-postgres 000019's NOT VALID CHECK refuses an
+      older build's turn of a bare newline. A release named in free text would be a claim
+      nothing checks, so it is held to the repository's own tags and history.
+    remediation: >-
+      Ship the release that stops using the object, or stops writing what the change
+      refuses, first; then name it on the marker:
+      `-- expand-contract: <TICKET-123> unused-since: <this module> vX.Y.Z`, a tag
+      already published after the migration that created the object. A narrowed
+      constraint or a unique index that refuses nothing an older build writes, for a
+      reason the parser cannot see, takes `-- schema:allow reason=nothing-refused
+      adr=ADR-0062` above it; that reason never covers a drop or a rename, which only a
+      named, published release clears.
+    detector: contract_names_release
+    refs: [ADR-0062, RFC-0027, standards/infrastructure/schema-migration-standard.md]
