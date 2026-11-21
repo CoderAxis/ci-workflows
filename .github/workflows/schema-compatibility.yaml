@@ -160,6 +160,11 @@ jobs:
       # The control catalog is resolved from the checker's own checkout by default
       # (.coderaxis-ci/controls/schema-lint.yaml), and the checker excludes that
       # checkout from its own scan by computing the path rather than matching a name.
+      #
+      # Every finding is also written to the job summary. A control at stage `warn`
+      # (SCHEMA-0004, and SCHEMA-0007 outside the repositories its `enforce_in` names)
+      # reports there and fails nothing. SCHEMA-0007 checks a contract's named release
+      # against this repository's tags, which the full-history checkout above fetches.
       - name: Schema lint (DDL conventions)
         if: github.event_name == 'pull_request'
         shell: bash
