@@ -929,8 +929,8 @@ jobs:
       # an open one already moves a module further (2026-11-20: a reconcile planned at an older
       # tag closed the newer bump and left the next one in conflict). The guard and supersede
       # steps are run as the action runs them, against a fake gh.
-      - name: Bump supersede rule (supersede.py + the action's guard and supersede steps)
-        run: python3 scripts/test_bump_supersede.py
+      - name: bump-module-pin steps (supersede rule, auto-merge warning)
+        run: python3 scripts/test_bump_module_pin.py
 
       # The composite action is what the workflows actually call, so an output added to the script
       # but not surfaced by the action resolves to an empty string at runtime - and an empty
