@@ -256,6 +256,7 @@ PIN_KEPT = {
     "contract",            # the spec's common.v1 projection moves with contracts-go
     "artifact",            # the image and the GitOps pin still have to be built
     "notify",              # always()
+    "ci-passed",           # the required check: must report on every PR, a bump above all
 }
 
 

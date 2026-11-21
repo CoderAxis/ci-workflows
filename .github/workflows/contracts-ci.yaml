@@ -169,10 +169,16 @@ jobs:
         with:
           node-version: "20.x"
 
+      # IPv4 only, with retries: on the self-hosted CI host archive.ubuntu.com (Cloudflare) never
+      # connects over IPv6 and times out over IPv4 at times (11-19), and a lane that dies at apt says
+      # nothing about the contracts. protobuf-compiler stays the distro's (protoc v3.21.12): the
+      # generated files record that version, so the drift check needs exactly it.
       - name: Install protoc
         run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          APT=(-o Acquire::ForceIPv4=true -o Acquire::Retries=5 -o Acquire::http::Timeout=20)
+          sudo apt-get "${APT[@]}" update
+          sudo apt-get "${APT[@]}" install -y protobuf-compiler
+          protoc --version
 
       - name: Install Go protoc plugins
         run: |

@@ -3288,6 +3288,46 @@ jobs:
   #
   # The bot token is read from Secrets Manager against this job's OIDC identity, so no caller
   # forwards a Slack credential and there is no "unconfigured" state left to fail silently.
+  # The ONE check a calling repository requires on main. Every job above is conditional, and GitHub
+  # reports a job skipped by its `if:` - including one skipped because a job it needs failed - as a
+  # pass, so requiring any of them individually lets a red run merge. A bump PR from the release
+  # cascade auto-merges the moment its required checks are met; with none required it merged before
+  # this pipeline had even started, and a red result then meant main moved but no image was built,
+  # which nothing downstream notices (the pin it reads has already moved).
+  #
+  # The set is what `artifact` waits on - the condition under which a merge produces an image - plus
+  # pin-only, whose crash would skip the gates that read it without failing any of them. Jobs outside
+  # artifact's needs stay advisory here, as they are for the image; promoting one is its own decision.
+  # scripts/test_ci_passed_gate.py holds the two lists together.
+  #
+  # !cancelled() rather than always(): a run superseded by a newer push is cancelled and should not
+  # paint its stale commit red, while a job that failed, or was cancelled by its own timeout, must.
+  ci-passed:
+    name: CI passed
+    needs: [resolve, docs-only, pin-only, supported-language, standards, build-test, codeql, events,
+            seeding, schema, dockerfile, structure, vulnerabilities, sqlc, docs, contracts, contract,
+            openapi-generator, lanes, integration, docker-tests, e2e]
+    if: ${{ !cancelled() }}
+    runs-on: inboxxhq-ci
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
+    permissions: {}
+    steps:
+      - name: Every gate the image build waits on passed or was skipped by design
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          for name, job in sorted(needs.items()):
+              print(f"{job.get('result', '?'):>9}  {name}")
+          bad = sorted(n for n, j in needs.items() if j.get("result") in ("failure", "cancelled"))
+          if bad:
+              print("::error title=CI did not pass::" + ", ".join(f"{n} ({needs[n]['result']})" for n in bad))
+              sys.exit(1)
+          PY
+
   notify:
     name: Notify on failure
     # `e2e` was the one gate nothing watched. That mattered less while it could not block a
