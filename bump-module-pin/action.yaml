@@ -443,6 +443,7 @@ runs:
     # deliberate stability commitment by the module's owner, dispatched by hand, never a side
     # effect of a commit subject (see module-release's version rule).
     - name: Auto-merge when green, or flag a major bump for review
+      id: automerge
       if: steps.guard.outputs.skip != 'true' && steps.supersede.outputs.skip != 'true' && steps.cpr.outputs.pull-request-number != ''
       shell: bash
       env:
@@ -490,5 +491,19 @@ runs:
           echo "::warning::major bump: auto-merge withheld, #${PR} needs review"
           exit 0
         fi
-        gh pr merge "${PR}" --repo "${TARGET}" --squash --auto \
-          || echo "::notice::auto-merge unavailable (branch protection may be off); #${PR} left open"
+        # A bump that cannot auto-merge waits for a person, and the consumer lags every release
+        # until someone notices. That used to be a ::notice:: blaming branch protection, while
+        # the real cause was the repository setting "Allow auto-merge", off by default on a new
+        # repository: by 2026-11-20 it was off in 76 of the 109 repositories the cascade bumps,
+        # and their bump PRs were merged by hand or not at all. So the cause is named, as a
+        # warning on the run and in its summary, with the command that fixes it.
+        if ! err="$(gh pr merge "${PR}" --repo "${TARGET}" --squash --auto 2>&1)"; then
+          allowed="$(gh api "repos/${TARGET}" --jq '.allow_auto_merge' 2>/dev/null || echo unknown)"
+          if [[ "${allowed}" == "false" || "${err}" == *"uto merge is not allowed"* ]]; then
+            msg="${TARGET} has the repository setting \"Allow auto-merge\" OFF, so bump #${PR} waits for a person to merge it. A repository admin turns it on with: gh api -X PATCH repos/${TARGET} -F allow_auto_merge=true"
+          else
+            msg="could not enable auto-merge on bump #${PR} in ${TARGET} (allow_auto_merge=${allowed}), so it waits for a person: ${err//$'\n'/ }"
+          fi
+          echo "::warning title=Bump PR will not merge by itself::${msg}"
+          echo "- ${msg}" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+        fi
