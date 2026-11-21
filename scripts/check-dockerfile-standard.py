@@ -229,6 +229,7 @@ def _arg_defaults(df: Dockerfile) -> dict[str, str]:
 
 
 _ARG_REF = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 def _resolve_tag(tag: str, args: dict[str, str]) -> tuple[str | None, str | None]:
@@ -293,9 +294,19 @@ def version_matrix_pinned(df: Dockerfile) -> Finding:
         else:
             resolved = raw
             observed.append(f"{what}={resolved}")
-        if resolved != expected:
-            errs.append(f"{what} tag resolves to {resolved!r} != matrix {expected!r}"
-                        + (f" (from {raw})" if raw != resolved else ""))
+        # A digest pin (`<tag>@sha256:<hex>`, literal or through the ARG default) is the
+        # supply-chain Target (check-base-image-digest.py); the matrix governs the tag
+        # beside it. Comparing the whole string would fail every image that adopts the pin
+        # this standard asks for, so the tag is compared and the digest only checked for
+        # shape.
+        tag, _, digest = resolved.partition("@")
+        if digest and not DIGEST_RE.fullmatch(digest):
+            errs.append(f"{what} reference {resolved!r} carries {digest!r}, which is not a "
+                        f"sha256 digest")
+            continue
+        if tag != expected:
+            errs.append(f"{what} tag resolves to {tag!r} != matrix {expected!r}"
+                        + (f" (from {raw})" if raw != tag else ""))
 
     if errs:
         return Finding(False, "; ".join(errs))

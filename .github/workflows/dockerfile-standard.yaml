@@ -64,6 +64,18 @@ jobs:
       - name: Install checker dependency
         run: python3 -m pip install --upgrade PyYAML
 
+      # Supply-chain Target (core-docs security/supply-chain.md): base images pinned by
+      # @sha256 digest, not by tag only. Advisory while the fleet is tag-pinned: warn mode
+      # exits 0, and continue-on-error keeps a fault in the checker from failing a service.
+      # Images missing from controls/base-image-digest-baseline.json are reported as NEW;
+      # --mode ratchet is the switch that makes those fail.
+      - name: Base images pinned by digest (advisory)
+        continue-on-error: true
+        run: |
+          python3 .dockerfile-standard-tools/scripts/check-base-image-digest.py --mode warn \
+            --baseline .dockerfile-standard-tools/controls/base-image-digest-baseline.json \
+            "${{ inputs.dockerfile }}"
+
       - name: Enforce Dockerfile standard (ADR-0073)
         run: |
           python3 .dockerfile-standard-tools/scripts/check-dockerfile-standard.py \
