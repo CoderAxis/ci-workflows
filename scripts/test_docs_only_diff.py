@@ -531,6 +531,7 @@ UNGATED_JOBS = {
     "docs",               # the documentation standard itself
     "org-vocabulary",     # vocabulary, which markdown is full of
     "notify",             # always()
+    "ci-passed",          # the required check: a docs PR still has to report it
     "docs-only",          # the classifier
     "pin-only",           # the other classifier: five minutes, and gating it on
                           # this one would leave its output unset for every job

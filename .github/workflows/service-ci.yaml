@@ -547,8 +547,12 @@ jobs:
           PG_PORT: ${{ steps.postgres.outputs.port || steps.postgres-hosted.outputs.port }}
         run: |
           set -euo pipefail
-          # One name, because all 41 integration test files in the fleet read this one. The tests
-          # apply their own migrations through schema.GooseUpDSN, so the database only has to exist.
+          # One name, the one every lane with a database exports and platform-testing-go's
+          # testdb.URL reads. A test that reads any other name skips here and passes silently, as
+          # authz-core-postgres's seed tests (TEST_DB_URL) and communication-service's leader and
+          # fleet tests (POSTGRES_DSN) did until 2026-11-19; testdb.URL fails instead when CI is
+          # set and this is not. The tests apply their own migrations through schema.GooseUpDSN,
+          # so the database only has to exist.
           echo "TEST_DATABASE_URL=postgres://postgres:postgres@localhost:${PG_PORT}/service_test?sslmode=disable" \
             >> "${GITHUB_ENV}"
 
@@ -1862,9 +1866,16 @@ jobs:
         run: |
           set -euo pipefail
           dsn="postgres://postgres:postgres@localhost:${PG_PORT}/service_test?sslmode=disable"
+          # TEST_DATABASE_URL as well: it is the name Build and test and Docker-backed tests export,
+          # and the only one platform-testing-go's testdb.URL reads, so a test that moves between
+          # lanes, or adopts the helper, finds its database under one name in every lane that has
+          # one. org-service's memberlifecycle and orgstats suites read only this name. Every
+          # tests/integration file that reads it today reads it beside DATABASE_URL or POSTGRES_DSN,
+          # and all three carry this same DSN, so no test that runs here changes what it connects to.
           {
             echo "DATABASE_URL=${dsn}"
             echo "POSTGRES_DSN=${dsn}"
+            echo "TEST_DATABASE_URL=${dsn}"
             echo "REDIS_ADDR=localhost:${REDIS_PORT}"
           } >> "${GITHUB_ENV}"
 
@@ -1962,7 +1973,7 @@ jobs:
           fi
           if [[ "${skipped}" -gt 0 ]]; then
             echo "::error::${skipped} integration test(s) called t.Skip(). Postgres, Redis and Kafka"
-            echo "are supplied by this job (DATABASE_URL/POSTGRES_DSN/REDIS_ADDR/KAFKA_BROKERS)."
+            echo "are supplied by this job (DATABASE_URL/POSTGRES_DSN/TEST_DATABASE_URL/REDIS_ADDR/KAFKA_BROKERS)."
             grep '"Action":"skip"' integration-tests.jsonl | grep '"Test":' \
               | sed 's/.*"Test":"\([^"]*\)".*/  skipped: \1/' | sort -u
             exit 1
@@ -3277,6 +3288,46 @@ jobs:
   #
   # The bot token is read from Secrets Manager against this job's OIDC identity, so no caller
   # forwards a Slack credential and there is no "unconfigured" state left to fail silently.
+  # The ONE check a calling repository requires on main. Every job above is conditional, and GitHub
+  # reports a job skipped by its `if:` - including one skipped because a job it needs failed - as a
+  # pass, so requiring any of them individually lets a red run merge. A bump PR from the release
+  # cascade auto-merges the moment its required checks are met; with none required it merged before
+  # this pipeline had even started, and a red result then meant main moved but no image was built,
+  # which nothing downstream notices (the pin it reads has already moved).
+  #
+  # The set is what `artifact` waits on - the condition under which a merge produces an image - plus
+  # pin-only, whose crash would skip the gates that read it without failing any of them. Jobs outside
+  # artifact's needs stay advisory here, as they are for the image; promoting one is its own decision.
+  # scripts/test_ci_passed_gate.py holds the two lists together.
+  #
+  # !cancelled() rather than always(): a run superseded by a newer push is cancelled and should not
+  # paint its stale commit red, while a job that failed, or was cancelled by its own timeout, must.
+  ci-passed:
+    name: CI passed
+    needs: [resolve, docs-only, pin-only, supported-language, standards, build-test, codeql, events,
+            seeding, schema, dockerfile, structure, vulnerabilities, sqlc, docs, contracts, contract,
+            openapi-generator, lanes, integration, docker-tests, e2e]
+    if: ${{ !cancelled() }}
+    runs-on: inboxxhq-ci
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
+    permissions: {}
+    steps:
+      - name: Every gate the image build waits on passed or was skipped by design
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          for name, job in sorted(needs.items()):
+              print(f"{job.get('result', '?'):>9}  {name}")
+          bad = sorted(n for n, j in needs.items() if j.get("result") in ("failure", "cancelled"))
+          if bad:
+              print("::error title=CI did not pass::" + ", ".join(f"{n} ({needs[n]['result']})" for n in bad))
+              sys.exit(1)
+          PY
+
   notify:
     name: Notify on failure
     # `e2e` was the one gate nothing watched. That mattered less while it could not block a

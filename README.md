@@ -301,6 +301,24 @@ The delivery-model checker is the twin of
 [`scripts/check-seed-contract.py`](scripts/check-seed-contract.py): both encode an
 enterprise standard as a language-agnostic, stdlib-light gate rather than prose.
 
+## The required check (`CI passed`)
+
+A repository calling [`service-ci.yaml`](.github/workflows/service-ci.yaml) requires exactly one
+check on `main`: **`ci / CI passed`** (`<caller job> / CI passed`). Every other service-ci job is
+conditional, and GitHub reports a job skipped by its `if:` - including one skipped because a job it
+needs failed - as a pass, so requiring any of them individually lets a red run merge.
+
+`ci-passed` waits on everything `artifact` (the canonical build) waits on, plus `pin-only`, runs
+whenever the run was not cancelled, and fails if any of them failed or was cancelled. A merge it
+allowed is therefore a merge that builds an image. It matters most for the release cascade: a
+[`bump-module-pin`](bump-module-pin/action.yaml) PR auto-merges the moment its required checks are
+met, so with none required it merged before its CI started, and a red result left `main` moved and
+no image built. [`scripts/test_ci_passed_gate.py`](scripts/test_ci_passed_gate.py) keeps the two
+needs lists together and runs the job's verdict script.
+
+Renaming the job or the caller's job id changes the context every ruleset requires and makes those
+`main` branches unmergeable until the rulesets follow.
+
 ## UUID version policy (UUIDv7 everywhere, v5 only where it is declared)
 
 Policy SSOT (in `coderaxis/microservices`): `ADR-0071` (outbox `event_id` /

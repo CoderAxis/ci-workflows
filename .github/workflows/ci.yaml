@@ -306,6 +306,12 @@ jobs:
       - name: Dependency-pin classification and its wiring
         run: python3 scripts/test_pin_only_diff.py
 
+      # `CI passed` is the check every calling repository requires on main, so its needs list is
+      # load-bearing: a gate the image build waits on but this job does not would let a PR merge
+      # green and then build no image. The verdict half runs the job's own script.
+      - name: The required CI passed gate and its wiring
+        run: python3 scripts/test_ci_passed_gate.py
+
   # ── container tests (scripts/docker-test-packages.sh) ───────────────────────────────────────
   # Build and test runs on pools without Docker and sends the packages whose tests start
   # containers to the hosted docker-tests job. Both directions of a mistake are expensive: a
@@ -918,6 +924,13 @@ jobs:
 
       - name: Cascade reconcile planner tests
         run: python3 scripts/test_cascade_reconcile.py
+
+      # bump-module-pin closes only the open bump PRs it actually passes, and opens nothing when
+      # an open one already moves a module further (2026-11-20: a reconcile planned at an older
+      # tag closed the newer bump and left the next one in conflict). The guard and supersede
+      # steps are run as the action runs them, against a fake gh.
+      - name: Bump supersede rule (supersede.py + the action's guard and supersede steps)
+        run: python3 scripts/test_bump_supersede.py
 
       # The composite action is what the workflows actually call, so an output added to the script
       # but not surfaced by the action resolves to an empty string at runtime - and an empty
