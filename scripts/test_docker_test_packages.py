@@ -196,6 +196,60 @@ def test_the_coverage_step_routes_the_container_packages(tmp: Path) -> None:
            f"the container test must not have run on the pool; {cov}")
 
 
+def go_argv_shim(tmp: Path) -> tuple[str, Path]:
+    """A `go` first on PATH that logs its arguments and runs the real one, so a test can see
+    exactly which flags a step passed."""
+    shim = tmp / "shim"
+    shim.mkdir()
+    log = tmp / "go-argv.log"
+    real = shutil.which("go")
+    (shim / "go").write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "{log}"\nexec "{real}" "$@"\n',
+                             encoding="utf-8")
+    (shim / "go").chmod(0o755)
+    return f"{shim}{os.pathsep}{os.environ.get('PATH', '')}", log
+
+
+def coverage_go_tests(tmp: Path, go_race: str) -> tuple[int, str, list[str]]:
+    """Run the coverage step on the fixture with go_race as given; return its `go test` argv lines."""
+    work = checkout(tmp)
+    path, log = go_argv_shim(tmp)
+    _, _, found = run_step("build-test", "Find the tests that need Docker", work, GO_TAGS="integration")
+    code, out, _ = run_step("build-test", "Tests with coverage", work, GO_TAGS="integration",
+                            DOCKER_PACKAGES=found.get("packages", ""), KUBERNETES_SERVICE_HOST="",
+                            GO_RACE=go_race, PATH=path)
+    runs = [line for line in log.read_text(encoding="utf-8").splitlines() if line.startswith("test ")]
+    return code, out, runs
+
+
+def test_the_coverage_run_is_under_the_race_detector_when_go_race_is_on(tmp: Path) -> None:
+    code, out, runs = coverage_go_tests(tmp, "true")
+    expect(code == 0, f"the coverage step must pass under -race on the fixture:\n{out[-1500:]}")
+    # With and without the integration tag, and the package-main tests: every go test the
+    # step runs is the race run, and none runs a second time without it.
+    expect(len(runs) >= 2 and all("-race" in line.split() for line in runs),
+           f"every go test in the coverage step must carry -race with go_race on: {runs}")
+
+
+def test_the_coverage_run_has_no_race_detector_when_go_race_is_off(tmp: Path) -> None:
+    code, out, runs = coverage_go_tests(tmp, "false")
+    expect(code == 0, f"the coverage step must pass on the fixture:\n{out[-1500:]}")
+    expect(runs and not any("-race" in line.split() for line in runs),
+           f"go_race off must leave the coverage run as it was: {runs}")
+
+
+def test_go_race_is_on_by_default_and_reaches_the_coverage_run() -> None:
+    inp = (yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))[True]["workflow_call"]["inputs"]
+           .get("go_race") or {})
+    expect(inp.get("type") == "boolean" and inp.get("default") is True,
+           f"go_race must be a boolean input that defaults to true: {inp}")
+    cov = step("build-test", "Tests with coverage")
+    expect(cov.get("env", {}).get("GO_RACE") == "${{ inputs.go_race }}",
+           "the coverage run must read inputs.go_race")
+    named = step("build-test", "Race detector on the packages the repo names")
+    expect("!inputs.go_race" in str(named.get("if", "")),
+           "the per-package race pass must run only when go_race is off, or it repeats packages")
+
+
 def test_a_container_test_outside_the_tag_is_refused_by_name(tmp: Path) -> None:
     work = checkout(tmp)
     tags = "integration,fixture_untagged_docker"
