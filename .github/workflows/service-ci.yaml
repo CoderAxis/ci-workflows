@@ -547,8 +547,12 @@ jobs:
           PG_PORT: ${{ steps.postgres.outputs.port || steps.postgres-hosted.outputs.port }}
         run: |
           set -euo pipefail
-          # One name, because all 41 integration test files in the fleet read this one. The tests
-          # apply their own migrations through schema.GooseUpDSN, so the database only has to exist.
+          # One name, the one every lane with a database exports and platform-testing-go's
+          # testdb.URL reads. A test that reads any other name skips here and passes silently, as
+          # authz-core-postgres's seed tests (TEST_DB_URL) and communication-service's leader and
+          # fleet tests (POSTGRES_DSN) did until 2026-11-19; testdb.URL fails instead when CI is
+          # set and this is not. The tests apply their own migrations through schema.GooseUpDSN,
+          # so the database only has to exist.
           echo "TEST_DATABASE_URL=postgres://postgres:postgres@localhost:${PG_PORT}/service_test?sslmode=disable" \
             >> "${GITHUB_ENV}"
 
@@ -1862,9 +1866,16 @@ jobs:
         run: |
           set -euo pipefail
           dsn="postgres://postgres:postgres@localhost:${PG_PORT}/service_test?sslmode=disable"
+          # TEST_DATABASE_URL as well: it is the name Build and test and Docker-backed tests export,
+          # and the only one platform-testing-go's testdb.URL reads, so a test that moves between
+          # lanes, or adopts the helper, finds its database under one name in every lane that has
+          # one. org-service's memberlifecycle and orgstats suites read only this name. Every
+          # tests/integration file that reads it today reads it beside DATABASE_URL or POSTGRES_DSN,
+          # and all three carry this same DSN, so no test that runs here changes what it connects to.
           {
             echo "DATABASE_URL=${dsn}"
             echo "POSTGRES_DSN=${dsn}"
+            echo "TEST_DATABASE_URL=${dsn}"
             echo "REDIS_ADDR=localhost:${REDIS_PORT}"
           } >> "${GITHUB_ENV}"
 
@@ -1962,7 +1973,7 @@ jobs:
           fi
           if [[ "${skipped}" -gt 0 ]]; then
             echo "::error::${skipped} integration test(s) called t.Skip(). Postgres, Redis and Kafka"
-            echo "are supplied by this job (DATABASE_URL/POSTGRES_DSN/REDIS_ADDR/KAFKA_BROKERS)."
+            echo "are supplied by this job (DATABASE_URL/POSTGRES_DSN/TEST_DATABASE_URL/REDIS_ADDR/KAFKA_BROKERS)."
             grep '"Action":"skip"' integration-tests.jsonl | grep '"Test":' \
               | sed 's/.*"Test":"\([^"]*\)".*/  skipped: \1/' | sort -u
             exit 1
