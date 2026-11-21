@@ -77,18 +77,34 @@ on:
         required: false
         type: string
         default: integration
+      go_race:
+        description: >-
+          Run the coverage run itself under the race detector (`go test -race`), so every
+          package the job tests is also checked for data races, in one pass rather than two.
+
+          On by default. A data race that reaches main can abort the process at runtime
+          ("concurrent map iteration and map write") and nothing else in the pipeline finds
+          it: on 2026-11-18 org-bff ranged over a map while goroutines it had started wrote to
+          it, and only 2 of 44 repositories ran any race pass, because the pass was opt-in.
+
+          Measured on all 44 Go modules (unit tests, 4 CPUs): the race run took 2,124 s
+          against 1,005 s plain, and 40 of the 44 added a minute or less. It replaces the plain
+          coverage run rather than adding a second one, so a repository pays only the
+          difference, and coverage stays atomic either way.
+
+          Set it to false only with a comment in the caller saying why and until when; the
+          go_race_packages pass below then still runs.
+        required: false
+        type: boolean
+        default: true
       go_race_packages:
         description: >-
-          Packages to run again under the race detector, as `go test` takes them
-          (e.g. "./internal/adapters/inbound/http ./internal/adapters/events"), with the same
-          build tags as the coverage run. Empty, the default, runs no race pass.
+          Only read when go_race is false. Packages to run again under the race detector, as
+          `go test` takes them (e.g. "./internal/adapters/inbound/http ./internal/adapters/events"),
+          with the same build tags as the coverage run. Empty runs no race pass.
 
-          Opt-in and per package rather than fleet-wide, because -race multiplies a package's
-          run time by five to ten: a service whose request path shares mutable state across
-          goroutines -- a menu cache read by every search while catalogue events rebuild it --
-          names those packages, and pays for exactly them. It runs in this job, beside the
-          coverage run, so a repo needs no workflow of its own and no second module token to
-          get it.
+          With go_race on (the default) the whole coverage run is already under the race
+          detector, so this list is ignored and the job says so; a repository can drop it.
         required: false
         type: string
         default: ""
@@ -623,8 +639,17 @@ jobs:
           # caller's string would be shell, not an argument.
           GO_TAGS: ${{ inputs.go_build_tags }}
           DOCKER_PACKAGES: ${{ steps.docker.outputs.packages }}
+          GO_RACE: ${{ inputs.go_race }}
         run: |
           set -euo pipefail
+          # THE RACE DETECTOR (inputs.go_race, on by default) runs on this coverage run itself,
+          # not as a second pass: every package below is tested once, under -race. Coverage is
+          # already -covermode=atomic, which is what -race requires, so the figures do not move.
+          # GO_RACE is always set by this workflow; it is unset only when the step runs outside
+          # GitHub (scripts/test_docker_test_packages.py), where it reads as off.
+          race=()
+          if [[ "${GO_RACE:-false}" == "true" ]]; then race=(-race); fi
+
           # WHY THE INTEGRATION TAG IS ALWAYS ON.
           #
           # The 27 *-core-postgres repos keep every test behind `//go:build integration`, because a
@@ -711,7 +736,7 @@ jobs:
           done
 
           if [[ ${#without_tag[@]} -eq 0 ]]; then
-            GOWORK=off go test -timeout 90m -tags="${GO_TAGS}" -coverpkg="${list}" "${pkgs[@]}" \
+            GOWORK=off go test ${race[@]+"${race[@]}"} -timeout 90m -tags="${GO_TAGS}" -coverpkg="${list}" "${pkgs[@]}" \
               -coverprofile=coverage.out -covermode=atomic
           else
             IFS=', ' read -r -a tags <<<"${GO_TAGS}"
@@ -734,11 +759,11 @@ jobs:
 
             profiles=()
             if [[ ${#with_tag[@]} -gt 0 ]]; then
-              GOWORK=off go test -timeout 90m -tags="${GO_TAGS}" -coverpkg="${list}" "${with_tag[@]}" \
+              GOWORK=off go test ${race[@]+"${race[@]}"} -timeout 90m -tags="${GO_TAGS}" -coverpkg="${list}" "${with_tag[@]}" \
                 -coverprofile=coverage-with-tag.out -covermode=atomic
               profiles+=(coverage-with-tag.out)
             fi
-            GOWORK=off go test -timeout 90m -tags="${other_tags}" -coverpkg="${list}" "${without_tag[@]}" \
+            GOWORK=off go test ${race[@]+"${race[@]}"} -timeout 90m -tags="${other_tags}" -coverpkg="${list}" "${without_tag[@]}" \
               -coverprofile=coverage-without-tag.out -covermode=atomic
             profiles+=(coverage-without-tag.out)
             # One mode line, then every block. Blocks at the same position are summed by cover, as
@@ -758,11 +783,17 @@ jobs:
               | grep -Ev '/tests/(contracts|integration)' || true
           )
           if [[ ${#mains[@]} -gt 0 ]]; then
-            GOWORK=off go test -timeout 90m -tags="${GO_TAGS}" "${mains[@]}"
+            GOWORK=off go test ${race[@]+"${race[@]}"} -timeout 90m -tags="${GO_TAGS}" "${mains[@]}"
           fi
 
+      - name: Race detector list ignored (the whole coverage run is under -race)
+        if: inputs.go_race_packages != '' && inputs.go_race
+        shell: bash
+        run: |
+          echo "::notice::go_race is on, so every tested package already ran under the race detector; go_race_packages is ignored and can be removed from the caller."
+
       - name: Race detector on the packages the repo names
-        if: inputs.go_race_packages != ''
+        if: inputs.go_race_packages != '' && !inputs.go_race
         shell: bash
         env:
           KUBERNETES_SERVICE_HOST: ""
