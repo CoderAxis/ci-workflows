@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "Base images still allowed to be pinned by tag only (scripts/check-base-image-digest.py).",
+    "Registry + repository, no tag. Recorded 2026-11-19 from every Dockerfile FROM on origin/main",
+    "of the core/ and inboxxhq/ repositories: 110 external FROM lines, 2 pinned by digest.",
+    "Remove an image once the fleet pins it; in ratchet mode it can then never return unpinned.",
+    "Adding an image here is a reviewed decision to accept new tag-only debt."
+  ],
+  "unpinned_images": [
+    "ghcr.io/actions-runner-controller/actions-runner-controller/actions-runner",
+    "ghcr.io/actions/actions-runner",
+    "grafana/k6",
+    "public.ecr.aws/docker/library/alpine",
+    "public.ecr.aws/docker/library/caddy",
+    "public.ecr.aws/docker/library/debian",
+    "public.ecr.aws/docker/library/golang",
+    "public.ecr.aws/docker/library/nginx",
+    "public.ecr.aws/docker/library/node",
+    "public.ecr.aws/docker/library/python"
+  ]
+}

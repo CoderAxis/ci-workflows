@@ -248,6 +248,7 @@ PIN_KEPT = {
     "pin-only",            # this one
     "build-test",          # does it still compile and pass its tests
     "integration",         # a library change is a behaviour change
+    "docker-tests",        # likewise, for the tests that start containers
     "e2e",                 # likewise, end to end
     "vulnerabilities",     # a bump is EXACTLY when a CVE arrives
     "dependency-review",   # its entire subject is the dependency delta
@@ -255,6 +256,7 @@ PIN_KEPT = {
     "contract",            # the spec's common.v1 projection moves with contracts-go
     "artifact",            # the image and the GitOps pin still have to be built
     "notify",              # always()
+    "ci-passed",           # the required check: must report on every PR, a bump above all
 }
 
 

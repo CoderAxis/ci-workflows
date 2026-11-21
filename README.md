@@ -21,7 +21,7 @@ credentials as inputs at call time.
 | Action | Purpose |
 | ------ | ------- |
 | [`module-auth`](module-auth/action.yaml) | Mint a short-lived GitHub App installation token (`coderaxis-module-reader`) and configure git for private module reads. Replaces long-lived `CROSS_REPO_TOKEN` / `WORKFLOW_GH_PAT`. |
-| [`go-build-cache/restore`](go-build-cache/restore/action.yaml) + [`go-build-cache/save`](go-build-cache/save/action.yaml) | Persist `GOCACHE` across runs of one lane on **GitHub-hosted** runners (no-ops on the self-hosted pools, whose cache is node-local). Restore by go.sum then Go version; save only on pushes to the default branch, trimmed to the entries this run read, so a cache restored through many generations stays one run's working set. Used by service-ci's Integration lane on hosted runners (Build and test runs on the self-hosted `inboxxhq-ci-heavy` pool, where GOCACHE is node-local). |
+| [`go-build-cache/restore`](go-build-cache/restore/action.yaml) + [`go-build-cache/save`](go-build-cache/save/action.yaml) | Persist `GOCACHE` across runs of one lane on **GitHub-hosted** runners (no-ops on the self-hosted pools, whose cache is node-local). Restore by go.sum then Go version; save only on pushes to the default branch, trimmed to the entries this run read, so a cache restored through many generations stays one run's working set. Used by service-ci's Integration and Docker-backed tests lanes on hosted runners (Build and test runs on the self-hosted `inboxxhq-ci-heavy` pool, where GOCACHE is node-local). |
 | [`test-postgres`](test-postgres/action.yaml) | Start a throwaway PostgreSQL 18 + pgvector for one job as a plain process on the runner, and output its port. Replaces a `services:` Postgres container on the self-hosted `inboxxhq-ci` pools, which run no Docker daemon. Same server, locale (en_US.UTF-8, `english` text search), timezone and `postgres`/`postgres` credentials the container gave; durability is off. Needs the pool image's binaries (`inboxxhq-infra` `ci-workflows-runner/runner-image/Dockerfile.gha`) and stops with an error on a runner without them. |
 
 Future actions (e.g. `docker-login`, `slack-notify`, `aws-login`) live as sibling folders.
@@ -42,6 +42,7 @@ live under `.github/workflows/` and are consumed via `uses:` at the **job** leve
 | [`runner-toolbox-contract.yaml`](.github/workflows/runner-toolbox-contract.yaml) | Runner toolbox contract — runs [`scripts/runner-toolbox-contract.sh`](scripts/runner-toolbox-contract.sh), the executable list of every tool the reusable workflows assume of a runner (the `ubuntu-latest` tool set, python3 + yaml, `gh`, `shellcheck`, `envsubst`, a C toolchain that compiles and links, cgo enabled as Go itself reports it, PostgreSQL 18 + pgvector starting unprivileged in en_US.UTF-8 for `test-postgres`, the scale-set layout), on a **live** `inboxxhq-ci` runner. `workflow_call` only: this repository is public and a runner group does not admit public repositories, so the check is run by thin callers in private repositories, one per organization (`inboxxhq-infra` runs it daily and on demand for the InboxxHQ-CoderAxis pool; the CoderAxis pool needs the same caller in a private CoderAxis repository). The image build (`inboxxhq-infra` `ci-workflows-runner/runner-image/build.sh`) runs the identical script inside the image before pushing, so a tool the fleet needs cannot go missing from the image, and cannot drift out of the deployed pool, without a red run naming it. Adding a tool to the image means adding its probe to the script in the same change. |
 | [`docs-governance.yaml`](.github/workflows/docs-governance.yaml) | Documentation-governance gate (ADR-0081) — the generic contract every governed docs repo shares: well-formed/complete frontmatter, `OWNER_DIRECTORY.md`-registered ownership, controlled vocabulary, `related_*` block-list style + Related-Docs links, ADR/RFC supersession reciprocity, a freshness SLA, and single-client scope isolation (only where `governance/CLIENT_SCOPE.md` is present). Machine-readable catalog schema + generated-artifact drift (DOC-0010) is **delegated** to the repo's own `scripts/build_catalog.py --check` (domain logic stays local), never duplicated centrally. Shared logic, per-repo data; auto-detects catalog/client-scope capabilities. Runs the SSOT [`scripts/check-docs-governance.py`](scripts/check-docs-governance.py) against the caller (`--root`). |
 | [`release-assets.yaml`](.github/workflows/release-assets.yaml) | Publishes a tag's built files from a private source repository to its public `<repo>-releases` repository, where installers download from. The target is derived from the caller, never passed; the files go out only when `SHA256SUMS` lists exactly them and every checksum holds; a tag already published is checked, completed if files are missing, and never overwritten. The release-bot token is minted for that one repository, which is why this must be central: a repository asking for `scope: publish` from its own workflow is refused at the mint. |
+| [`cascade-reconcile.yaml`](.github/workflows/cascade-reconcile.yaml) | The repair half of the release cascade. `module-release.yaml` bumps a release's consumers once, from the artifact graph; this reads every catalogued repository's `go.mod` and `.frontend-core-ref` on its default branch ([`scripts/cascade_reconcile.py`](scripts/cascade_reconcile.py)), and for every consumer behind the newest release opens ONE [`bump-module-pin`](bump-module-pin/action.yaml) change moving all of its lagging modules (a core and its `-postgres` adapter build only together), gated like a release bump; a frontend behind `frontend-core` is re-sent `frontend-core-updated`. It repairs failed or cancelled bump jobs, edges added after the graph was generated (reported as graph drift), and bumps withheld under an older tier rule. Scheduled every six hours by a thin caller of the same name in `coderaxis/core-docs` (private: this repository is public and the self-hosted pool admits no public repository; dispatch there with `only`, `max_parallel`, `dry_run`); a consumer that cannot be brought up to date turns the run red. Called at `@v1` because the release bot admits it only as `cascade-reconcile.yaml@refs/tags/v1`. |
 
 Each service repo carries only a thin caller:
 
@@ -299,6 +300,24 @@ Developers still get docs — just not from the deployed service:
 The delivery-model checker is the twin of
 [`scripts/check-seed-contract.py`](scripts/check-seed-contract.py): both encode an
 enterprise standard as a language-agnostic, stdlib-light gate rather than prose.
+
+## The required check (`CI passed`)
+
+A repository calling [`service-ci.yaml`](.github/workflows/service-ci.yaml) requires exactly one
+check on `main`: **`ci / CI passed`** (`<caller job> / CI passed`). Every other service-ci job is
+conditional, and GitHub reports a job skipped by its `if:` - including one skipped because a job it
+needs failed - as a pass, so requiring any of them individually lets a red run merge.
+
+`ci-passed` waits on everything `artifact` (the canonical build) waits on, plus `pin-only`, runs
+whenever the run was not cancelled, and fails if any of them failed or was cancelled. A merge it
+allowed is therefore a merge that builds an image. It matters most for the release cascade: a
+[`bump-module-pin`](bump-module-pin/action.yaml) PR auto-merges the moment its required checks are
+met, so with none required it merged before its CI started, and a red result left `main` moved and
+no image built. [`scripts/test_ci_passed_gate.py`](scripts/test_ci_passed_gate.py) keeps the two
+needs lists together and runs the job's verdict script.
+
+Renaming the job or the caller's job id changes the context every ruleset requires and makes those
+`main` branches unmergeable until the rulesets follow.
 
 ## UUID version policy (UUIDv7 everywhere, v5 only where it is declared)
 

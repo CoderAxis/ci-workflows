@@ -45,11 +45,21 @@ inputs:
     description: "JSON array of modules the target must pin directly, for the pin policy gate."
     required: false
     default: "[]"
+  companions:
+    description: >-
+      Further `module@version` pins moved in the SAME change, whitespace-separated. A core and its
+      -postgres adapter often only build together (the adapter implements the core's ports), so
+      moving one alone fails the gates below for a reason that is not a defect. The cascade
+      reconciler passes every lagging platform module of a consumer here; the release fan-out
+      leaves it empty. The guard, branch and title still name `module`; every companion is
+      gated, listed in the PR body and counted by the tier rule exactly like it.
+    required: false
+    default: ""
 
 outputs:
   skipped:
-    description: "true when the pin was already at or ahead of this version."
-    value: ${{ steps.guard.outputs.skip }}
+    description: "true when the pin was already at or ahead of this version, or an open bump PR already moves a module of this change past it."
+    value: ${{ steps.guard.outputs.skip == 'true' || steps.supersede.outputs.skip == 'true' }}
   pull-request-number:
     description: "Number of the pull request opened, empty when nothing changed."
     value: ${{ steps.cpr.outputs.pull-request-number }}
@@ -64,35 +74,72 @@ runs:
       env:
         MODULE: ${{ inputs.module }}
         VERSION: ${{ inputs.version }}
+        COMPANIONS: ${{ inputs.companions }}
+        SHORT: ${{ inputs.short }}
+        GH_TOKEN: ${{ inputs.token }}
+        TARGET: ${{ inputs.target-repository }}
+        NEW_BRANCH: chore/bump-${{ inputs.short }}-${{ inputs.version }}
+        SUPERSEDE: ${{ github.action_path }}/supersede.py
       run: |
         set -euo pipefail
+        pin_of() {
+          awk -v m="$1" '
+            $1 == "require" && $2 == "(" { inb = 1; next }
+            inb && $1 == ")" { inb = 0; next }
+            inb && $1 == m { print $2; exit }
+            $1 == "require" && $2 == m { print $3; exit }
+          ' go.mod || true
+        }
         # Bumps can arrive out of order, and a release can be re-run deliberately. Without this,
         # a late bump for an older tag would open a PR that DOWNGRADES the pin.
-        current="$(awk -v m="${MODULE}" '
-          $1 == "require" && $2 == "(" { inb = 1; next }
-          inb && $1 == ")" { inb = 0; next }
-          inb && $1 == m { print $2; exit }
-          $1 == "require" && $2 == m { print $3; exit }
-        ' go.mod || true)"
+        current="$(pin_of "${MODULE}")"
         echo "current=${current}" >> "${GITHUB_OUTPUT}"
         echo "skip=false" >> "${GITHUB_OUTPUT}"
+        # "module from to" per line, primary first: the tier rule and the PR body read every move,
+        # not only the one the branch is named after.
+        {
+          echo "moves<<MOVES_EOF"
+          echo "${MODULE} ${current:-none} ${VERSION}"
+          for c in ${COMPANIONS}; do
+            cpin="$(pin_of "${c%@*}")"
+            echo "${c%@*} ${cpin:-none} ${c##*@}"
+          done
+          echo "MOVES_EOF"
+        } >> "${GITHUB_OUTPUT}"
 
         if [[ -z "${current}" ]]; then
           echo "::notice::${MODULE} is not yet a direct requirement; proceeding to add it"
-          exit 0
-        fi
-        if [[ "${current}" == "${VERSION}" ]]; then
+        elif [[ "${current}" == "${VERSION}" ]]; then
           echo "skip=true" >> "${GITHUB_OUTPUT}"
           echo "::notice::already at ${VERSION}; nothing to do"
           exit 0
-        fi
-        semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
-        if [[ "${current}" =~ ${semver} ]]; then
-          newest="$(printf '%s\n%s\n' "${current#v}" "${VERSION#v}" | sort -V | tail -1)"
-          if [[ "${newest}" == "${current#v}" ]]; then
-            echo "skip=true" >> "${GITHUB_OUTPUT}"
-            echo "::notice::${current} is already newer than ${VERSION}; refusing to downgrade"
+        else
+          semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ "${current}" =~ ${semver} ]]; then
+            newest="$(printf '%s\n%s\n' "${current#v}" "${VERSION#v}" | sort -V | tail -1)"
+            if [[ "${newest}" == "${current#v}" ]]; then
+              echo "skip=true" >> "${GITHUB_OUTPUT}"
+              echo "::notice::${current} is already newer than ${VERSION}; refusing to downgrade"
+              exit 0
+            fi
           fi
+        fi
+
+        # The pin on main is not the only thing this bump can be behind: an OPEN bump PR may
+        # already move a module of this change further (a release fan-out and the cascade
+        # reconciler run at once, and the reconciler plans with the versions that were latest
+        # when it started). Opening this one anyway races it: whichever merges first leaves the
+        # other in conflict, or, before supersede.py, closed the newer one outright. The newer PR
+        # carries the module past this version, so this bump has nothing to add.
+        moves=(--move "${SHORT}=${VERSION}")
+        for c in ${COMPANIONS}; do m="${c%@*}"; moves+=(--move "${m##*/}=${c##*@}"); done
+        newer="$(gh pr list --repo "${TARGET}" --state open --limit 500 --json number,headRefName \
+          | python3 "${SUPERSEDE}" --new-branch "${NEW_BRANCH}" "${moves[@]}" | grep '^newer ' || true)"
+        if [[ -n "${newer}" ]]; then
+          echo "skip=true" >> "${GITHUB_OUTPUT}"
+          while read -r _ pr short v; do
+            echo "::notice::open #${pr} already moves ${short} to ${v}, past this bump; skipping"
+          done <<<"${newer}"
         fi
 
     - uses: actions/setup-go@v5
@@ -128,9 +175,13 @@ runs:
         GONOSUMDB: github.com/coderaxis/*
         MODULE: ${{ inputs.module }}
         VERSION: ${{ inputs.version }}
+        COMPANIONS: ${{ inputs.companions }}
       run: |
         set -euo pipefail
-        GOWORK=off go get "${MODULE}@${VERSION}"
+        # One `go get` for every move, so minimal version selection resolves them together: a
+        # core and its adapter moved in two steps can fail the first for a reason the second fixes.
+        # shellcheck disable=SC2086 # COMPANIONS is a whitespace-separated list by contract
+        GOWORK=off go get "${MODULE}@${VERSION}" ${COMPANIONS}
         GOWORK=off go mod tidy
         GOWORK=off go build ./...
 
@@ -190,8 +241,16 @@ runs:
         #
         # mapfile, not `go test $(...)`: an unquoted command substitution word-splits, so a
         # package path containing a space would be passed as two broken arguments.
+        #
+        # -timeout: `go test` kills a test binary at 10 minutes unless told otherwise, and on the
+        # self-hosted pool on the dev Docker host (~2.7x slower per core, load ~40 on 18 cores)
+        # that default, not the job's timeout-minutes, fired: ai-core v0.69.0's bump of
+        # voice-ai-agent-service died with "panic: test timed out after 10m0s" in one package
+        # (release run 43953296586, 2026-11-16). x3 of the default, as #75 did for module-release
+        # and service-ci; this step and the contract gate's 30m each stay under the calling job's
+        # 90 (module-release.yaml bump-consumers), so a hung test still fails here, by name.
         mapfile -t pkgs < <(GOWORK=off go list ./... | grep -Ev '/tests/(contracts|integration)')
-        [[ ${#pkgs[@]} -eq 0 ]] || GOWORK=off go test "${pkgs[@]}" -count=1
+        [[ ${#pkgs[@]} -eq 0 ]] || GOWORK=off go test "${pkgs[@]}" -count=1 -timeout 30m
 
     - name: Contract gate
       if: steps.guard.outputs.skip != 'true'
@@ -212,7 +271,8 @@ runs:
         # Imports the BUMPED module and validates the committed spec against it, so DTO or
         # operationId drift fails the PR before merge rather than after deploy.
         if [[ -d tests/contracts ]]; then
-          GOWORK=off go test ./tests/contracts/... -count=1
+          # -timeout: as "Test against the new pin" (x3 of go test's 10-minute default).
+          GOWORK=off go test ./tests/contracts/... -count=1 -timeout 30m
         fi
 
     - name: Check out the central checkers
@@ -257,6 +317,7 @@ runs:
       run: rm -rf "${{ github.workspace }}/.bump-central"
 
     - name: Close superseded bump PRs for this module
+      id: supersede
       if: steps.guard.outputs.skip != 'true'
       shell: bash
       env:
@@ -265,22 +326,45 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
         TARGET: ${{ inputs.target-repository }}
         SHORT: ${{ inputs.short }}
+        VERSION: ${{ inputs.version }}
+        COMPANIONS: ${{ inputs.companions }}
         NEW_BRANCH: chore/bump-${{ inputs.short }}-${{ inputs.version }}
+        SUPERSEDE: ${{ github.action_path }}/supersede.py
       run: |
         set -euo pipefail
         # Leaving them open produces a stack of PRs for the same module at different versions,
-        # any of which could be merged out of order and downgrade the pin.
-        gh pr list --repo "${TARGET}" --state open --json number,headRefName \
-          --jq ".[] | select(.headRefName | startswith(\"chore/bump-${SHORT}-v\")) | select(.headRefName != \"${NEW_BRANCH}\") | .number" \
-        | while read -r pr; do
-            echo "closing superseded #${pr}"
-            gh pr close "${pr}" --repo "${TARGET}" --delete-branch \
-              --comment "Superseded by ${NEW_BRANCH}." || true
+        # any of which could be merged out of order and downgrade the pin. A companion's own
+        # bump PRs are superseded too: this change moves it to the release it names.
+        #
+        # Only PRs at the SAME or an OLDER version are closed (supersede.py). One at a newer
+        # version supersedes THIS bump: the guard skips that case up front, and it is asked again
+        # here because the gates above take minutes and a newer release's bump can open meanwhile.
+        echo "skip=false" >> "${GITHUB_OUTPUT}"
+        moves=(--move "${SHORT}=${VERSION}")
+        for c in ${COMPANIONS}; do m="${c%@*}"; moves+=(--move "${m##*/}=${c##*@}"); done
+        found="$(gh pr list --repo "${TARGET}" --state open --limit 500 --json number,headRefName \
+          | python3 "${SUPERSEDE}" --new-branch "${NEW_BRANCH}" "${moves[@]}")"
+        if grep -q '^newer ' <<<"${found}"; then
+          echo "skip=true" >> "${GITHUB_OUTPUT}"
+          grep '^newer ' <<<"${found}" | while read -r _ pr short v; do
+            echo "::notice::open #${pr} moves ${short} to ${v} while this bump ran; opening nothing"
           done
+          exit 0
+        fi
+        while read -r kind pr rest; do
+          case "${kind}" in
+            close)
+              echo "closing superseded #${pr} (${rest})"
+              gh pr close "${pr}" --repo "${TARGET}" --delete-branch \
+                --comment "Superseded by ${NEW_BRANCH}." || true ;;
+            unknown)
+              echo "::notice::left #${pr} open: ${rest} names no plain vX.Y.Z version" ;;
+          esac
+        done <<<"${found}"
 
     - name: Decide which paths the bump may commit
       id: paths
-      if: steps.guard.outputs.skip != 'true'
+      if: steps.guard.outputs.skip != 'true' && steps.supersede.outputs.skip != 'true'
       shell: bash
       working-directory: ${{ inputs.target-path }}
       run: |
@@ -300,7 +384,7 @@ runs:
 
     - name: Open the bump PR
       id: cpr
-      if: steps.guard.outputs.skip != 'true'
+      if: steps.guard.outputs.skip != 'true' && steps.supersede.outputs.skip != 'true'
       uses: peter-evans/create-pull-request@v7
       with:
         token: ${{ inputs.token }}
@@ -328,40 +412,61 @@ runs:
           | Service | `${{ inputs.service }}` |
           | Repo kind | `${{ inputs.repo-kind }}` |
 
-          The pin builds, the unit and contract suites pass against it, and the platform pin
-          policy holds. Patch and minor bumps auto-merge once required checks are green; a major
-          bump is labelled for review instead.
+          Every module moved by this change (`module from to`):
+
+          ```
+          ${{ steps.guard.outputs.moves }}
+          ```
+
+          The pins build, the unit and contract suites pass against them, and the platform pin
+          policy holds. Patch and minor bumps, 0.x minors included, auto-merge once required
+          checks are green; only a move across a major version (v0 to v1 and up) is labelled for
+          review instead.
 
     # Auto-merge is what makes this automation rather than a queue of PRs nobody notices. It is
     # `--auto`, so GitHub still waits for every required check: the merge happens because the
     # gates passed, not instead of them.
     #
-    # A major bump is withheld deliberately: it means the module removed or changed API, so a
-    # green build only proves this consumer still compiles, not that the behaviour is intended.
-    # Under semver, 0.x MINOR is also breaking, so it counts as major here.
+    # A 0.x MINOR auto-merges like any minor. It used to count as major and wait for a person,
+    # because under SemVer §4 a 0.x minor MAY break. But module-release maps BOTH `feat:` and a
+    # breaking change on a 0.x module to the minor, and nearly every platform module is 0.x, so
+    # that rule withheld every feature release from every consumer: by 2026-11-18, 86 bump PRs
+    # sat open (the oldest from 2026-08-09) and all 44 deployables lagged at least one core, e.g.
+    # 33 still on platform-contracts-go v0.83.0 against v0.146.0. The version number cannot say
+    # whether THIS consumer is affected; the gates above can, and this PR exists only because
+    # they passed: the consumer compiles against the new pins, its unit and contract suites pass,
+    # and the pin policy holds. A breaking change that touches this consumer fails them, opens no
+    # PR and turns the release run red, which is the loud failure a person must act on. One that
+    # does not touch it lands on the first environment, and promotion still gates the rest.
+    #
+    # Withheld for review: a move across a MAJOR version (v0 to v1, or later majors). That is a
+    # deliberate stability commitment by the module's owner, dispatched by hand, never a side
+    # effect of a commit subject (see module-release's version rule).
     - name: Auto-merge when green, or flag a major bump for review
-      if: steps.guard.outputs.skip != 'true' && steps.cpr.outputs.pull-request-number != ''
+      if: steps.guard.outputs.skip != 'true' && steps.supersede.outputs.skip != 'true' && steps.cpr.outputs.pull-request-number != ''
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
         TARGET: ${{ inputs.target-repository }}
-        CURRENT: ${{ steps.guard.outputs.current }}
-        VERSION: ${{ inputs.version }}
+        MOVES: ${{ steps.guard.outputs.moves }}
         PR: ${{ steps.cpr.outputs.pull-request-number }}
       run: |
         set -euo pipefail
         # Quoted: `patch` and `major` are also real commands (SC2209).
         tier="patch"
-        cv="${CURRENT#v}"; rv="${VERSION#v}"
-        if [[ "${cv}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${rv}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        while read -r mod cur new; do
+          [[ -n "${mod}" ]] || continue
+          cv="${cur#v}"; rv="${new#v}"
+          [[ "${cv}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${rv}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
           cmaj="${cv%%.*}"; rmaj="${rv%%.*}"
           cmin="$(cut -d. -f2 <<<"${cv}")"; rmin="$(cut -d. -f2 <<<"${rv}")"
-          if [[ "${rmaj}" -gt "${cmaj}" ]]; then tier="major"
-          elif [[ "${rmaj}" == "0" && "${cmaj}" == "0" && "${rmin}" -gt "${cmin}" ]]; then tier="major"
-          elif [[ "${rmin}" -gt "${cmin}" ]]; then tier="minor"
+          if [[ "${rmaj}" -gt "${cmaj}" ]]; then
+            tier="major"; echo "::notice::${mod} ${cur} -> ${new} crosses a major version"
+          elif [[ "${tier}" == "patch" && "${rmin}" -gt "${cmin}" ]]; then
+            tier="minor"
           fi
-        fi
-        echo "::notice::bump tier=${tier} (${CURRENT:-none} -> ${VERSION})"
+        done <<<"${MOVES}"
+        echo "::notice::bump tier=${tier}"
 
         if [[ "${tier}" == "major" ]]; then
           # The labels are the only durable signal that this PR is waiting on a person, so they
@@ -372,7 +477,7 @@ runs:
           # green. The v0.14.0 fan-out left 48 PRs withheld for review and not one of them said
           # so - which is the same silent skew this pipeline exists to prevent, one step later.
           for label in \
-            "major-bump:b60205:Crosses a major version boundary; 0.x minor counts" \
+            "major-bump:b60205:Crosses a major version boundary (v0 to v1 and up)" \
             "needs-manual-review:d93f0b:Auto-merge withheld deliberately; a person has to decide"; do
             gh label create "${label%%:*}" --repo "${TARGET}" \
               --color "$(cut -d: -f2 <<<"${label}")" \

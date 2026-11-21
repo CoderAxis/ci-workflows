@@ -1,0 +1,237 @@
+name: Cascade reconcile (reusable)
+
+# The repair half of the release cascade. module-release.yaml bumps a release's consumers ONCE, from
+# the artifact graph, at release time; this finds every consumer that is still behind - from the
+# go.mod and .frontend-core-ref actually committed on each default branch - and bumps it again with
+# the same gates. scripts/cascade_reconcile.py says what it repairs and why each case happens.
+#
+# Called on a schedule by a thin caller of the same name in coderaxis/core-docs, the catalog's own
+# repository. Not from here: this repository is public, and the self-hosted runner group the bump
+# jobs need does not admit public repositories (the first dispatch from here failed at start-up).
+# It is a reusable workflow, called at @v1, because the release bot's trust policy admits jobs by
+# job_workflow_ref, which names the file a job is DEFINED in at the ref it was called with: a job
+# defined here and called at v1 is "cascade-reconcile.yaml@refs/tags/v1", the exact string
+# environments/management/ci-identity lists. Renaming this file revokes that grant.
+#
+# Gentle by design: the bump jobs run on the same self-hosted pool as every service's CI, so the
+# matrix is capped (max_parallel) and a run never cancels another. A consumer whose bump fails its
+# gates is retried on the next run; it fails loudly here until the core or the consumer is fixed.
+
+on:
+  workflow_call:
+    inputs:
+      catalog_owner:
+        description: "Account owning the catalog repo."
+        required: false
+        type: string
+        default: coderaxis
+      catalog_repo:
+        description: "Repository holding the artifact graph."
+        required: false
+        type: string
+        default: coderaxis/core-docs
+      catalog_ref:
+        description: "Ref of the catalog repo."
+        required: false
+        type: string
+        default: main
+      consumer_owners:
+        description: "Accounts whose repositories the graph names, for the read tokens."
+        required: false
+        type: string
+        default: "InboxxHQ-CoderAxis"
+      only:
+        description: "Space-separated graph node names to limit the run to (blank = every consumer)."
+        required: false
+        type: string
+        default: ""
+      max_parallel:
+        description: "Bump jobs at once. Each runs the consumer's build and unit/contract suites."
+        required: false
+        type: number
+        default: 2
+      dry_run:
+        description: "Plan and report only; open no pull request and dispatch nothing."
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: cascade-reconcile
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan - who is behind
+    runs-on: inboxxhq-ci
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      bumps: ${{ steps.plan.outputs.bumps }}
+      frontends: ${{ steps.plan.outputs.frontends }}
+    steps:
+      - name: Mint read tokens for the catalog and every consumer owner
+        id: read
+        uses: coderaxis/ci-workflows/ci-app-token@v1
+        with:
+          scope: read
+          owner: ${{ inputs.catalog_owner }}
+          extra-owners: ${{ inputs.consumer_owners }}
+
+      - name: Check out the artifact graph
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.catalog_repo }}
+          ref: ${{ inputs.catalog_ref }}
+          token: ${{ steps.read.outputs.token }}
+          path: .reconcile-catalog
+          sparse-checkout: generated/artifact-graph
+
+      - name: Check out the planner
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/ci-workflows
+          ref: v1
+          path: .reconcile-central
+          sparse-checkout: scripts
+
+      - name: Plan
+        id: plan
+        env:
+          TOKENS_FILE: ${{ steps.read.outputs.tokens-file }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/reconcile"
+          python3 .reconcile-central/scripts/cascade_reconcile.py \
+            --graph .reconcile-catalog/generated/artifact-graph/artifact-graph.generated.json \
+            --tokens "${TOKENS_FILE}" --out "${out}" --only "${ONLY}"
+          cat "${out}/summary.md" >> "${GITHUB_STEP_SUMMARY}"
+          {
+            echo "bumps=$(cat "${out}/bumps.json")"
+            echo "frontends=$(cat "${out}/frontends.json")"
+          } >> "${GITHUB_OUTPUT}"
+
+  bump:
+    name: Bump ${{ matrix.name }}
+    needs: plan
+    if: ${{ !inputs.dry_run && needs.plan.outputs.bumps != '[]' }}
+    runs-on: inboxxhq-ci
+    timeout-minutes: 90 # x3 for the self-hosted runners on the dev Docker host, as module-release
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max_parallel }}
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.bumps) }}
+    steps:
+      - name: Split the target into owner and repo
+        id: t
+        env:
+          TARGET: ${{ matrix.repository }}
+        run: |
+          set -euo pipefail
+          { echo "owner=${TARGET%%/*}"; echo "repo=${TARGET##*/}"; } >> "${GITHUB_OUTPUT}"
+
+      - name: Mint release-bot token for this target
+        id: bottoken
+        uses: coderaxis/ci-workflows/ci-app-token@v1
+        with:
+          scope: publish
+          owner: ${{ steps.t.outputs.owner }}
+          repositories: ${{ steps.t.outputs.repo }}
+
+      - name: Check out the consumer
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          token: ${{ steps.bottoken.outputs.token }}
+          path: consumer
+          fetch-depth: 0
+
+      - name: Bump every lagging pin and open the PR
+        uses: coderaxis/ci-workflows/bump-module-pin@v1
+        with:
+          target-repository: ${{ matrix.repository }}
+          target-path: consumer
+          module: ${{ matrix.module }}
+          version: ${{ matrix.version }}
+          short: ${{ matrix.short }}
+          companions: ${{ matrix.companions }}
+          token: ${{ steps.bottoken.outputs.token }}
+          service: ${{ matrix.service }}
+          repo-kind: ${{ matrix.kind }}
+          required-modules: ${{ toJSON(matrix.requires) }}
+
+  frontends:
+    name: Re-announce frontend-core to ${{ matrix.name }}
+    needs: plan
+    if: ${{ !inputs.dry_run && needs.plan.outputs.frontends != '[]' }}
+    runs-on: inboxxhq-ci
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.frontends) }}
+    steps:
+      - name: Split the target into owner and repo
+        id: t
+        env:
+          TARGET: ${{ matrix.repository }}
+        run: |
+          set -euo pipefail
+          { echo "owner=${TARGET%%/*}"; echo "repo=${TARGET##*/}"; } >> "${GITHUB_OUTPUT}"
+
+      - name: Mint release-bot token for this target
+        id: bottoken
+        uses: coderaxis/ci-workflows/ci-app-token@v1
+        with:
+          scope: publish
+          owner: ${{ steps.t.outputs.owner }}
+          repositories: ${{ steps.t.outputs.repo }}
+
+      # The same event content-fanout.yaml sends on every frontend-core push; the consumer's
+      # bump-core-modules workflow moves .frontend-core-ref, builds, and auto-merges when green.
+      - name: Dispatch frontend-core-updated at the current tip
+        env:
+          GH_TOKEN: ${{ steps.bottoken.outputs.token }}
+          TARGET: ${{ matrix.repository }}
+          SHA: ${{ matrix.sha }}
+        run: |
+          set -euo pipefail
+          jq -n --arg sha "${SHA}" \
+            '{event_type: "frontend-core-updated", client_payload: {artifact: "frontend-core", sha: $sha}}' \
+          | gh api "repos/${TARGET}/dispatches" --method POST --input -
+          echo "dispatched frontend-core-updated ${SHA:0:8} to ${TARGET}"
+
+  report:
+    name: Report
+    needs: [plan, bump, frontends]
+    if: always()
+    runs-on: inboxxhq-ci
+    timeout-minutes: 15
+    steps:
+      - name: Fail when a consumer could not be brought up to date
+        env:
+          PLAN: ${{ needs.plan.result }}
+          BUMP: ${{ needs.bump.result }}
+          FRONTENDS: ${{ needs.frontends.result }}
+        run: |
+          set -euo pipefail
+          echo "plan=${PLAN} bump=${BUMP} frontends=${FRONTENDS}"
+          for r in "${PLAN}" "${BUMP}" "${FRONTENDS}"; do
+            if [[ "${r}" != "success" && "${r}" != "skipped" ]]; then
+              echo "::error::at least one consumer is still behind the newest platform release;" \
+                   "the failed job names it and its gate output says why"
+              exit 1
+            fi
+          done

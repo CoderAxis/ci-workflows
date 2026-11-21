@@ -412,6 +412,27 @@ SECURITY_HEADERS_MARKER_RE = re.compile(r"\bginmiddleware\.SecurityHeaders\(")
 CSP_OPT_IN_MARKER_RE = re.compile(
     r"\bginmiddleware\.With(?:HTML|ContentSecurityPolicy)\(")
 
+# API-0015, the other way a process installs the shared security headers: the
+# backend-for-frontend inbound chain, platform/bff/inbound.Use, registers
+# ginmiddleware.SecurityHeaders itself (with Config.SecurityHeaders as its options), so a BFF
+# that adopts it - the point of that package - carries no ginmiddleware.SecurityHeaders( call of
+# its own. Without this, every BFF on the shared chain reports all four headers absent.
+#
+# Both halves must hold in the SAME file, because a Go import is per file: the import, unaliased
+# (the bare name is what makes `inbound.` refer to it; an aliased import is not credited, which
+# errs toward a finding), read with comments removed; and the call, read with comments and string
+# contents blanked, so a comment or a literal naming inbound.Use( is not a call. CSP needs no rule
+# of its own here: Config.SecurityHeaders takes ginmiddleware.WithHTML() /
+# WithContentSecurityPolicy(...), which CSP_OPT_IN_MARKER_RE already reads.
+#
+# The ihq CLI carries the same rule (internal/openapi/rfc0038.go, sharedInboundChainImport and
+# sharedInboundChainCall); check-detector-parity.py compares the two. re.ASCII keeps \b to Go's
+# ASCII word boundary, and [ \t] rather than \s keeps the import match to one line, as Go's is.
+INBOUND_CHAIN_IMPORT_RE = re.compile(
+    r'^[ \t]*(?:import[ \t]+)?"github\.com/coderaxis/platform-shared-go/platform/bff/inbound"',
+    re.MULTILINE | re.ASCII)
+INBOUND_CHAIN_CALL_RE = re.compile(r"\binbound\.Use\(", re.ASCII)
+
 # API-0015.
 SECURITY_HEADERS_REQUIRED = ("Strict-Transport-Security", "X-Content-Type-Options",
                              "Referrer-Policy", "Permissions-Policy")
@@ -527,6 +548,16 @@ def _strip_go_comments(text: str, blank_strings: bool = False) -> str:
                 state = "raw"
         i += 1
     return "".join(out)
+
+
+def _uses_shared_inbound_chain(text: str) -> bool:
+    """Whether one Go file imports platform/bff/inbound unaliased and calls inbound.Use( in code.
+
+    See INBOUND_CHAIN_IMPORT_RE. Mirrors usesSharedInboundChain in the ihq CLI.
+    """
+    if not INBOUND_CHAIN_IMPORT_RE.search(_strip_go_comments(text)):
+        return False
+    return bool(INBOUND_CHAIN_CALL_RE.search(_strip_go_comments(text, blank_strings=True)))
 
 
 def _is_type_reference_not_literal(text: str, match_start: int) -> bool:
@@ -1160,8 +1191,10 @@ class ServiceRepo:
         return [(rel, text) for rel, text in self.go_sources if rel.name.endswith("_test.go")]
 
     def uses_shared_security_headers(self) -> bool:
-        """Whether runtime source wires the shared ginmiddleware.SecurityHeaders()."""
-        return any(SECURITY_HEADERS_MARKER_RE.search(text) for _, text in self.runtime_sources())
+        """Whether runtime source wires the shared ginmiddleware.SecurityHeaders(), directly or
+        through the shared BFF inbound chain (platform/bff/inbound.Use)."""
+        return any(SECURITY_HEADERS_MARKER_RE.search(text) or _uses_shared_inbound_chain(text)
+                   for _, text in self.runtime_sources())
 
     def opts_into_shared_csp(self) -> bool:
         """Whether runtime source opts the shared middleware into Content-Security-Policy."""

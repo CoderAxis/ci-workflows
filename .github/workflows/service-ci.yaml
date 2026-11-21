@@ -92,6 +92,21 @@ on:
         required: false
         type: string
         default: ""
+      build_test_runner:
+        description: >-
+          The runs-on label for Build and test. The default is the self-hosted heavy pool, and that
+          is where every repo should stay. The input exists for a suite the pool cannot run
+          reliably: on 2026-11-17 voice-ai-agent-service's DB-backed SMS burst and timing tests
+          failed five attempts in a row on the dev Docker host (at 2, then 6 CPUs), while the same
+          commit's whole suite passed on a 6-CPU machine in 7 minutes. A repo that sets this pays
+          GitHub-hosted minutes for its Build and test, so it is a per-repo decision.
+
+          On a GitHub-hosted runner (runner.environment == 'github-hosted') the throwaway database is
+          the docker.io/pgvector/pgvector:0.8.7-pg18 container the pool image's PostgreSQL mirrors:
+          same PostgreSQL major, same pgvector, same locale, credentials and durability settings.
+        required: false
+        type: string
+        default: inboxxhq-ci-heavy
 
 # No `secrets:` block, deliberately. Every token this pipeline uses is minted from the job's own
 # OIDC identity via ci-app-token and ci-slack-notify, so a repository forwards nothing: the
@@ -125,7 +140,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     outputs:
       service: ${{ steps.id.outputs.service }}
       language: ${{ steps.id.outputs.language }}
@@ -180,7 +195,7 @@ jobs:
   docs-only:
     name: Documentation-only change
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     permissions:
       contents: read
     outputs:
@@ -246,7 +261,7 @@ jobs:
   pin-only:
     name: Dependency-pin-only change
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     permissions:
       contents: read
     outputs:
@@ -296,7 +311,7 @@ jobs:
     name: Language is supported
     needs: resolve
     runs-on: inboxxhq-ci
-    timeout-minutes: 2
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 2)
     steps:
       - name: Refuse a language this pipeline cannot build
         shell: bash
@@ -322,7 +337,7 @@ jobs:
     needs: [resolve, pin-only]
     if: needs.pin-only.outputs.pin_only != 'true'
     runs-on: inboxxhq-ci
-    timeout-minutes: 15
+    timeout-minutes: 45 # x3 for the self-hosted runners on the dev Docker host (was 15)
     steps:
       - name: Check out the service repo
         uses: actions/checkout@v4
@@ -426,8 +441,13 @@ jobs:
     # (inboxxhq-infra environments/dev/platform/arc-runners.tf). On the shared, burstable
     # inboxxhq-ci nodes voice-ai-agent's suite took ~38 min against ~27 hosted with a whole node to
     # itself, and with a busy neighbour its race step would have passed its 30-minute timeout.
-    runs-on: inboxxhq-ci-heavy
-    timeout-minutes: 45
+    # A repo may name another runner (inputs.build_test_runner); see that input for when and why.
+    runs-on: ${{ inputs.build_test_runner }}
+    timeout-minutes: 135 # x3 for the self-hosted runners on the dev Docker host (was 45)
+    # The packages this job ran without the integration tag because their tests start containers;
+    # the docker-tests job runs them with it. Empty for a deployable and for any repo with none.
+    outputs:
+      docker_packages: ${{ steps.docker.outputs.packages }}
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
       GONOSUMDB: github.com/coderaxis/*
@@ -483,20 +503,113 @@ jobs:
       # a repo that passes in one and was never checked by the other.
       - name: Start the throwaway database
         id: postgres
+        if: runner.environment != 'github-hosted'
         uses: coderaxis/ci-workflows/test-postgres@v1
         with:
           database: service_test
 
+      # A GitHub-hosted image has no PostgreSQL 18 + pgvector, and test-postgres never installs at
+      # job time. It does have a Docker daemon, so the database is the container the pool image's
+      # packages were chosen to match (test-postgres/action.yaml): the official image's initdb gives
+      # en_US.utf8 with the libc provider, `english` text search and Etc/UTC; the durability
+      # settings are the ones test-postgres turns off.
+      - name: Start the throwaway database (GitHub-hosted runner)
+        id: postgres-hosted
+        if: runner.environment == 'github-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name service-test-postgres \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=service_test \
+            -p 127.0.0.1::5432 \
+            docker.io/pgvector/pgvector:0.8.7-pg18 \
+            -c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null
+          for _ in $(seq 1 60); do
+            # pg_isready alone answers during the image's init restart; a query on the named
+            # database over TCP is only possible once the final server is up.
+            if docker exec service-test-postgres psql -h 127.0.0.1 -U postgres -d service_test -tAc 'select 1' >/dev/null 2>&1; then
+              port="$(docker port service-test-postgres 5432/tcp | head -1 | awk -F: '{print $NF}')"
+              [[ "${port}" =~ ^[0-9]+$ ]] || { echo "::error::could not read the database port"; exit 1; }
+              echo "port=${port}" >> "${GITHUB_OUTPUT}"
+              docker exec service-test-postgres psql -U postgres -d service_test -tAc \
+                "select version(), (select datcollate from pg_database where datname = current_database()), current_setting('default_text_search_config'), current_setting('TimeZone'), current_setting('fsync')"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the throwaway database did not come up in 60 s"
+          docker logs service-test-postgres | tail -50
+          exit 1
+
       - name: Point the tests at the throwaway database
         shell: bash
         env:
-          PG_PORT: ${{ steps.postgres.outputs.port }}
+          PG_PORT: ${{ steps.postgres.outputs.port || steps.postgres-hosted.outputs.port }}
         run: |
           set -euo pipefail
-          # One name, because all 41 integration test files in the fleet read this one. The tests
-          # apply their own migrations through schema.GooseUpDSN, so the database only has to exist.
+          # One name, the one every lane with a database exports and platform-testing-go's
+          # testdb.URL reads. A test that reads any other name skips here and passes silently, as
+          # authz-core-postgres's seed tests (TEST_DB_URL) and communication-service's leader and
+          # fleet tests (POSTGRES_DSN) did until 2026-11-19; testdb.URL fails instead when CI is
+          # set and this is not. The tests apply their own migrations through schema.GooseUpDSN,
+          # so the database only has to exist.
           echo "TEST_DATABASE_URL=postgres://postgres:postgres@localhost:${PG_PORT}/service_test?sslmode=disable" \
             >> "${GITHUB_ENV}"
+
+      # Before the tests rather than beside the coverage gate, because the detection step needs it,
+      # and then moved out of the workspace before any test runs. Tests that walk the repository
+      # tree skip only .git, vendor and node_modules: inboxxhq-ai-service's and
+      # voice-ai-agent's tests/privacy phone scans and ai-core's banned-import guard all read a
+      # .central/ directory in the module root, so a fixture added to scripts/ here would fail them
+      # fleet-wide the moment v1 moved. actions/checkout writes only under the workspace, hence the
+      # move. No credentials are persisted: the moved tree must carry no token.
+      - name: Check out the central checkers
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/ci-workflows
+          ref: v1
+          path: .central
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Move the central checkers out of the workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP:?}/ci-workflows-central"
+          mv .central "${RUNNER_TEMP}/ci-workflows-central"
+
+      # A test that starts its own container (testcontainers-go, dockertest) cannot run here: this
+      # pool has no Docker daemon, and such a test fails with "rootless Docker not found" rather
+      # than testing anything. notification-core's partition-worker test did exactly that on every
+      # run from 2026-10-31, when this job left GitHub-hosted runners. The packages found here run
+      # below without the integration tag, and the docker-tests job runs them with it on a hosted
+      # runner. Every other package keeps the tag, so the Postgres-only integration tests of the
+      # *-core-postgres repos stay on this pool, where test-postgres gives them all they need.
+      #
+      # Libraries only. A deployable's container tests live in tests/integration and belong to the
+      # integration job, so for a deployable this step is skipped and the run below is unchanged.
+      - name: Find the tests that need Docker
+        id: docker
+        if: needs.resolve.outputs.repo_kind != 'deployable'
+        shell: bash
+        env:
+          GO_TAGS: ${{ inputs.go_build_tags }}
+        run: |
+          set -euo pipefail
+          # A command substitution, not `mapfile < <(...)`: a failed `go list` must fail this step
+          # rather than read as "no packages", which would put them straight back on this pool.
+          found="$(bash "${RUNNER_TEMP}/ci-workflows-central/scripts/docker-test-packages.sh" "${GO_TAGS}")"
+          packages="$(paste -sd ' ' <<<"${found}")"
+          echo "packages=${packages}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${packages}" ]]; then
+            read -r -a listed <<<"${packages}"
+            {
+              echo "Tests that start containers run in **Docker-backed tests** on a GitHub-hosted runner;"
+              echo "this job runs these packages without the integration tag:"
+              printf -- '- %s\n' "${listed[@]}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
       - name: Tests with coverage
         shell: bash
@@ -509,6 +622,7 @@ jobs:
           # Through env, not inline `${{ }}`: a run block interpolates before bash sees it, so a
           # caller's string would be shell, not an argument.
           GO_TAGS: ${{ inputs.go_build_tags }}
+          DOCKER_PACKAGES: ${{ steps.docker.outputs.packages }}
         run: |
           set -euo pipefail
           # WHY THE INTEGRATION TAG IS ALWAYS ON.
@@ -524,8 +638,10 @@ jobs:
           # Unconditional, because a conditional would have to be told which repos qualify, and the
           # fleet has already shown what happens to lists that must be kept in step. For a repo with
           # no tagged files the tag selects nothing extra and the run is unchanged; every repo that
-          # does have them needs only Postgres, which is now present. tests/integration stays out of
-          # the package list below and remains the integration job's, so nothing runs twice.
+          # does have them needs only Postgres, which is now present. The exception is a package
+          # whose tagged tests start their own containers, which the step above found and which
+          # runs without the tag; see below. tests/integration stays out of the package list below
+          # and remains the integration job's, so nothing runs twice.
           #
           # A repo whose Dockerfile builds with a tag of its own adds it through go_build_tags, and
           # keeps `integration` when it does, for everything above. The default is `integration`
@@ -572,14 +688,78 @@ jobs:
           # across the set can only add covered statements to a denominator that was already this
           # list, so no repo's number falls.
           list="$(IFS=,; echo "${pkgs[*]}")"
-          # -timeout 30m, as the race step below has. Without it each test binary gets go test's
+          # -timeout 90m, as the race step below has (x3 on 2026-11-16 with the job limit: the
+          # self-hosted pool moved to the dev Docker host, ~2.7x slower per core; the job limit is
+          # 135 min, so this per-binary limit still fires first and names the package). Without it
+          # each test binary gets go test's
           # default of 10 minutes, which nobody chose: voice-ai-agent's inbound/http package (the
           # recorded search goldens against Postgres) took 461 s on a 2-vCPU hosted runner, 77% of
           # that default, and past it on a pool canary where the tests and Postgres shared 1.5
           # CPUs. The job's timeout-minutes is the budget that was actually decided.
-          GOWORK=off go test -timeout 30m -tags="${GO_TAGS}" -coverpkg="${list}" "${pkgs[@]}" \
-            -coverprofile=coverage.out -covermode=atomic
+          #
+          # THE PACKAGES WHOSE TESTS START CONTAINERS run without the integration tag: their unit
+          # tests still count toward the gate here, and their container tests run in docker-tests.
+          # With none, which is every deployable and every repo without such a test, the run is
+          # the single command it has always been.
+          read -r -a docker_pkgs <<<"${DOCKER_PACKAGES}"
+          declare -A starts_containers=()
+          for p in "${docker_pkgs[@]}"; do starts_containers["${p}"]=1; done
+          with_tag=()
+          without_tag=()
+          for p in "${pkgs[@]}"; do
+            if [[ -n "${starts_containers[${p}]:-}" ]]; then without_tag+=("${p}"); else with_tag+=("${p}"); fi
+          done
+
+          if [[ ${#without_tag[@]} -eq 0 ]]; then
+            GOWORK=off go test -timeout 90m -tags="${GO_TAGS}" -coverpkg="${list}" "${pkgs[@]}" \
+              -coverprofile=coverage.out -covermode=atomic
+          else
+            IFS=', ' read -r -a tags <<<"${GO_TAGS}"
+            kept=()
+            for t in "${tags[@]}"; do [[ "${t}" == integration ]] || kept+=("${t}"); done
+            other_tags="$(IFS=,; echo "${kept[*]}")"
+
+            # The split works only while the container tests sit behind the tag. One that does not
+            # would fail below on every run with "rootless Docker not found", so it is named here.
+            still="$(bash "${RUNNER_TEMP}/ci-workflows-central/scripts/docker-test-packages.sh" "${other_tags}")"
+            stray=()
+            for p in "${without_tag[@]}"; do
+              if grep -qxF -- "${p}" <<<"${still}"; then stray+=("${p}"); fi
+            done
+            if [[ ${#stray[@]} -gt 0 ]]; then
+              echo "::error::tests in ${stray[*]} start containers without the integration build tag, and this pool has no Docker."
+              echo "::error::Put them behind //go:build integration and the Docker-backed tests job runs them on a hosted runner."
+              exit 1
+            fi
+
+            profiles=()
+            if [[ ${#with_tag[@]} -gt 0 ]]; then
+              GOWORK=off go test -timeout 90m -tags="${GO_TAGS}" -coverpkg="${list}" "${with_tag[@]}" \
+                -coverprofile=coverage-with-tag.out -covermode=atomic
+              profiles+=(coverage-with-tag.out)
+            fi
+            GOWORK=off go test -timeout 90m -tags="${other_tags}" -coverpkg="${list}" "${without_tag[@]}" \
+              -coverprofile=coverage-without-tag.out -covermode=atomic
+            profiles+=(coverage-without-tag.out)
+            # One mode line, then every block. Blocks at the same position are summed by cover, as
+            # they already are in the profile go test writes for several packages at once.
+            { echo "mode: atomic"; tail -q -n +2 "${profiles[@]}"; } > coverage.out
+          fi
           go tool cover -func=coverage.out | tail -5
+
+          # TESTED, NOT MEASURED: package main. The filter above leaves entrypoints out of the
+          # coverage denominator, which is right, but that also kept their tests from running at
+          # all: a route-table contract test in a service's cmd/server went red on main and no
+          # pull request or main run saw it; only a release bump job running `go test ./...` did.
+          # These tests run here, with the same tags, and add nothing to the coverage figure.
+          mapfile -t mains < <(
+            GOWORK=off go list -tags="${GO_TAGS}" \
+              -f '{{if eq .Name "main"}}{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}{{end}}' ./... \
+              | grep -Ev '/tests/(contracts|integration)' || true
+          )
+          if [[ ${#mains[@]} -gt 0 ]]; then
+            GOWORK=off go test -timeout 90m -tags="${GO_TAGS}" "${mains[@]}"
+          fi
 
       - name: Race detector on the packages the repo names
         if: inputs.go_race_packages != ''
@@ -594,15 +774,7 @@ jobs:
           # list of package patterns, not shell.
           read -r -a race_pkgs <<<"${RACE_PACKAGES}"
           [[ ${#race_pkgs[@]} -gt 0 ]] || { echo "::error::go_race_packages is set but names no package"; exit 1; }
-          GOWORK=off go test -race -count=1 -timeout 30m -tags="${GO_TAGS}" "${race_pkgs[@]}"
-
-      - name: Check out the central checkers
-        uses: actions/checkout@v4
-        with:
-          repository: coderaxis/ci-workflows
-          ref: v1
-          path: .central
-          sparse-checkout: scripts
+          GOWORK=off go test -race -count=1 -timeout 90m -tags="${GO_TAGS}" "${race_pkgs[@]}"
 
       - name: Enforce the tier's coverage threshold
         shell: bash
@@ -621,7 +793,7 @@ jobs:
           # only against the target constrains nothing in a repo that is far below it: the number
           # was already failing, so it is free to keep falling. The ratchet makes the current
           # position the thing that cannot be lost, while the target stays the thing being aimed at.
-          python3 .central/scripts/check_coverage_ratchet.py --pct "${PCT}" --threshold "${THRESHOLD}"
+          python3 "${RUNNER_TEMP}/ci-workflows-central/scripts/check_coverage_ratchet.py" --pct "${PCT}" --threshold "${THRESHOLD}"
 
       - name: Contract tests when present
         shell: bash
@@ -645,8 +817,11 @@ jobs:
     name: CodeQL
     needs: [resolve, docs-only, pin-only]
     if: needs.docs-only.outputs.docs_only != 'true' && needs.resolve.outputs.language == 'go' && needs.pin-only.outputs.pin_only != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # On the self-hosted pool (the CI host) since 2026-11-19: CI runs on our own server, not on
+    # GitHub-hosted minutes. CodeQL needs no Docker daemon; the slots keep /opt/hostedtoolcache
+    # per organization, so the CodeQL bundle downloads once per host, not once per run.
+    runs-on: inboxxhq-ci
+    timeout-minutes: 90 # x3 for the self-hosted runners (was 30 on GitHub-hosted)
     permissions:
       id-token: write
       contents: read
@@ -829,7 +1004,7 @@ jobs:
       # WFC-0004 already caught on the schema job.
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 15
+    timeout-minutes: 45 # x3 for the self-hosted runners on the dev Docker host (was 15)
     steps:
       - uses: actions/checkout@v4
 
@@ -1050,7 +1225,7 @@ jobs:
     name: Required workflow lanes
     needs: resolve
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     steps:
       - uses: actions/checkout@v4
 
@@ -1186,7 +1361,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 45
+    timeout-minutes: 135 # x3 for the self-hosted runners on the dev Docker host (was 45)
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
       GONOSUMDB: github.com/coderaxis/*
@@ -1293,7 +1468,7 @@ jobs:
     permissions:
       contents: read
     runs-on: inboxxhq-ci
-    timeout-minutes: 10
+    timeout-minutes: 30 # x3 for the self-hosted runners on the dev Docker host (was 10)
     steps:
       - uses: actions/checkout@v4
 
@@ -1357,7 +1532,7 @@ jobs:
     permissions:
       contents: read
     runs-on: inboxxhq-ci
-    timeout-minutes: 10
+    timeout-minutes: 30 # x3 for the self-hosted runners on the dev Docker host (was 10)
     steps:
       - uses: actions/checkout@v4
 
@@ -1397,7 +1572,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 15
+    timeout-minutes: 45 # x3 for the self-hosted runners on the dev Docker host (was 15)
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
       GONOSUMDB: github.com/coderaxis/*
@@ -1477,7 +1652,7 @@ jobs:
     needs: [resolve, pin-only]
     if: needs.pin-only.outputs.pin_only != 'true'
     runs-on: inboxxhq-ci
-    timeout-minutes: 10
+    timeout-minutes: 30 # x3 for the self-hosted runners on the dev Docker host (was 10)
     permissions:
       contents: read
     steps:
@@ -1691,9 +1866,16 @@ jobs:
         run: |
           set -euo pipefail
           dsn="postgres://postgres:postgres@localhost:${PG_PORT}/service_test?sslmode=disable"
+          # TEST_DATABASE_URL as well: it is the name Build and test and Docker-backed tests export,
+          # and the only one platform-testing-go's testdb.URL reads, so a test that moves between
+          # lanes, or adopts the helper, finds its database under one name in every lane that has
+          # one. org-service's memberlifecycle and orgstats suites read only this name. Every
+          # tests/integration file that reads it today reads it beside DATABASE_URL or POSTGRES_DSN,
+          # and all three carry this same DSN, so no test that runs here changes what it connects to.
           {
             echo "DATABASE_URL=${dsn}"
             echo "POSTGRES_DSN=${dsn}"
+            echo "TEST_DATABASE_URL=${dsn}"
             echo "REDIS_ADDR=localhost:${REDIS_PORT}"
           } >> "${GITHUB_ENV}"
 
@@ -1791,7 +1973,7 @@ jobs:
           fi
           if [[ "${skipped}" -gt 0 ]]; then
             echo "::error::${skipped} integration test(s) called t.Skip(). Postgres, Redis and Kafka"
-            echo "are supplied by this job (DATABASE_URL/POSTGRES_DSN/REDIS_ADDR/KAFKA_BROKERS)."
+            echo "are supplied by this job (DATABASE_URL/POSTGRES_DSN/TEST_DATABASE_URL/REDIS_ADDR/KAFKA_BROKERS)."
             grep '"Action":"skip"' integration-tests.jsonl | grep '"Test":' \
               | sed 's/.*"Test":"\([^"]*\)".*/  skipped: \1/' | sort -u
             exit 1
@@ -1802,6 +1984,129 @@ jobs:
         uses: coderaxis/ci-workflows/go-build-cache/save@v1
         with:
           lane: integration
+          key: ${{ steps.gocache.outputs.key }}
+
+  # ── Docker-backed tests ─────────────────────────────────────────────────────────────────────
+  # The tests of a library that start their own containers, on a GitHub-hosted runner because they
+  # need a Docker daemon and the pools run none. Until 2026-10-31 they ran inside Build and test on
+  # ubuntu-latest; when that job moved to the pool they failed there on every run instead.
+  #
+  # Only those tests. Build and test keeps `-tags integration` on the pool for everything else,
+  # because the integration tests of the *-core-postgres repos need only Postgres, which the pool
+  # gives them: moving every integration-tagged test here would bill hosted minutes for tests that
+  # pass where they are. Build and test finds the packages from each test binary's import graph
+  # (scripts/docker-test-packages.sh), runs them without the tag so their unit tests still count
+  # toward coverage, and hands the list to this job, which runs them with it.
+  #
+  # Off unless that list is non-empty, and a job skipped by `if:` takes no runner, so a repository
+  # without such a test is billed nothing. Libraries only: a deployable's container tests live in
+  # tests/integration and are the integration job's, and its Build and test is unchanged.
+  #
+  # After Build and test rather than beside it, because the list is its output. It also means a
+  # run that is already red on a unit test does not pay for a hosted runner on top.
+  docker-tests:
+    name: Docker-backed tests
+    needs: [resolve, docs-only, build-test]
+    if: >-
+      needs.docs-only.outputs.docs_only != 'true'
+      && needs.resolve.outputs.language == 'go'
+      && needs.resolve.outputs.repo_kind != 'deployable'
+      && needs.build-test.outputs.docker_packages != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    services:
+      # The database Build and test gives every test through TEST_DATABASE_URL. These packages no
+      # longer run their tagged tests there, so a Postgres-only test that shares a package with a
+      # container test has to find it here. Same image and pin as the integration job; see there.
+      postgres:
+        image: docker.io/pgvector/pgvector:0.8.7-pg18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: service_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
+      GONOSUMDB: github.com/coderaxis/*
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Mint module-read token
+        uses: coderaxis/ci-workflows/ci-app-token@v1
+        with:
+          scope: read
+          configure-git: "true"
+
+      - name: Download private modules
+        shell: bash
+        run: GOWORK=off go mod download
+
+      - name: Restore the Go build cache
+        id: gocache
+        uses: coderaxis/ci-workflows/go-build-cache/restore@v1
+        with:
+          lane: docker-tests
+
+      - name: Point the tests at the database
+        shell: bash
+        env:
+          PG_PORT: ${{ job.services.postgres.ports['5432'] }}
+        run: |
+          set -euo pipefail
+          echo "TEST_DATABASE_URL=postgres://postgres:postgres@localhost:${PG_PORT}/service_test?sslmode=disable" \
+            >> "${GITHUB_ENV}"
+
+      # The same no-skip rule as the integration job. A container test that skips when it finds no
+      # daemon reads as a pass in the check list, and this runner has one, so a skip here means the
+      # test did not run where it was sent to run.
+      - name: Run the tests that start containers
+        shell: bash
+        env:
+          GO_TAGS: ${{ inputs.go_build_tags }}
+          DOCKER_PACKAGES: ${{ needs.build-test.outputs.docker_packages }}
+        run: |
+          set -euo pipefail
+          read -r -a pkgs <<<"${DOCKER_PACKAGES}"
+          [[ ${#pkgs[@]} -gt 0 ]] || { echo "::error::Build and test named no package"; exit 1; }
+
+          status=0
+          GOWORK=off go test -timeout 30m -count=1 -tags="${GO_TAGS}" -v -json "${pkgs[@]}" \
+            | tee docker-tests.jsonl || status="${PIPESTATUS[0]}"
+          [[ "${status}" -eq 0 ]] || { echo "::error::Docker-backed tests failed"; exit "${status}"; }
+
+          ran=$(grep -c '"Action":"run"' docker-tests.jsonl || true)
+          skipped=$(grep '"Action":"skip"' docker-tests.jsonl | grep -c '"Test":' || true)
+          echo "Docker-backed tests: executed=${ran} skipped=${skipped}"
+
+          if [[ "${ran}" -eq 0 ]]; then
+            echo "::error::no tests executed; the gate would have passed on an empty run"
+            exit 1
+          fi
+          if [[ "${skipped}" -gt 0 ]]; then
+            echo "::error::${skipped} test(s) called t.Skip() on a runner that has Docker and TEST_DATABASE_URL."
+            grep '"Action":"skip"' docker-tests.jsonl | grep '"Test":' \
+              | sed 's/.*"Test":"\([^"]*\)".*/  skipped: \1/' | sort -u
+            exit 1
+          fi
+
+      - name: Save the Go build cache
+        uses: coderaxis/ci-workflows/go-build-cache/save@v1
+        with:
+          lane: docker-tests
           key: ${{ steps.gocache.outputs.key }}
 
   # ── API contract lifecycle ──────────────────────────────────────────────────────────────────
@@ -1863,7 +2168,7 @@ jobs:
     permissions:
       contents: read
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     steps:
       - name: Check out the service repo
         uses: actions/checkout@v4
@@ -1923,7 +2228,7 @@ jobs:
     permissions:
       contents: read
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     steps:
       - name: Check out the service repo
         uses: actions/checkout@v4
@@ -2040,7 +2345,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 25
+    timeout-minutes: 75 # x3 for the self-hosted runners on the dev Docker host (was 25)
     env:
       GOPRIVATE: github.com/coderaxis/*,github.com/inboxxhq-coderaxis/*
       GONOSUMDB: github.com/coderaxis/*
@@ -2722,7 +3027,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 15
+    timeout-minutes: 45 # x3 for the self-hosted runners on the dev Docker host (was 15)
     steps:
       - uses: actions/checkout@v4
         with:
@@ -2774,7 +3079,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 15
+    timeout-minutes: 45 # x3 for the self-hosted runners on the dev Docker host (was 15)
     steps:
       # Checked out under the repository's real name, not a fixed "service" directory.
       # check_service_docs.py chooses between two required trees by looking at the name of
@@ -2825,7 +3130,7 @@ jobs:
     needs: [resolve, docs-only]
     if: github.event_name == 'pull_request' && needs.docs-only.outputs.docs_only != 'true'
     runs-on: inboxxhq-ci
-    timeout-minutes: 10
+    timeout-minutes: 30 # x3 for the self-hosted runners on the dev Docker host (was 10)
     steps:
       - uses: actions/checkout@v4
 
@@ -2910,6 +3215,8 @@ jobs:
     # skips a service that owns no tests/e2e/docker-compose.yaml; a job that does not run reports
     # `skipped`, which the failure check below tolerates. So this blocks the services that have a
     # suite and are failing it, which is the entire point, and changes nothing for the rest.
+    # `docker-tests` runs only for libraries, which this job never deploys, so here it is always
+    # `skipped`; it is listed so that a gate which one day applies to a deployable cannot be missed.
     #
     # `dependency-review` is deliberately NOT here, and its absence is not the same defect. It
     # runs only on `pull_request` while this job runs only on `push`, so on every run where
@@ -2926,7 +3233,7 @@ jobs:
     # would otherwise sail through its own aggregation.
     needs: [resolve, docs-only, supported-language, standards, build-test, codeql, events, seeding,
             schema, dockerfile, structure, vulnerabilities, sqlc, docs, contracts, contract,
-            openapi-generator, lanes, integration, e2e]
+            openapi-generator, lanes, integration, docker-tests, e2e]
     # workflow_dispatch counts alongside push, and deliberately so. A central pipeline change
     # ships by moving @v1, which raises no event in a service repo, and `gh run rerun` replays
     # the workflow definition the original run resolved rather than the current one. Without
@@ -2981,6 +3288,46 @@ jobs:
   #
   # The bot token is read from Secrets Manager against this job's OIDC identity, so no caller
   # forwards a Slack credential and there is no "unconfigured" state left to fail silently.
+  # The ONE check a calling repository requires on main. Every job above is conditional, and GitHub
+  # reports a job skipped by its `if:` - including one skipped because a job it needs failed - as a
+  # pass, so requiring any of them individually lets a red run merge. A bump PR from the release
+  # cascade auto-merges the moment its required checks are met; with none required it merged before
+  # this pipeline had even started, and a red result then meant main moved but no image was built,
+  # which nothing downstream notices (the pin it reads has already moved).
+  #
+  # The set is what `artifact` waits on - the condition under which a merge produces an image - plus
+  # pin-only, whose crash would skip the gates that read it without failing any of them. Jobs outside
+  # artifact's needs stay advisory here, as they are for the image; promoting one is its own decision.
+  # scripts/test_ci_passed_gate.py holds the two lists together.
+  #
+  # !cancelled() rather than always(): a run superseded by a newer push is cancelled and should not
+  # paint its stale commit red, while a job that failed, or was cancelled by its own timeout, must.
+  ci-passed:
+    name: CI passed
+    needs: [resolve, docs-only, pin-only, supported-language, standards, build-test, codeql, events,
+            seeding, schema, dockerfile, structure, vulnerabilities, sqlc, docs, contracts, contract,
+            openapi-generator, lanes, integration, docker-tests, e2e]
+    if: ${{ !cancelled() }}
+    runs-on: inboxxhq-ci
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
+    permissions: {}
+    steps:
+      - name: Every gate the image build waits on passed or was skipped by design
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          for name, job in sorted(needs.items()):
+              print(f"{job.get('result', '?'):>9}  {name}")
+          bad = sorted(n for n, j in needs.items() if j.get("result") in ("failure", "cancelled"))
+          if bad:
+              print("::error title=CI did not pass::" + ", ".join(f"{n} ({needs[n]['result']})" for n in bad))
+              sys.exit(1)
+          PY
+
   notify:
     name: Notify on failure
     # `e2e` was the one gate nothing watched. That mattered less while it could not block a
@@ -2996,14 +3343,14 @@ jobs:
     # inferred from a pipeline in which nothing ran.
     needs: [resolve, docs-only, supported-language, standards, build-test, codeql, events, seeding,
             schema, dockerfile, structure, lanes, vulnerabilities, sqlc, docs, contracts,
-            dependency-review, integration, e2e, contract-classification, contract,
+            dependency-review, integration, docker-tests, e2e, contract-classification, contract,
             gateway-baseline, openapi-generator, artifact]
     # always() rather than failure(): several gates above are conditional, and a plain failure()
     # does not run once any needed job has been skipped - which is the normal shape here, so the
     # alert would have fired only on the subset of runs where every gate happened to be relevant.
     if: always() && contains(needs.*.result, 'failure')
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     permissions:
       contents: read
       id-token: write

@@ -128,7 +128,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     outputs:
       service: ${{ steps.id.outputs.service }}
       repo_kind: ${{ steps.id.outputs.repo_kind }}
@@ -223,7 +223,7 @@ jobs:
     # being waited for never arrives. Raise it only against a measurement of ci.yaml duration, and
     # be aware that a rise here buys tolerance for a stuck release at a directly proportional cost
     # in runner minutes across every module in the fleet.
-    timeout-minutes: 50
+    timeout-minutes: 150 # x3 for the self-hosted runners on the dev Docker host (was 50)
     steps:
       - name: Require a successful ci.yaml run for the exact commit being released
         env:
@@ -336,7 +336,7 @@ jobs:
     name: Verify, tag, and publish
     needs: [resolve, ci-gate]
     runs-on: inboxxhq-ci
-    timeout-minutes: 30
+    timeout-minutes: 90 # x3 for the self-hosted runners on the dev Docker host (was 30)
     permissions:
       contents: write # push the tag, create the release
       id-token: write # keyless provenance
@@ -720,7 +720,18 @@ jobs:
           # sees. The same line service-ci.yaml carries (95c5ea4); the first release verified
           # on the pool (ledger-core v0.5.0, 2026-09-06) failed three route tests without it.
           KUBERNETES_SERVICE_HOST: ""
-        run: GOWORK=off go test -race -count=1 ./...
+        # `go test` kills a test binary at 10 minutes unless told otherwise, and that default, not
+        # this job's timeout-minutes, was the limit that fired: ai-core v0.54.2 died with
+        # "panic: test timed out after 10m0s" while its tests were still progressing, because the
+        # largest package takes well over 600s under -race on this pool. This is the REAL limit,
+        # deliberately under the job's timeout-minutes (90) so that it is the one that fires and
+        # names the package; losing the race to the job cap leaves a killed step with no
+        # annotation. The 15 minutes of margin cover checkout, module download, the race-detector
+        # gate and the steps after this one. Keep the two numbers tied: raise this only together
+        # with timeout-minutes above. (x3 with the job limit, 2026-11-16: the self-hosted pool
+        # moved to the dev Docker host, ~2.7x slower per core; ai-core's rolepipeline/executor
+        # took 1019.5 s under -race on ARC.)
+        run: GOWORK=off go test -race -count=1 -timeout 75m ./...
 
       - name: Create tag
         if: steps.ver.outputs.releasable == 'true' && steps.ver.outputs.createtag == 'true'
@@ -877,7 +888,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: inboxxhq-ci
-    timeout-minutes: 30
+    timeout-minutes: 90 # x3 for the self-hosted runners on the dev Docker host (was 30)
     strategy:
       # One unreachable consumer must not suppress the others; a partial fan-out is recoverable
       # by re-running, whereas a cancelled fan-out hides which targets were reached.
@@ -946,7 +957,7 @@ jobs:
     needs: [resolve, release, bump-consumers]
     if: always() && needs.release.outputs.releasable == 'true'
     runs-on: inboxxhq-ci
-    timeout-minutes: 5
+    timeout-minutes: 15 # x3 for the self-hosted runners on the dev Docker host (was 5)
     steps:
       - name: Fail if any consumer was not bumped
         env:
