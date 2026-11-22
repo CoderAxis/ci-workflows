@@ -37,7 +37,9 @@ concurrency:
   # `head_ref || ref` collapses a pull request's push and pull_request events onto one group, so a
   # branch has a single in-flight run rather than two racing ones.
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+  # Never on main: release.yaml moves v1 only once CI passed for that exact commit, so a main run
+  # cancelled by the next merge left its commit unreleasable until someone re-ran it by hand.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # ── central scripts (was central-scripts-guard.yaml) ────────────────────────────────────────
@@ -311,6 +313,11 @@ jobs:
       # green and then build no image. The verdict half runs the job's own script.
       - name: The required CI passed gate and its wiring
         run: python3 scripts/test_ci_passed_gate.py
+
+      # A run on main is the verdict a release reads, so no concurrency block may cancel one: the
+      # next merge used to cancel it and leave its commit with no verdict and no release.
+      - name: No workflow cancels a run on main
+        run: python3 scripts/test_concurrency_policy.py
 
   # ── container tests (scripts/docker-test-packages.sh) ───────────────────────────────────────
   # Build and test runs on pools without Docker and sends the packages whose tests start

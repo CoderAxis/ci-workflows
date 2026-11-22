@@ -319,6 +319,12 @@ needs lists together and runs the job's verdict script.
 Renaming the job or the caller's job id changes the context every ruleset requires and makes those
 `main` branches unmergeable until the rulesets follow.
 
+A newer push cancels a pull request's or a branch's run, never `main`'s. The run on `main` is the
+verdict `module-release.yaml` reads, and a cancelled one left its commit with no verdict and no
+release. `main`'s runs queue in commit order instead, so an older image is never pinned after a newer
+one. [`scripts/test_concurrency_policy.py`](scripts/test_concurrency_policy.py) holds every workflow
+here to that.
+
 ## UUID version policy (UUIDv7 everywhere, v5 only where it is declared)
 
 Policy SSOT (in `coderaxis/microservices`): `ADR-0071` (outbox `event_id` /
@@ -685,8 +691,8 @@ did, down to the wording of every message. What an extra set changes:
   refuses to move `@v1` over it either way. The same rule makes each step reach the fleet before the
   next one can be released. A step that has landed but is not released yet counts toward the next
   change, so a promote merged right behind its stage stays red. Wait for the stage's release, then
-  re-run CI and Release for the promote commit. A fast second merge can cancel the first commit's CI
-  run (`cancel-in-progress`), in which case re-run that commit's CI and Release first. Only a clone
+  re-run CI and Release for the promote commit. A run on `main` is never cancelled by the next
+  merge (it queues behind it), so every merged commit gets its own CI verdict and Release. Only a clone
   with no release tag in its history, such as a test fixture, falls back to the event:
   `pull_request.base.sha`, a push's before-SHA, or the merge base with `main`. A base that lacks a
   usable artifact is held against the last commit before it that had one, never treated as new. A
