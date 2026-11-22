@@ -144,6 +144,8 @@ job = wf["jobs"]["update"]
 expect("github.event_name == 'push'" in job.get("if", "") and "default_branch" in job.get("if", ""),
        "runs only on a push to the default branch")
 expect((job.get("permissions") or {}).get("id-token") == "write", "the job can prove its identity to mint")
+expect(job.get("continue-on-error") is True,
+       "a failed update never fails the caller's ci.yaml run, which a release requires to succeed")
 steps = job["steps"]
 mint = next(s for s in steps if str(s.get("uses", "")).startswith("coderaxis/ci-workflows/ci-app-token@"))
 expect(mint["with"].get("scope") == "publish",
