@@ -939,6 +939,12 @@ jobs:
       - name: bump-module-pin steps (supersede rule, auto-merge warning)
         run: python3 scripts/test_bump_module_pin.py
 
+      # keep-prs-fresh updates every auto-merge PR left BEHIND by a merge, so a strict ruleset does
+      # not strand it. The script is run against a fake gh: which PRs it updates, that each update
+      # is pinned to the head it read, which GitHub refusals are notices and which fail the run.
+      - name: keep-prs-fresh (which PRs are updated, and how)
+        run: python3 scripts/test_keep_prs_fresh.py
+
       # The composite action is what the workflows actually call, so an output added to the script
       # but not surfaced by the action resolves to an empty string at runtime - and an empty
       # consumers list is a fan-out that notifies nobody, silently.
