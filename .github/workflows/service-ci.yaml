@@ -135,9 +135,19 @@ on:
 permissions:
   contents: read
 
+# A newer push cancels only a branch's or a pull request's run. main's run is never cancelled:
+# it is the verdict a release reads (module-release.yaml refuses a commit whose CI did not pass)
+# and the run that builds the image, so a cancelled main run leaves that commit with no verdict,
+# no release and no image. ai-core, 2026-11-22: #616 merged while #614's main run was going,
+# the cancel left #614 "CI not passed", and its release never tagged.
+#
+# main's runs still share the group, so they queue and finish in commit order, and an older
+# commit's image can never be pinned after a newer one's. GitHub keeps one waiting run per group,
+# so a third push while one runs and one waits replaces the waiting one; the newest commit then
+# carries both changes. scripts/test_concurrency_policy.py holds every workflow here to this.
 concurrency:
   group: service-ci-${{ github.repository }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # The pool's runner image ships Debian's python, which refuses `pip install` into the system
 # site-packages (PEP 668, "externally-managed-environment"). The lanes install small pure-python
