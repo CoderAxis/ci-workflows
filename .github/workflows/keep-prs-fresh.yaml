@@ -1,0 +1,87 @@
+name: Keep PRs fresh (reusable)
+
+# Brings every open pull request that is waiting to auto-merge up to date with the default branch,
+# each time the default branch moves.
+#
+# WHY. A repository whose ruleset requires branches to be up to date (strict required checks) only
+# merges a PR whose checks ran on top of the current main, which is what stops two PRs that are each
+# green on their own base from breaking main together (ai-core #614 + #616, 2026-11-22). The cost
+# is that every merge leaves the other open PRs BEHIND, and a PR set to auto-merge then waits
+# forever: nothing updates it, so its checks never re-run, so it never merges. This updates it.
+#
+# WHICH PRS. Only those with auto-merge enabled: someone has already said "merge this when it is
+# green", so refreshing it is acting on that. A PR without auto-merge is left to its author, who
+# may not want CI spent on it yet. A PR whose branch conflicts with main (DIRTY) cannot be updated
+# by anyone but a person; it is named in a notice and left alone.
+#
+# WHY THE RELEASE BOT, NOT GITHUB_TOKEN. A push made with the run's own token starts no workflow,
+# so a branch updated with it would sit with its required checks "expected" and never reported:
+# BLOCKED instead of BEHIND, and no closer to merging. A GitHub App's token does start them. The
+# token is minted for the calling repository alone, and the release bot admits a job only by its
+# job_workflow_ref, which names the file a job is DEFINED in at the ref it was called with: a job
+# here called at v1 is "keep-prs-fresh.yaml@refs/tags/v1", the exact string inboxxhq-infra's
+# environments/management/ci-identity must list. Renaming this file revokes that grant.
+#
+# A consumer repository calls it from a thin caller of the same name:
+#
+#   on:
+#     push:
+#       branches: [main]
+#   jobs:
+#     keep-prs-fresh:
+#       uses: coderaxis/ci-workflows/.github/workflows/keep-prs-fresh.yaml@v1
+#       permissions:
+#         contents: read
+#         id-token: write
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        description: "Runner label. The job makes a few API calls and nothing else."
+        required: false
+        type: string
+        default: inboxxhq-ci
+
+permissions: {}
+
+# Queued, never cancelled: a run takes seconds, and the run for the newest push always comes last,
+# so every PR is judged against the newest main. scripts/test_concurrency_policy.py holds this.
+concurrency:
+  group: keep-prs-fresh-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update auto-merge PRs that are behind
+    # Only a push to the default branch moves what the PRs are behind. A dispatch or a run on any
+    # other ref has nothing to refresh them against.
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # the OIDC proof ci-app-token trades for the release bot's key
+    steps:
+      - name: Checkout the central scripts
+        uses: actions/checkout@v4
+        with:
+          repository: coderaxis/ci-workflows
+          ref: v1
+          path: .keep-prs-fresh-central
+          sparse-checkout: scripts
+
+      - name: Mint a token whose pushes start the PRs' CI
+        id: token
+        uses: coderaxis/ci-workflows/ci-app-token@v1
+        with:
+          scope: publish
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Update every auto-merge PR that is behind
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: python3 .keep-prs-fresh-central/scripts/keep_prs_fresh.py
