@@ -29,7 +29,7 @@ version that fixes all of its advisories, run by bump-module-pin like any releas
 unit and contract suites, pin policy, auto-merge once green, a major move withheld for a person).
 Reported, not bumped: an advisory with no fix, a fix that exists only as a pseudo-version or a
 pre-release, and a module a replace directive redirects (moving its require would change nothing).
-A repository whose bump PR is already open and was updated within --fresh-hours is not re-planned,
+A repository whose fix branch already exists and was pushed within --fresh-hours is not re-planned,
 so an open fix is not rebuilt every six hours while its CI runs.
 
 These are PRs of their own, not companions of the same repository's platform bump: a platform
@@ -46,6 +46,8 @@ import json
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -271,14 +273,27 @@ def row_for(name: str, node: dict, ref: tuple[str, str], scan: dict, requires: l
 
 
 def open_bump(api, ref: tuple[str, str], branch: str, fresh: timedelta, now: datetime) -> str | None:
-    """The open PR already carrying this exact bump, if it was touched recently enough to leave."""
-    for pr in api.get(ref[0], f"/repos/{ref[0]}/{ref[1]}/pulls?state=open&per_page=100") or []:
-        if (pr.get("head") or {}).get("ref") != branch:
-            continue
-        updated = datetime.fromisoformat(pr["updated_at"].replace("Z", "+00:00"))
-        if now - updated < fresh:
-            return f"#{pr['number']}"
-    return None
+    """The fix branch already carrying this exact bump, if it was pushed recently enough to leave.
+
+    Read from the branch, not the pull request list: the planner's token is the read scope, which
+    has contents but not pull requests (the first dispatch, 2026-11-24, failed 403 on /pulls).
+    bump-module-pin names the branch after the bump and deletes it when the PR merges or has
+    nothing to add, so a live branch is an open fix, and its tip's commit date is when it was
+    last rebuilt. A branch that cannot be read holds nothing back: the bump job's own guard and
+    supersede steps still refuse a duplicate.
+    """
+    try:
+        tip = api.get(ref[0], f"/repos/{ref[0]}/{ref[1]}/commits/{urllib.parse.quote(branch, safe='')}")
+    except urllib.error.HTTPError:
+        return None
+    if not tip:
+        return None
+    pushed = (((tip.get("commit") or {}).get("committer") or {}).get("date") or "")
+    try:
+        when = datetime.fromisoformat(pushed.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return f"branch {branch}" if now - when < fresh else None
 
 
 def plan(graph: dict, api, govulncheck: str, only: set[str], fresh: timedelta,

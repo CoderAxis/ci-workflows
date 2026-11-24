@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,8 +28,9 @@ class StubApi:
         if owner.lower() not in ("coderaxis", "inboxxhq-coderaxis"):
             raise RuntimeError(f"no token for owner {owner!r}; mint one with extra-owners")
         repo = path.split("/")[3]
-        if "/pulls?" in path:
-            return self.pulls.get(repo, [])
+        if "/commits/" in path:
+            branch = urllib.parse.unquote(path.split("/commits/", 1)[1])
+            return self.pulls.get((repo, branch))
         if "/contents/" in path:
             return self.files.get(f"{repo}/{path.split('/contents/', 1)[1].split('?')[0]}")
         return None
@@ -93,8 +95,7 @@ FILES = {
     "open-service/go.mod": ("module github.com/inboxxhq-coderaxis/open-service\n\ngo 1.26.11\n\n"
                             "require go.opentelemetry.io/otel v1.46.0\n"),
 }
-PULLS = {"open-service": [{"number": 41, "head": {"ref": "chore/bump-otel-v1.47.0"},
-                           "updated_at": "2026-11-24T01:00:00Z"}]}
+PULLS = {("open-service", "chore/bump-otel-v1.47.0"): {"commit": {"committer": {"date": "2026-11-24T01:00:00Z"}}}}
 
 
 def main() -> int:
@@ -147,7 +148,7 @@ def main() -> int:
     expect(any("replaced" in u and "replace directive" in u for u in res["unfixable"]) is False,
            "a replaced module with no advisory is not reported")
     expect("clean-service" not in rows, "a clean repository opens nothing")
-    expect("open-service" not in rows and any("#41" in h for h in res["held"]), "a fresh open fix PR is left alone")
+    expect("open-service" not in rows and any("chore/bump-otel-v1.47.0" in h for h in res["held"]), "a fresh open fix PR is left alone")
     res2 = vr.plan(GRAPH, StubApi(FILES, PULLS), "govulncheck", set(), timedelta(hours=1), NOW)
     expect(any(r["repository"].endswith("/open-service") for r in res2["rows"]), "a stale open fix PR is re-planned")
     expect(any("Skentra" in u for u in res["unscanned"]), "Skentra is excluded, and says so")
