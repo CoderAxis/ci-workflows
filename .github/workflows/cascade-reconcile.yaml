@@ -16,6 +16,14 @@ name: Cascade reconcile (reusable)
 # Gentle by design: the bump jobs run on the same self-hosted pool as every service's CI, so the
 # matrix is capped (max_parallel) and a run never cancels another. A consumer whose bump fails its
 # gates is retried on the next run; it fails loudly here until the core or the consumer is fixed.
+#
+# The same run also repairs the rest of every go.mod: scripts/vuln_reconcile.py looks the fleet's
+# third-party module versions and Go versions up in the Go vulnerability database (one query, no
+# clone, no build) and plans one bump per repository that moves each vulnerable module to the
+# lowest release fixing it. Those bumps run through the same bump job and bump-module-pin, so the
+# release bot's reach does not grow: the same writes, to the same consumers. Before this, a new
+# advisory turned service-ci's vulnerabilities job red, the image was never built, and every
+# repository waited for a person to bump it by hand (2026-10-09, 10-29, 11-07, 11-23).
 
 on:
   workflow_call:
@@ -55,6 +63,11 @@ on:
         required: false
         type: boolean
         default: false
+      fix_vulnerabilities:
+        description: "Also plan a bump for every module or Go version with a known, released vulnerability fix."
+        required: false
+        type: boolean
+        default: true
 
 permissions: {}
 
@@ -66,13 +79,13 @@ jobs:
   plan:
     name: Plan - who is behind
     runs-on: inboxxhq-ci
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       id-token: write
     outputs:
-      bumps: ${{ steps.plan.outputs.bumps }}
-      frontends: ${{ steps.plan.outputs.frontends }}
+      bumps: ${{ steps.merge.outputs.bumps }}
+      frontends: ${{ steps.merge.outputs.frontends }}
     steps:
       - name: Mint read tokens for the catalog and every consumer owner
         id: read
@@ -111,9 +124,50 @@ jobs:
             --graph .reconcile-catalog/generated/artifact-graph/artifact-graph.generated.json \
             --tokens "${TOKENS_FILE}" --out "${out}" --only "${ONLY}"
           cat "${out}/summary.md" >> "${GITHUB_STEP_SUMMARY}"
+          echo '[]' > "${out}/vulns.json"
+          echo "out=${out}" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/setup-go@v5
+        if: ${{ inputs.fix_vulnerabilities }}
+        with:
+          go-version: stable
+          cache: false
+
+      # The same scanner service-ci's vulnerabilities job installs, so both read one database the
+      # same way. Query mode needs no module source: the planner hands it module@version strings.
+      - name: Plan vulnerability fixes
+        if: ${{ inputs.fix_vulnerabilities }}
+        env:
+          TOKENS_FILE: ${{ steps.read.outputs.tokens-file }}
+          ONLY: ${{ inputs.only }}
+          OUT: ${{ steps.plan.outputs.out }}
+        run: |
+          set -euo pipefail
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          python3 .reconcile-central/scripts/vuln_reconcile.py \
+            --graph .reconcile-catalog/generated/artifact-graph/artifact-graph.generated.json \
+            --tokens "${TOKENS_FILE}" --out "${OUT}" --only "${ONLY}" \
+            --govulncheck "$(go env GOPATH)/bin/govulncheck"
+          cat "${OUT}/vulns.md" >> "${GITHUB_STEP_SUMMARY}"
+
+      # One matrix for both, because a matrix cannot be fed from two outputs. GitHub refuses a
+      # matrix of more than 256 jobs outright, which would bump nothing at all, so a run takes the
+      # first 250 rows (platform bumps first) and the next run, six hours later, takes the rest.
+      - name: Hand the bumps to the bump job
+        id: merge
+        env:
+          OUT: ${{ steps.plan.outputs.out }}
+        run: |
+          set -euo pipefail
+          all="$(jq -c -s 'add' "${OUT}/bumps.json" "${OUT}/vulns.json")"
+          n="$(jq length <<<"${all}")"
+          if (( n > 250 )); then
+            echo "::warning::${n} bumps planned; this run takes 250 and the next run the rest"
+            all="$(jq -c '.[0:250]' <<<"${all}")"
+          fi
           {
-            echo "bumps=$(cat "${out}/bumps.json")"
-            echo "frontends=$(cat "${out}/frontends.json")"
+            echo "bumps=${all}"
+            echo "frontends=$(cat "${OUT}/frontends.json")"
           } >> "${GITHUB_OUTPUT}"
 
   bump:
@@ -168,6 +222,7 @@ jobs:
           service: ${{ matrix.service }}
           repo-kind: ${{ matrix.kind }}
           required-modules: ${{ toJSON(matrix.requires) }}
+          note: ${{ matrix.note }}
 
   frontends:
     name: Re-announce frontend-core to ${{ matrix.name }}
@@ -230,8 +285,8 @@ jobs:
           echo "plan=${PLAN} bump=${BUMP} frontends=${FRONTENDS}"
           for r in "${PLAN}" "${BUMP}" "${FRONTENDS}"; do
             if [[ "${r}" != "success" && "${r}" != "skipped" ]]; then
-              echo "::error::at least one consumer is still behind the newest platform release;" \
-                   "the failed job names it and its gate output says why"
+              echo "::error::at least one consumer is still behind the newest platform release or" \
+                   "still pins a vulnerable module; the failed job names it and its gate output says why"
               exit 1
             fi
           done

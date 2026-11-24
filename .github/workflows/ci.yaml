@@ -932,6 +932,9 @@ jobs:
       - name: Cascade reconcile planner tests
         run: python3 scripts/test_cascade_reconcile.py
 
+      - name: Vulnerability reconcile planner tests
+        run: python3 scripts/test_vuln_reconcile.py
+
       # bump-module-pin closes only the open bump PRs it actually passes, and opens nothing when
       # an open one already moves a module further (2026-11-20: a reconcile planned at an older
       # tag closed the newer bump and left the next one in conflict). The guard and supersede
