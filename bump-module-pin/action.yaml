@@ -55,6 +55,12 @@ inputs:
       gated, listed in the PR body and counted by the tier rule exactly like it.
     required: false
     default: ""
+  note:
+    description: >-
+      Markdown appended to the PR body, saying why this bump exists when the version alone does not:
+      the cascade reconcile's vulnerability fixes name the advisories each move closes.
+    required: false
+    default: ""
 
 outputs:
   skipped:
@@ -147,6 +153,15 @@ runs:
       with:
         go-version-file: ${{ inputs.target-path }}/go.mod
         cache: false
+
+    # setup-go installs the version go.mod names TODAY. A bump that raises the go line (the
+    # vulnerability reconcile moves it to the Go release fixing a standard library advisory) needs
+    # the newer toolchain for every step after `go get`, so the go command must be allowed to fetch
+    # it; without this, a GOTOOLCHAIN=local environment fails the build with "go.mod requires go >=".
+    - name: Let go fetch the toolchain a raised go line needs
+      if: steps.guard.outputs.skip != 'true'
+      shell: bash
+      run: echo "GOTOOLCHAIN=auto" >> "${GITHUB_ENV}"
 
     - name: Mint module-read token
       id: modauth
@@ -422,6 +437,8 @@ runs:
           policy holds. Patch and minor bumps, 0.x minors included, auto-merge once required
           checks are green; only a move across a major version (v0 to v1 and up) is labelled for
           review instead.
+
+          ${{ inputs.note }}
 
     # Auto-merge is what makes this automation rather than a queue of PRs nobody notices. It is
     # `--auto`, so GitHub still waits for every required check: the merge happens because the
