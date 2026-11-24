@@ -389,10 +389,14 @@ runs:
         # aborted the bump for every consumer that publishes no spec — schema and library repos,
         # which is most of the graph. The regeneration step above already tests for the file;
         # this makes the commit agree with it instead of assuming the deployable case.
+        # go.sum likewise: a module with no requirements has none, and the vulnerability
+        # reconcile bumps such a module's go line (stdlib advisories), which `go get go@X`
+        # does without writing a go.sum (inboxxhq-architecture-check, cascade-reconcile
+        # 2026-11-24: "fatal: pathspec 'go.sum' did not match any files").
         {
           echo "list<<PATHS_EOF"
           echo "go.mod"
-          echo "go.sum"
+          if [[ -f go.sum ]]; then echo "go.sum"; fi
           if [[ -f docs/openapi.json ]]; then echo "docs/openapi.json"; fi
           echo "PATHS_EOF"
         } >> "${GITHUB_OUTPUT}"
